@@ -1,9 +1,13 @@
+pub mod asset_generation;
 pub mod desktop;
 pub mod filesystem;
 pub mod policy;
 pub mod shell;
 
 use crate::agent::types::{ActRequest, AppEvent, ToolAction, ToolCall, ToolResult};
+use crate::config::AppConfig;
+use crate::tools::asset_generation::GenerateImageAssetArgs;
+use crate::tools::desktop::{HotkeyArgs, MouseClickArgs, TypeTextArgs};
 use crate::tools::filesystem::{
     ApplyPatchArgs, EditFileArgs, GrepArgs, ListFilesArgs, ReadFileArgs, WriteFileArgs,
 };
@@ -18,6 +22,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct ToolDispatcher {
     workspace: Option<Workspace>,
+    config: AppConfig,
     events: Sender<AppEvent>,
     approvals: ApprovalMap,
     cancel: Arc<AtomicBool>,
@@ -27,6 +32,7 @@ pub struct ToolDispatcher {
 impl ToolDispatcher {
     pub fn new(
         workspace: Option<Workspace>,
+        config: AppConfig,
         events: Sender<AppEvent>,
         approvals: ApprovalMap,
         cancel: Arc<AtomicBool>,
@@ -34,6 +40,7 @@ impl ToolDispatcher {
     ) -> Self {
         Self {
             workspace,
+            config,
             events,
             approvals,
             cancel,
@@ -69,7 +76,26 @@ impl ToolDispatcher {
         };
 
         match request.action {
-            ToolAction::Screenshot => desktop::screenshot(),
+            ToolAction::Screenshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                desktop::screenshot(workspace, &self.events, &self.approvals)
+            }
+            ToolAction::MouseClick => {
+                match serde_json::from_value::<MouseClickArgs>(request.args) {
+                    Ok(args) => desktop::mouse_click(args, &self.events, &self.approvals),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::TypeText => match serde_json::from_value::<TypeTextArgs>(request.args) {
+                Ok(args) => desktop::type_text(args, &self.events, &self.approvals),
+                Err(err) => ToolResult::error(err.to_string()),
+            },
+            ToolAction::Hotkey => match serde_json::from_value::<HotkeyArgs>(request.args) {
+                Ok(args) => desktop::hotkey(args, &self.events, &self.approvals),
+                Err(err) => ToolResult::error(err.to_string()),
+            },
             ToolAction::ListFiles => {
                 let Some(workspace) = &self.workspace else {
                     return ToolResult::error("No workspace selected");
@@ -139,6 +165,24 @@ impl ToolDispatcher {
                 };
                 match serde_json::from_value::<GrepArgs>(request.args) {
                     Ok(args) => filesystem::grep(workspace, args),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::GenerateImageAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<GenerateImageAssetArgs>(request.args) {
+                    Ok(args) => {
+                        asset_generation::generate_image_asset(
+                            workspace,
+                            args,
+                            &self.config,
+                            &self.events,
+                            &self.approvals,
+                        )
+                        .await
+                    }
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }

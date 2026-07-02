@@ -1,5 +1,8 @@
+use crate::agent::models::OPENAI_PROVIDER_ID;
+use crate::agent::provider::{ModelProvider, ProviderInput, ProviderTurn};
 use crate::agent::types::{AppEvent, ToolCall};
 use anyhow::Context;
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -15,6 +18,15 @@ pub struct OpenAiClient {
 pub enum ResponseInput {
     Text(String),
     ToolOutputs(Vec<Value>),
+}
+
+impl From<ProviderInput> for ResponseInput {
+    fn from(input: ProviderInput) -> Self {
+        match input {
+            ProviderInput::Text(text) => Self::Text(text),
+            ProviderInput::ToolOutputs(outputs) => Self::ToolOutputs(outputs),
+        }
+    }
 }
 
 impl OpenAiClient {
@@ -150,6 +162,37 @@ impl OpenAiClient {
         Ok(StreamedOpenAiResponse {
             response,
             emitted_text,
+        })
+    }
+}
+
+#[async_trait]
+impl ModelProvider for OpenAiClient {
+    fn id(&self) -> &'static str {
+        OPENAI_PROVIDER_ID
+    }
+
+    fn display_name(&self) -> &'static str {
+        "OpenAI Responses"
+    }
+
+    async fn stream_turn(
+        &self,
+        instructions: &str,
+        input: ProviderInput,
+        previous_response_id: Option<&str>,
+        events: &Sender<AppEvent>,
+    ) -> anyhow::Result<ProviderTurn> {
+        let streamed = self
+            .stream_response(instructions, input.into(), previous_response_id, events)
+            .await?;
+        let response = streamed.response;
+
+        Ok(ProviderTurn {
+            response_id: response.id.clone(),
+            text_chunks: response.text_chunks(),
+            tool_calls: response.tool_calls(),
+            emitted_text: streamed.emitted_text,
         })
     }
 }
@@ -298,6 +341,47 @@ pub fn act_tool_schema() -> Value {
                 {
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["generate_image_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "Prompt for a game/app image asset."
+                                },
+                                "provider": {
+                                    "type": "string",
+                                    "enum": [
+                                        "openai-image",
+                                        "gemini-image",
+                                        "stability-image",
+                                        "replicate-image"
+                                    ],
+                                    "description": "Optional image provider. Defaults to the first configured image provider."
+                                },
+                                "model": {
+                                    "type": "string",
+                                    "description": "Optional provider model override."
+                                },
+                                "aspect_ratio": {
+                                    "type": "string",
+                                    "enum": ["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"]
+                                },
+                                "image_size": {
+                                    "type": "string",
+                                    "enum": ["0.5K", "1K", "2K", "4K"]
+                                }
+                            },
+                            "required": ["prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
                         "action": { "type": "string", "enum": ["screenshot"] },
                         "args": {
                             "type": "object",
@@ -307,10 +391,171 @@ pub fn act_tool_schema() -> Value {
                     },
                     "required": ["action", "args"],
                     "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["mouse_click"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "x": {
+                                    "type": "integer",
+                                    "description": "Absolute desktop x coordinate in pixels."
+                                },
+                                "y": {
+                                    "type": "integer",
+                                    "description": "Absolute desktop y coordinate in pixels."
+                                },
+                                "button": {
+                                    "type": "string",
+                                    "enum": ["left", "right", "middle"]
+                                },
+                                "clicks": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 3
+                                }
+                            },
+                            "required": ["x", "y"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["type_text"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "text": {
+                                    "type": "string",
+                                    "description": "Text to type into the active desktop window."
+                                }
+                            },
+                            "required": ["text"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["hotkey"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "keys": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 1,
+                                    "maxItems": 6,
+                                    "description": "Keys such as ctrl, shift, alt, win, enter, escape, tab, f5, a, 1, arrowleft."
+                                }
+                            },
+                            "required": ["keys"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
                 }
             ]
         },
         "strict": false
+    })
+}
+
+pub fn act_function_schema() -> Value {
+    json!({
+        "name": "act",
+        "description": "Execute one local workspace, terminal, or desktop action. Paths must be relative to the selected workspace. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
+        "parameters": act_compatible_parameters_schema()
+    })
+}
+
+pub fn chat_completion_act_tool_schema() -> Value {
+    json!({
+        "type": "function",
+        "function": act_function_schema()
+    })
+}
+
+pub fn anthropic_act_tool_schema() -> Value {
+    json!({
+        "name": "act",
+        "description": "Execute one local workspace, terminal, or desktop action. Paths must be relative to the selected workspace. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
+        "input_schema": act_compatible_parameters_schema()
+    })
+}
+
+pub fn gemini_act_function_declaration() -> Value {
+    json!({
+        "name": "act",
+        "description": "Execute one local workspace, terminal, or desktop action. Paths must be relative to the selected workspace. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "action": {
+                    "type": "STRING",
+                    "enum": [
+                        "list_files",
+                        "read_file",
+                        "write_file",
+                        "edit_file",
+                        "apply_patch",
+                        "grep",
+                        "run_shell",
+                        "generate_image_asset",
+                        "screenshot",
+                        "mouse_click",
+                        "type_text",
+                        "hotkey"
+                    ]
+                },
+                "args": {
+                    "type": "OBJECT",
+                    "description": "Arguments for the selected action. Use the action-specific fields expected by the local Leetcode tool dispatcher."
+                }
+            },
+            "required": ["action", "args"]
+        }
+    })
+}
+
+fn act_compatible_parameters_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": [
+                    "list_files",
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "apply_patch",
+                    "grep",
+                    "run_shell",
+                    "generate_image_asset",
+                    "screenshot",
+                    "mouse_click",
+                    "type_text",
+                    "hotkey"
+                ]
+            },
+            "args": {
+                "type": "object",
+                "description": "Arguments for the selected action. Use the action-specific fields expected by the local Leetcode tool dispatcher."
+            }
+        },
+        "required": ["action", "args"],
+        "additionalProperties": false
     })
 }
 
@@ -508,5 +753,20 @@ mod tests {
     fn finds_crlf_or_lf_sse_boundary() {
         assert_eq!(find_sse_event_boundary("a\r\n\r\nb"), Some(1));
         assert_eq!(find_sse_event_boundary("a\n\nb"), Some(1));
+    }
+
+    #[test]
+    fn act_schemas_expose_asset_and_desktop_actions() {
+        let openai_schema = act_tool_schema().to_string();
+        let compatible_schema = act_compatible_parameters_schema().to_string();
+        let gemini_schema = gemini_act_function_declaration().to_string();
+
+        for schema in [openai_schema, compatible_schema, gemini_schema] {
+            assert!(schema.contains("generate_image_asset"));
+            assert!(schema.contains("screenshot"));
+            assert!(schema.contains("mouse_click"));
+            assert!(schema.contains("type_text"));
+            assert!(schema.contains("hotkey"));
+        }
     }
 }

@@ -1,5 +1,6 @@
 mod agent;
 mod app;
+mod assets;
 mod config;
 mod tools;
 mod workspace;

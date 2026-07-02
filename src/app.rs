@@ -1,5 +1,13 @@
+use crate::agent::models::{
+    models_for_provider, provider_name, provider_specs, GEMINI_PROVIDER_ID, OPENAI_PROVIDER_ID,
+};
 use crate::agent::types::{AppEvent, ChatLine, ChatRole, ToolLogLine};
 use crate::agent::{run_user_turn, AgentState};
+use crate::assets::{
+    absolute_output_path, default_image_model, image_provider_env_var, image_provider_name,
+    image_provider_specs, is_image_path, load_jobs, run_image_job, AssetEvent, AssetJob,
+    AssetStatus, ImageAssetRequest, GEMINI_IMAGE_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID,
+};
 use crate::config::{append_journal, AppConfig};
 use crate::tools::policy::ApprovalMap;
 use crate::workspace::Workspace;
@@ -13,6 +21,7 @@ use std::thread;
 
 pub struct LeetcodeApp {
     config: AppConfig,
+    provider_input: String,
     api_key_input: String,
     model_input: String,
     workspace: Option<Workspace>,
@@ -26,6 +35,17 @@ pub struct LeetcodeApp {
     chat: Vec<ChatLine>,
     tool_log: Vec<ToolLogLine>,
     git_summary: String,
+    asset_provider_input: String,
+    asset_api_key_input: String,
+    asset_model_input: String,
+    asset_prompt: String,
+    asset_aspect_ratio: String,
+    asset_image_size: String,
+    asset_jobs: Vec<AssetJob>,
+    asset_events_rx: Option<Receiver<AssetEvent>>,
+    asset_is_running: bool,
+    asset_status: String,
+    asset_previews: HashMap<String, egui::TextureHandle>,
     events_rx: Option<Receiver<AppEvent>>,
     is_running: bool,
     cancel: Option<Arc<AtomicBool>>,
@@ -52,13 +72,19 @@ impl LeetcodeApp {
             .as_ref()
             .map(|workspace| workspace.ui_file_rows(600))
             .unwrap_or_default();
+        let asset_jobs = workspace.as_ref().map(load_jobs).unwrap_or_default();
 
         let api_key_input = config.api_key.clone();
         let model_input = config.model.clone();
+        let provider_input = config.provider.clone();
+        let asset_provider_input = OPENAI_IMAGE_PROVIDER_ID.to_string();
+        let asset_api_key_input = image_api_key_from_config(&config, &asset_provider_input);
+        let asset_model_input = image_model_from_config(&config, &asset_provider_input);
         let approvals = Arc::new(Mutex::new(HashMap::new()));
 
         Self {
             config,
+            provider_input,
             api_key_input,
             model_input,
             workspace,
@@ -74,6 +100,17 @@ impl LeetcodeApp {
             )],
             tool_log: Vec::new(),
             git_summary: String::new(),
+            asset_provider_input,
+            asset_api_key_input,
+            asset_model_input,
+            asset_prompt: String::new(),
+            asset_aspect_ratio: "1:1".to_string(),
+            asset_image_size: "1K".to_string(),
+            asset_jobs,
+            asset_events_rx: None,
+            asset_is_running: false,
+            asset_status: String::new(),
+            asset_previews: HashMap::new(),
             events_rx: None,
             is_running: false,
             cancel: None,
@@ -90,9 +127,13 @@ impl LeetcodeApp {
 
         match Workspace::new(path.clone()) {
             Ok(workspace) => {
+                self.sync_config_from_inputs();
+                self.sync_asset_provider_settings();
                 self.config.last_workspace = Some(path);
                 self.workspace = Some(workspace);
                 self.refresh_file_rows();
+                self.asset_jobs = self.workspace.as_ref().map(load_jobs).unwrap_or_default();
+                self.asset_previews.clear();
                 self.selected_file = None;
                 self.selected_preview.clear();
                 self.original_file_content.clear();
@@ -117,6 +158,55 @@ impl LeetcodeApp {
             .as_ref()
             .map(|workspace| workspace.ui_file_rows(600))
             .unwrap_or_default();
+    }
+
+    fn sync_config_from_inputs(&mut self) {
+        self.config.set_active_provider_settings(
+            &self.provider_input,
+            self.model_input.trim().to_string(),
+            self.api_key_input.trim().to_string(),
+        );
+    }
+
+    fn sync_asset_provider_settings(&mut self) {
+        let model = if self.asset_model_input.trim().is_empty() {
+            default_image_model(&self.asset_provider_input).to_string()
+        } else {
+            self.asset_model_input.trim().to_string()
+        };
+        self.asset_model_input = model.clone();
+        self.config.set_provider_settings(
+            &self.asset_provider_input,
+            model,
+            self.asset_api_key_input.trim().to_string(),
+        );
+    }
+
+    fn sync_asset_provider_settings_for(&mut self, provider_id: &str) {
+        let model = if self.asset_model_input.trim().is_empty() {
+            default_image_model(provider_id).to_string()
+        } else {
+            self.asset_model_input.trim().to_string()
+        };
+        self.config.set_provider_settings(
+            provider_id,
+            model,
+            self.asset_api_key_input.trim().to_string(),
+        );
+    }
+
+    fn switch_provider_from_ui(&mut self, provider_id: String) {
+        self.config.select_provider(&provider_id);
+        self.provider_input = self.config.provider.clone();
+        self.api_key_input = self.config.api_key.clone();
+        self.model_input = self.config.model.clone();
+    }
+
+    fn switch_asset_provider_from_ui(&mut self, provider_id: String) {
+        self.asset_provider_input = provider_id;
+        self.asset_api_key_input =
+            image_api_key_from_config(&self.config, &self.asset_provider_input);
+        self.asset_model_input = image_model_from_config(&self.config, &self.asset_provider_input);
     }
 
     fn refresh_git_summary(&mut self) {
@@ -166,6 +256,135 @@ impl LeetcodeApp {
         };
 
         self.git_summary = format!("{status_text}\n\n{diff_text}");
+    }
+
+    fn start_image_asset_job(&mut self) {
+        if self.asset_is_running {
+            return;
+        }
+
+        let prompt = self.asset_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.asset_status = "asset prompt is empty".to_string();
+            return;
+        }
+
+        let Some(workspace) = self.workspace.clone() else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+
+        self.sync_config_from_inputs();
+        self.sync_asset_provider_settings();
+        let _ = self.config.save();
+
+        let provider = self.asset_provider_input.clone();
+        let model = self.asset_model_input.trim().to_string();
+        let api_key = self.asset_api_key_input.trim().to_string();
+        if api_key.trim().is_empty() {
+            self.asset_status = format!(
+                "Save a {} key ({}) before generating image assets",
+                image_provider_name(&provider),
+                image_provider_env_var(&provider)
+            );
+            return;
+        }
+
+        let request = ImageAssetRequest {
+            provider,
+            prompt,
+            model,
+            aspect_ratio: self.asset_aspect_ratio.clone(),
+            image_size: self.asset_image_size.clone(),
+        };
+        let job = AssetJob::new_image(&request);
+        self.upsert_asset_job(job.clone());
+        self.asset_status = format!("running {}", job.id);
+
+        let (tx, rx) = mpsc::channel();
+        self.asset_events_rx = Some(rx);
+        self.asset_is_running = true;
+
+        thread::spawn(move || {
+            let final_job = tokio::runtime::Runtime::new()
+                .expect("failed to start tokio runtime")
+                .block_on(run_image_job(workspace, api_key, request, job));
+            let _ = tx.send(AssetEvent::JobUpdated(final_job));
+            let _ = tx.send(AssetEvent::Done);
+        });
+    }
+
+    fn drain_asset_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(rx) = &self.asset_events_rx {
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            match event {
+                AssetEvent::JobUpdated(job) => {
+                    self.asset_status = match job.status {
+                        AssetStatus::Done => format!("done {}", job.id),
+                        AssetStatus::Failed => format!(
+                            "failed {}: {}",
+                            job.id,
+                            job.error.as_deref().unwrap_or("unknown error")
+                        ),
+                        AssetStatus::Running => format!("running {}", job.id),
+                        AssetStatus::Pending => format!("queued {}", job.id),
+                    };
+                    self.upsert_asset_job(job);
+                    self.refresh_file_rows();
+                    self.refresh_git_summary();
+                }
+                AssetEvent::Done => {
+                    self.asset_is_running = false;
+                }
+            }
+        }
+    }
+
+    fn upsert_asset_job(&mut self, job: AssetJob) {
+        if let Some(existing) = self
+            .asset_jobs
+            .iter_mut()
+            .find(|existing| existing.id == job.id)
+        {
+            *existing = job;
+        } else {
+            self.asset_jobs.push(job);
+        }
+        self.asset_jobs.sort_by_key(|job| job.created_at);
+    }
+
+    fn texture_for_asset(
+        &mut self,
+        ctx: &egui::Context,
+        rel_path: &str,
+    ) -> Option<&egui::TextureHandle> {
+        if self.asset_previews.contains_key(rel_path) {
+            return self.asset_previews.get(rel_path);
+        }
+
+        let workspace = self.workspace.as_ref()?;
+        let path = absolute_output_path(workspace, rel_path)?;
+        if !is_image_path(&path) {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        let size = [image.width() as usize, image.height() as usize];
+        let pixels = image.into_raw();
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+        let texture = ctx.load_texture(
+            format!("asset-preview-{rel_path}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.asset_previews.insert(rel_path.to_string(), texture);
+        self.asset_previews.get(rel_path)
     }
 
     fn load_file_preview(&mut self, rel: &str) {
@@ -244,8 +463,8 @@ impl LeetcodeApp {
             return;
         }
 
-        self.config.api_key = self.api_key_input.trim().to_string();
-        self.config.model = self.model_input.trim().to_string();
+        self.sync_config_from_inputs();
+        self.sync_asset_provider_settings();
         let _ = self.config.save();
 
         self.input.clear();
@@ -355,6 +574,10 @@ impl LeetcodeApp {
                         title: format!("done {id}"),
                         content: compact(&output, 2_000),
                     });
+                    if let Some(workspace) = &self.workspace {
+                        self.asset_jobs = load_jobs(workspace);
+                    }
+                    self.refresh_file_rows();
                 }
                 AppEvent::ApprovalRequested {
                     id,
@@ -422,8 +645,44 @@ impl LeetcodeApp {
     fn show_top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.label("Provider");
+                let old_provider = self.provider_input.clone();
+                egui::ComboBox::from_id_salt("provider_select")
+                    .selected_text(provider_name(&self.provider_input))
+                    .width(96.0)
+                    .show_ui(ui, |ui| {
+                        for provider in provider_specs()
+                            .iter()
+                            .filter(|provider| provider.implemented)
+                        {
+                            ui.selectable_value(
+                                &mut self.provider_input,
+                                provider.id.to_string(),
+                                provider.name,
+                            );
+                        }
+                    });
+                if self.provider_input != old_provider {
+                    self.switch_provider_from_ui(self.provider_input.clone());
+                }
+
                 ui.label("Модель");
                 ui.add_sized([150.0, 22.0], TextEdit::singleline(&mut self.model_input));
+                let model_options = models_for_provider(&self.provider_input).collect::<Vec<_>>();
+                if !model_options.is_empty() {
+                    egui::ComboBox::from_id_salt("model_select")
+                        .selected_text("models")
+                        .width(76.0)
+                        .show_ui(ui, |ui| {
+                            for model in model_options {
+                                ui.selectable_value(
+                                    &mut self.model_input,
+                                    model.id.to_string(),
+                                    model.name,
+                                );
+                            }
+                        });
+                }
 
                 ui.separator();
                 ui.label("API key");
@@ -436,7 +695,8 @@ impl LeetcodeApp {
                 ui.checkbox(&mut self.config.require_write_approval, "Confirm write");
 
                 if ui.button("Сохранить").clicked() {
-                    self.config.model = self.model_input.trim().to_string();
+                    self.sync_config_from_inputs();
+                    self.sync_asset_provider_settings();
                     let _ = self.config.save();
                 }
 
@@ -557,7 +817,7 @@ impl LeetcodeApp {
     fn show_tool_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("tools")
             .resizable(true)
-            .default_width(340.0)
+            .default_width(380.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.heading("Git");
@@ -578,6 +838,8 @@ impl LeetcodeApp {
                 );
                 ui.separator();
                 ui.heading("Инструменты");
+                self.show_asset_panel(ui, ctx);
+                ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("tool_log_scroll")
                     .show(ui, |ui| {
@@ -593,6 +855,142 @@ impl LeetcodeApp {
                             ui.separator();
                         }
                     });
+            });
+    }
+
+    fn show_asset_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Assets");
+            if self.asset_is_running {
+                ui.spinner();
+            }
+        });
+
+        let old_asset_provider = self.asset_provider_input.clone();
+        ui.horizontal(|ui| {
+            ui.label("Image provider");
+            egui::ComboBox::from_id_salt("asset_provider_select")
+                .selected_text(image_provider_name(&self.asset_provider_input))
+                .width(150.0)
+                .show_ui(ui, |ui| {
+                    for provider in image_provider_specs() {
+                        ui.selectable_value(
+                            &mut self.asset_provider_input,
+                            provider.id.to_string(),
+                            provider.name,
+                        );
+                    }
+                });
+        });
+        if self.asset_provider_input != old_asset_provider {
+            self.sync_asset_provider_settings_for(&old_asset_provider);
+            self.switch_asset_provider_from_ui(self.asset_provider_input.clone());
+        }
+
+        if let Some(provider) = image_provider_specs()
+            .iter()
+            .find(|provider| provider.id == self.asset_provider_input)
+        {
+            ui.label(RichText::new(format!("{} | {}", provider.notes, provider.env_var)).weak());
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Model");
+            ui.add_sized(
+                [ui.available_width().max(160.0), 22.0],
+                TextEdit::singleline(&mut self.asset_model_input),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Image key");
+            let key_width = (ui.available_width() - 76.0).max(120.0);
+            ui.add_sized(
+                [key_width, 22.0],
+                TextEdit::singleline(&mut self.asset_api_key_input).password(true),
+            );
+            if ui.button("Save").clicked() {
+                self.sync_asset_provider_settings();
+                let _ = self.config.save();
+            }
+        });
+
+        ui.add(
+            TextEdit::multiline(&mut self.asset_prompt)
+                .hint_text("Image prompt for a game/app asset")
+                .desired_width(f32::INFINITY)
+                .desired_rows(3),
+        );
+
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("asset_aspect_ratio")
+                .selected_text(&self.asset_aspect_ratio)
+                .width(72.0)
+                .show_ui(ui, |ui| {
+                    for ratio in ["1:1", "3:2", "2:3", "4:3", "3:4", "16:9", "9:16"] {
+                        ui.selectable_value(&mut self.asset_aspect_ratio, ratio.to_string(), ratio);
+                    }
+                });
+            egui::ComboBox::from_id_salt("asset_image_size")
+                .selected_text(&self.asset_image_size)
+                .width(72.0)
+                .show_ui(ui, |ui| {
+                    for size in ["0.5K", "1K", "2K", "4K"] {
+                        ui.selectable_value(&mut self.asset_image_size, size.to_string(), size);
+                    }
+                });
+            if ui
+                .add_enabled(
+                    !self.asset_is_running && self.workspace.is_some(),
+                    egui::Button::new("Generate image"),
+                )
+                .clicked()
+            {
+                self.start_image_asset_job();
+            }
+        });
+
+        if !self.asset_status.is_empty() {
+            ui.label(RichText::new(&self.asset_status).weak());
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("asset_jobs_scroll")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                if self.asset_jobs.is_empty() {
+                    ui.label(RichText::new("No generated assets yet").weak());
+                    return;
+                }
+
+                let jobs = self
+                    .asset_jobs
+                    .iter()
+                    .rev()
+                    .take(12)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for job in jobs {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("{:?}", job.status)).strong());
+                        ui.label(RichText::new(image_provider_name(&job.provider)).weak());
+                        ui.label(RichText::new(&job.model).weak());
+                    });
+                    ui.label(compact(&job.prompt, 160));
+                    if let Some(error) = &job.error {
+                        ui.label(RichText::new(compact(error, 180)).weak());
+                    }
+                    for output in &job.output_files {
+                        if let Some(texture) = self.texture_for_asset(ctx, output) {
+                            let size = texture.size_vec2();
+                            let scale = (120.0 / size.x.max(size.y)).min(1.0);
+                            ui.image((texture.id(), size * scale));
+                        }
+                        ui.label(RichText::new(output).text_style(egui::TextStyle::Monospace));
+                    }
+                }
             });
     }
 
@@ -694,6 +1092,7 @@ impl LeetcodeApp {
 impl eframe::App for LeetcodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.drain_asset_events();
         self.show_top_bar(ctx);
         self.show_input_bar(ctx);
         self.show_file_panel(ctx);
@@ -701,10 +1100,38 @@ impl eframe::App for LeetcodeApp {
         self.show_chat_panel(ctx);
         self.show_approval_window(ctx);
 
-        if self.is_running {
+        if self.is_running || self.asset_is_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+}
+
+fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
+    let direct_key = config.api_key_for_provider(provider_id);
+    if !direct_key.trim().is_empty() {
+        return direct_key;
+    }
+
+    match provider_id {
+        OPENAI_IMAGE_PROVIDER_ID => config.api_key_for_provider(OPENAI_PROVIDER_ID),
+        GEMINI_IMAGE_PROVIDER_ID => config.api_key_for_provider(GEMINI_PROVIDER_ID),
+        _ => String::new(),
+    }
+}
+
+fn image_model_from_config(config: &AppConfig, provider_id: &str) -> String {
+    config
+        .providers
+        .get(provider_id)
+        .and_then(|settings| {
+            let model = settings.model.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        })
+        .unwrap_or_else(|| default_image_model(provider_id).to_string())
 }
 
 fn compact(text: &str, max_chars: usize) -> String {

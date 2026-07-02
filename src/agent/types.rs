@@ -92,7 +92,11 @@ pub enum ToolAction {
     ApplyPatch,
     Grep,
     RunShell,
+    GenerateImageAsset,
     Screenshot,
+    MouseClick,
+    TypeText,
+    Hotkey,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -120,5 +124,39 @@ impl ToolResult {
         serde_json::to_string(self).unwrap_or_else(|_| {
             "{\"ok\":false,\"output\":\"failed to serialize tool result\"}".to_string()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_generate_image_asset_action() {
+        let request = serde_json::from_str::<ActRequest>(
+            r#"{"action":"generate_image_asset","args":{"prompt":"pixel art chest"}}"#,
+        )
+        .expect("valid act request");
+
+        assert!(matches!(request.action, ToolAction::GenerateImageAsset));
+    }
+
+    #[test]
+    fn parses_desktop_control_actions() {
+        let click = serde_json::from_str::<ActRequest>(
+            r#"{"action":"mouse_click","args":{"x":100,"y":200}}"#,
+        )
+        .expect("valid click request");
+        let typing =
+            serde_json::from_str::<ActRequest>(r#"{"action":"type_text","args":{"text":"hello"}}"#)
+                .expect("valid type request");
+        let hotkey = serde_json::from_str::<ActRequest>(
+            r#"{"action":"hotkey","args":{"keys":["ctrl","l"]}}"#,
+        )
+        .expect("valid hotkey request");
+
+        assert!(matches!(click.action, ToolAction::MouseClick));
+        assert!(matches!(typing.action, ToolAction::TypeText));
+        assert!(matches!(hotkey.action, ToolAction::Hotkey));
     }
 }

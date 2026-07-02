@@ -14,20 +14,24 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 
 ## Stage 2 - Model Provider Layer
 
-- Replace the direct `OpenAiClient` dependency in the runtime with a provider trait.
-- Add a model registry with capabilities: code, reasoning, tools, vision, image, audio, video, realtime, embeddings.
-- Keep OpenAI Responses as the default coding/reasoning provider.
-- Add provider settings and API key storage per provider.
+- Done: Replace the direct `OpenAiClient` dependency in the runtime with a provider trait.
+- Done: Add a model registry with capabilities: code, reasoning, tools, vision, image, audio, video, realtime, embeddings.
+- Done: Keep OpenAI Responses as the default coding/reasoning provider.
+- Done: Add provider settings and API key storage per provider.
+- Done: Add implemented Claude, DeepSeek, and Gemini coding-agent providers.
 - Add task-based model routing: coding, planning, cheap/fast, vision, image generation, audio generation, video generation.
 - Add fallback models and clear provider error reporting.
 
 ## Stage 3 - Asset Generation Pipeline
 
-- Introduce asynchronous asset jobs with status, provider, model, prompt, parameters, output files, and metadata.
-- Add an asset board with previews for images, sprites, audio, video, and generated UI/game assets.
-- Save outputs into project-aware folders such as `assets/generated/images`, `assets/generated/audio`, and `assets/generated/video`.
+- Done: Introduce asynchronous image asset jobs with status, provider, model, prompt, parameters, output files, and metadata.
+- Done: Add image asset previews in the tool panel.
+- Done: Save generated image outputs into `assets/generated/images`.
+- Done: Add image providers: ChatGPT Image, Nano Banana, Stability AI, and Replicate FLUX.
+- Done: Expose image generation as the agent-callable `generate_image_asset` action.
 - Track licensing/provider metadata for generated assets.
 - Add regenerate, variation, upscale, export, and attach-to-chat workflows.
+- Extend the same job framework to spritesheets, audio, video, and generated UI/game assets.
 
 ## Stage 4 - Game/App Project Profiles
 
@@ -46,6 +50,8 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 ## Stage 6 - Desktop and Computer Control
 
 - Add screenshot capture, click, type, hotkey, and window focus tools.
+- Done: Add approval-gated screenshot capture into `assets/generated/screenshots`.
+- Done: Add approval-gated mouse click, text typing, and hotkey desktop tools.
 - Follow the computer-use loop: screenshot, model action, execute, screenshot output.
 - Keep allowlists and human approval for irreversible desktop actions.
 
