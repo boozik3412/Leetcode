@@ -129,6 +129,42 @@ const MODELS: &[ModelSpec] = &[
         capabilities: OPENAI_FAST_CAPABILITIES,
     },
     ModelSpec {
+        provider_id: OPENAI_PROVIDER_ID,
+        id: "gpt-5.4-nano",
+        name: "GPT-5.4 Nano",
+        capabilities: OPENAI_FAST_CAPABILITIES,
+    },
+    ModelSpec {
+        provider_id: OPENAI_PROVIDER_ID,
+        id: "gpt-image-2",
+        name: "GPT Image 2",
+        capabilities: IMAGE_CAPABILITIES,
+    },
+    ModelSpec {
+        provider_id: OPENAI_PROVIDER_ID,
+        id: "gpt-audio-1.5",
+        name: "GPT Audio 1.5",
+        capabilities: AUDIO_CAPABILITIES,
+    },
+    ModelSpec {
+        provider_id: OPENAI_PROVIDER_ID,
+        id: "sora-2",
+        name: "Sora 2",
+        capabilities: VIDEO_CAPABILITIES,
+    },
+    ModelSpec {
+        provider_id: OPENAI_PROVIDER_ID,
+        id: "sora-2-pro",
+        name: "Sora 2 Pro",
+        capabilities: VIDEO_CAPABILITIES,
+    },
+    ModelSpec {
+        provider_id: OPENAI_PROVIDER_ID,
+        id: "gpt-realtime-2",
+        name: "GPT Realtime 2",
+        capabilities: REALTIME_CAPABILITIES,
+    },
+    ModelSpec {
         provider_id: ANTHROPIC_PROVIDER_ID,
         id: "claude-sonnet-5",
         name: "Claude Sonnet 5",

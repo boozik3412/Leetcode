@@ -1,22 +1,32 @@
 pub mod asset_generation;
 pub mod desktop;
 pub mod filesystem;
+pub mod game_workflows;
+pub mod orchestration;
 pub mod policy;
 pub mod project_commands;
+pub mod project_preview;
 pub mod shell;
 
 use crate::agent::types::{ActRequest, AppEvent, ToolAction, ToolCall, ToolResult};
 use crate::config::AppConfig;
 use crate::tools::asset_generation::{
-    GenerateImageAssetArgs, OpenAssetFolderArgs, RegenerateImageAssetArgs, UseAssetAsAppIconArgs,
-    VaryImageAssetArgs,
+    AttachAssetArgs, ExportAssetArgs, GenerateAudioAssetArgs, GenerateImageAssetArgs,
+    GenerateSpritesheetAssetArgs, GenerateVideoAssetArgs, OpenAssetFolderArgs,
+    RegenerateImageAssetArgs, UpscaleAssetArgs, UseAssetAsAppIconArgs, VaryImageAssetArgs,
 };
 use crate::tools::desktop::{HotkeyArgs, MouseClickArgs, TypeTextArgs};
 use crate::tools::filesystem::{
     ApplyPatchArgs, EditFileArgs, GrepArgs, ListFilesArgs, ReadFileArgs, WriteFileArgs,
 };
+use crate::tools::game_workflows::GameWorkflowArgs;
+use crate::tools::orchestration::{
+    CreateReplayEvalArgs, DelegateAgentArgs, RunSubagentArgs, RunSummaryArgs,
+    UpdateWorkspaceContextArgs,
+};
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::project_commands::ProjectCommandArgs;
+use crate::tools::project_preview::OpenProjectPreviewArgs;
 use crate::tools::shell::RunShellArgs;
 use crate::workspace::Workspace;
 use std::sync::atomic::AtomicBool;
@@ -193,6 +203,119 @@ impl ToolDispatcher {
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }
+            ToolAction::GameWorkflow => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<GameWorkflowArgs>(request.args) {
+                    Ok(args) => game_workflows::create_game_workflow(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::OpenProjectPreview => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<OpenProjectPreviewArgs>(request.args) {
+                    Ok(args) => project_preview::open_project_preview(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RunSubagent => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<RunSubagentArgs>(request.args) {
+                    Ok(args) => {
+                        Box::pin(orchestration::run_subagent(
+                            workspace,
+                            args,
+                            &self.config,
+                            self.events.clone(),
+                            self.approvals.clone(),
+                            self.cancel.clone(),
+                            self.policy.clone(),
+                        ))
+                        .await
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::DelegateAgent => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<DelegateAgentArgs>(request.args) {
+                    Ok(args) => orchestration::delegate_agent(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::UpdateWorkspaceContext => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<UpdateWorkspaceContextArgs>(request.args) {
+                    Ok(args) => orchestration::update_context(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RecordRunSummary => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<RunSummaryArgs>(request.args) {
+                    Ok(args) => orchestration::record_summary(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::ExportTrace => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                orchestration::export_orchestration_trace(workspace)
+            }
+            ToolAction::CreateReplayEval => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<CreateReplayEvalArgs>(request.args) {
+                    Ok(args) => {
+                        orchestration::create_eval(workspace, args, &self.events, &self.approvals)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::OrchestrationSnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                orchestration::snapshot(workspace)
+            }
             ToolAction::GenerateImageAsset => {
                 let Some(workspace) = &self.workspace else {
                     return ToolResult::error("No workspace selected");
@@ -200,6 +323,60 @@ impl ToolDispatcher {
                 match serde_json::from_value::<GenerateImageAssetArgs>(request.args) {
                     Ok(args) => {
                         asset_generation::generate_image_asset(
+                            workspace,
+                            args,
+                            &self.config,
+                            &self.events,
+                            &self.approvals,
+                        )
+                        .await
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::GenerateSpritesheetAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<GenerateSpritesheetAssetArgs>(request.args) {
+                    Ok(args) => {
+                        asset_generation::generate_spritesheet_asset(
+                            workspace,
+                            args,
+                            &self.config,
+                            &self.events,
+                            &self.approvals,
+                        )
+                        .await
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::GenerateAudioAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<GenerateAudioAssetArgs>(request.args) {
+                    Ok(args) => {
+                        asset_generation::generate_audio_asset(
+                            workspace,
+                            args,
+                            &self.config,
+                            &self.events,
+                            &self.approvals,
+                        )
+                        .await
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::GenerateVideoAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<GenerateVideoAssetArgs>(request.args) {
+                    Ok(args) => {
+                        asset_generation::generate_video_asset(
                             workspace,
                             args,
                             &self.config,
@@ -244,6 +421,48 @@ impl ToolDispatcher {
                         )
                         .await
                     }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::UpscaleAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<UpscaleAssetArgs>(request.args) {
+                    Ok(args) => asset_generation::upscale_existing_asset(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::ExportAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<ExportAssetArgs>(request.args) {
+                    Ok(args) => asset_generation::export_existing_asset(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::AttachAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<AttachAssetArgs>(request.args) {
+                    Ok(args) => asset_generation::attach_asset(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }

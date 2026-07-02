@@ -1,15 +1,26 @@
 use crate::agent::models::{
     models_for_provider, provider_name, provider_specs, GEMINI_PROVIDER_ID, OPENAI_PROVIDER_ID,
 };
+use crate::agent::routing::route_labels;
 use crate::agent::types::{AppEvent, ChatLine, ChatRole, ToolLogLine};
 use crate::agent::{run_user_turn, AgentState};
 use crate::assets::{
-    absolute_output_path, default_image_model, image_provider_env_var, image_provider_name,
-    image_provider_specs, image_request_from_job, is_image_path, load_jobs, run_image_job,
-    AssetEvent, AssetJob, AssetStatus, ImageAssetRequest, GEMINI_IMAGE_PROVIDER_ID,
-    OPENAI_IMAGE_PROVIDER_ID,
+    absolute_output_path, asset_provider_env_var, attach_asset_context, audio_provider_name,
+    default_audio_model, default_image_model, default_video_model, export_asset,
+    image_provider_env_var, image_provider_name, image_provider_specs, image_request_from_job,
+    is_image_path, load_jobs, run_audio_job, run_image_job, run_spritesheet_job, run_video_job,
+    upscale_asset, video_provider_name, AssetEvent, AssetJob, AssetStatus, AudioAssetRequest,
+    ImageAssetRequest, SpritesheetAssetRequest, VideoAssetRequest, GEMINI_IMAGE_PROVIDER_ID,
+    OPENAI_AUDIO_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID, OPENAI_VIDEO_PROVIDER_ID,
 };
 use crate::config::{append_journal, AppConfig};
+use crate::game_workflows::{
+    parse_workflow_kind, run_game_workflow, workflow_specs, GameWorkflowRequest,
+};
+use crate::orchestration::{
+    agent_role_specs, export_trace, load_orchestration_state, orchestration_snapshot,
+    parse_agent_role, record_handoff,
+};
 use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::shell::{run_shell, RunShellArgs};
@@ -44,7 +55,9 @@ pub struct LeetcodeApp {
     project_is_running: bool,
     project_cancel: Option<Arc<AtomicBool>>,
     project_status: String,
+    orchestration_status: String,
     asset_provider_input: String,
+    asset_kind_input: String,
     asset_api_key_input: String,
     asset_model_input: String,
     asset_prompt: String,
@@ -118,7 +131,9 @@ impl LeetcodeApp {
             project_is_running: false,
             project_cancel: None,
             project_status: String::new(),
+            orchestration_status: String::new(),
             asset_provider_input,
+            asset_kind_input: "image".to_string(),
             asset_api_key_input,
             asset_model_input,
             asset_prompt: String::new(),
@@ -196,14 +211,24 @@ impl LeetcodeApp {
     }
 
     fn sync_asset_provider_settings(&mut self) {
+        let provider_id = match self.asset_kind_input.as_str() {
+            "audio" => OPENAI_AUDIO_PROVIDER_ID,
+            "video" => OPENAI_VIDEO_PROVIDER_ID,
+            _ => self.asset_provider_input.as_str(),
+        };
+        let default_model = match self.asset_kind_input.as_str() {
+            "audio" => default_audio_model(provider_id),
+            "video" => default_video_model(provider_id),
+            _ => default_image_model(provider_id),
+        };
         let model = if self.asset_model_input.trim().is_empty() {
-            default_image_model(&self.asset_provider_input).to_string()
+            default_model.to_string()
         } else {
             self.asset_model_input.trim().to_string()
         };
         self.asset_model_input = model.clone();
         self.config.set_provider_settings(
-            &self.asset_provider_input,
+            provider_id,
             model,
             self.asset_api_key_input.trim().to_string(),
         );
@@ -234,6 +259,43 @@ impl LeetcodeApp {
         self.asset_api_key_input =
             image_api_key_from_config(&self.config, &self.asset_provider_input);
         self.asset_model_input = image_model_from_config(&self.config, &self.asset_provider_input);
+    }
+
+    fn switch_asset_kind_from_ui(&mut self) {
+        match self.asset_kind_input.as_str() {
+            "audio" => {
+                self.asset_api_key_input =
+                    media_api_key_from_config(&self.config, OPENAI_AUDIO_PROVIDER_ID);
+                self.asset_model_input = media_model_from_config(
+                    &self.config,
+                    OPENAI_AUDIO_PROVIDER_ID,
+                    default_audio_model(OPENAI_AUDIO_PROVIDER_ID),
+                );
+            }
+            "video" => {
+                self.asset_api_key_input =
+                    media_api_key_from_config(&self.config, OPENAI_VIDEO_PROVIDER_ID);
+                self.asset_model_input = media_model_from_config(
+                    &self.config,
+                    OPENAI_VIDEO_PROVIDER_ID,
+                    default_video_model(OPENAI_VIDEO_PROVIDER_ID),
+                );
+                if !["1280x720", "720x1280", "1920x1080", "1080x1920"]
+                    .contains(&self.asset_image_size.as_str())
+                {
+                    self.asset_image_size = "1280x720".to_string();
+                }
+            }
+            _ => {
+                self.asset_api_key_input =
+                    image_api_key_from_config(&self.config, &self.asset_provider_input);
+                self.asset_model_input =
+                    image_model_from_config(&self.config, &self.asset_provider_input);
+                if !["0.5K", "1K", "2K", "4K"].contains(&self.asset_image_size.as_str()) {
+                    self.asset_image_size = "1K".to_string();
+                }
+            }
+        }
     }
 
     fn refresh_git_summary(&mut self) {
@@ -362,6 +424,63 @@ impl LeetcodeApp {
         self.project_status = "stop requested".to_string();
     }
 
+    fn create_game_workflow_from_ui(&mut self, workflow_id: &str) {
+        let Some(workspace) = &self.workspace else {
+            self.project_status = "workspace is not selected".to_string();
+            return;
+        };
+        let Some(workflow) = parse_workflow_kind(workflow_id) else {
+            self.project_status = format!("unknown workflow: {workflow_id}");
+            return;
+        };
+        let title = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.display_name())
+            .unwrap_or_else(|| "Game Workflow".to_string());
+        let brief = if self.input.trim().is_empty() {
+            format!("Workflow created from Leetcode for {title}.")
+        } else {
+            self.input.trim().to_string()
+        };
+
+        match run_game_workflow(
+            workspace,
+            GameWorkflowRequest {
+                workflow,
+                title,
+                brief,
+            },
+        ) {
+            Ok(result) => {
+                self.project_status = format!("created {}", result.path);
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => self.project_status = format!("workflow failed: {err}"),
+        }
+    }
+
+    fn open_preview_url_from_ui(&mut self, url: &str) {
+        #[cfg(target_os = "windows")]
+        let result = Command::new("cmd")
+            .arg("/C")
+            .arg("start")
+            .arg("")
+            .arg(url)
+            .spawn()
+            .map(|_| ());
+        #[cfg(target_os = "macos")]
+        let result = Command::new("open").arg(url).spawn().map(|_| ());
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        let result = Command::new("xdg-open").arg(url).spawn().map(|_| ());
+
+        self.project_status = match result {
+            Ok(()) => format!("opened {url}"),
+            Err(err) => format!("open preview failed: {err}"),
+        };
+    }
+
     fn start_image_asset_job(&mut self) {
         if self.asset_is_running {
             return;
@@ -377,15 +496,58 @@ impl LeetcodeApp {
         self.sync_asset_provider_settings();
         let _ = self.config.save();
 
-        let request = ImageAssetRequest {
-            provider: self.asset_provider_input.clone(),
-            prompt,
-            model: self.asset_model_input.trim().to_string(),
-            aspect_ratio: self.asset_aspect_ratio.clone(),
-            image_size: self.asset_image_size.clone(),
-        };
-
-        self.start_image_asset_request(request);
+        match self.asset_kind_input.as_str() {
+            "spritesheet" => {
+                let request = SpritesheetAssetRequest {
+                    provider: self.asset_provider_input.clone(),
+                    prompt,
+                    model: self.asset_model_input.trim().to_string(),
+                    aspect_ratio: self.asset_aspect_ratio.clone(),
+                    image_size: self.asset_image_size.clone(),
+                    columns: 4,
+                    rows: 4,
+                };
+                self.start_spritesheet_asset_request(request);
+            }
+            "audio" => {
+                let request = AudioAssetRequest {
+                    provider: OPENAI_AUDIO_PROVIDER_ID.to_string(),
+                    prompt,
+                    model: if self.asset_model_input.trim().is_empty() {
+                        default_audio_model(OPENAI_AUDIO_PROVIDER_ID).to_string()
+                    } else {
+                        self.asset_model_input.trim().to_string()
+                    },
+                    voice: "alloy".to_string(),
+                    format: "wav".to_string(),
+                };
+                self.start_audio_asset_request(request);
+            }
+            "video" => {
+                let request = VideoAssetRequest {
+                    provider: OPENAI_VIDEO_PROVIDER_ID.to_string(),
+                    prompt,
+                    model: if self.asset_model_input.trim().is_empty() {
+                        default_video_model(OPENAI_VIDEO_PROVIDER_ID).to_string()
+                    } else {
+                        self.asset_model_input.trim().to_string()
+                    },
+                    size: self.asset_image_size.clone(),
+                    seconds: 8,
+                };
+                self.start_video_asset_request(request);
+            }
+            _ => {
+                let request = ImageAssetRequest {
+                    provider: self.asset_provider_input.clone(),
+                    prompt,
+                    model: self.asset_model_input.trim().to_string(),
+                    aspect_ratio: self.asset_aspect_ratio.clone(),
+                    image_size: self.asset_image_size.clone(),
+                };
+                self.start_image_asset_request(request);
+            }
+        }
     }
 
     fn start_image_asset_request(&mut self, request: ImageAssetRequest) {
@@ -420,6 +582,111 @@ impl LeetcodeApp {
             let final_job = tokio::runtime::Runtime::new()
                 .expect("failed to start tokio runtime")
                 .block_on(run_image_job(workspace, api_key, request, job));
+            let _ = tx.send(AssetEvent::JobUpdated(final_job));
+            let _ = tx.send(AssetEvent::Done);
+        });
+    }
+
+    fn start_spritesheet_asset_request(&mut self, request: SpritesheetAssetRequest) {
+        if self.asset_is_running {
+            return;
+        }
+
+        let Some(workspace) = self.workspace.clone() else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        let api_key = image_api_key_from_config(&self.config, &request.provider);
+        if api_key.trim().is_empty() {
+            self.asset_status = format!(
+                "Save a {} key ({}) before generating spritesheets",
+                image_provider_name(&request.provider),
+                image_provider_env_var(&request.provider)
+            );
+            return;
+        }
+
+        let job = AssetJob::new_spritesheet(&request);
+        self.upsert_asset_job(job.clone());
+        self.asset_status = format!("running {}", job.id);
+        let (tx, rx) = mpsc::channel();
+        self.asset_events_rx = Some(rx);
+        self.asset_is_running = true;
+
+        thread::spawn(move || {
+            let final_job = tokio::runtime::Runtime::new()
+                .expect("failed to start tokio runtime")
+                .block_on(run_spritesheet_job(workspace, api_key, request, job));
+            let _ = tx.send(AssetEvent::JobUpdated(final_job));
+            let _ = tx.send(AssetEvent::Done);
+        });
+    }
+
+    fn start_audio_asset_request(&mut self, request: AudioAssetRequest) {
+        if self.asset_is_running {
+            return;
+        }
+
+        let Some(workspace) = self.workspace.clone() else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        let api_key = media_api_key_from_config(&self.config, &request.provider);
+        if api_key.trim().is_empty() {
+            self.asset_status = format!(
+                "Save a {} key ({}) before generating audio",
+                audio_provider_name(&request.provider),
+                asset_provider_env_var(&request.provider)
+            );
+            return;
+        }
+
+        let job = AssetJob::new_audio(&request);
+        self.upsert_asset_job(job.clone());
+        self.asset_status = format!("running {}", job.id);
+        let (tx, rx) = mpsc::channel();
+        self.asset_events_rx = Some(rx);
+        self.asset_is_running = true;
+
+        thread::spawn(move || {
+            let final_job = tokio::runtime::Runtime::new()
+                .expect("failed to start tokio runtime")
+                .block_on(run_audio_job(workspace, api_key, request, job));
+            let _ = tx.send(AssetEvent::JobUpdated(final_job));
+            let _ = tx.send(AssetEvent::Done);
+        });
+    }
+
+    fn start_video_asset_request(&mut self, request: VideoAssetRequest) {
+        if self.asset_is_running {
+            return;
+        }
+
+        let Some(workspace) = self.workspace.clone() else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        let api_key = media_api_key_from_config(&self.config, &request.provider);
+        if api_key.trim().is_empty() {
+            self.asset_status = format!(
+                "Save a {} key ({}) before generating video",
+                video_provider_name(&request.provider),
+                asset_provider_env_var(&request.provider)
+            );
+            return;
+        }
+
+        let job = AssetJob::new_video(&request);
+        self.upsert_asset_job(job.clone());
+        self.asset_status = format!("running {}", job.id);
+        let (tx, rx) = mpsc::channel();
+        self.asset_events_rx = Some(rx);
+        self.asset_is_running = true;
+
+        thread::spawn(move || {
+            let final_job = tokio::runtime::Runtime::new()
+                .expect("failed to start tokio runtime")
+                .block_on(run_video_job(workspace, api_key, request, job));
             let _ = tx.send(AssetEvent::JobUpdated(final_job));
             let _ = tx.send(AssetEvent::Done);
         });
@@ -549,6 +816,53 @@ impl LeetcodeApp {
                 self.refresh_git_summary();
             }
             Err(err) => self.asset_status = format!("save app icon failed: {err}"),
+        }
+    }
+
+    fn upscale_asset_output(&mut self, rel_path: &str) {
+        let Some(workspace) = &self.workspace else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        match upscale_asset(workspace, rel_path, 2) {
+            Ok(job) => {
+                self.asset_status = format!("upscaled {}", job.id);
+                self.upsert_asset_job(job);
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => self.asset_status = format!("upscale failed: {err}"),
+        }
+    }
+
+    fn export_asset_output(&mut self, rel_path: &str) {
+        let Some(workspace) = &self.workspace else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        match export_asset(workspace, rel_path, None) {
+            Ok(job) => {
+                self.asset_status = format!("exported {}", job.id);
+                self.upsert_asset_job(job);
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => self.asset_status = format!("export failed: {err}"),
+        }
+    }
+
+    fn attach_asset_output(&mut self, rel_path: &str) {
+        let Some(workspace) = &self.workspace else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        match attach_asset_context(workspace, rel_path) {
+            Ok(_) => {
+                self.asset_status = "attached asset context".to_string();
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => self.asset_status = format!("attach failed: {err}"),
         }
     }
 
@@ -990,6 +1304,26 @@ impl LeetcodeApp {
                         });
                 }
 
+                ui.label("Route");
+                egui::ComboBox::from_id_salt("task_route_select")
+                    .selected_text(
+                        route_labels()
+                            .iter()
+                            .find(|(id, _)| *id == self.config.task_route)
+                            .map(|(_, label)| *label)
+                            .unwrap_or("Auto"),
+                    )
+                    .width(86.0)
+                    .show_ui(ui, |ui| {
+                        for (id, label) in route_labels() {
+                            ui.selectable_value(
+                                &mut self.config.task_route,
+                                (*id).to_string(),
+                                *label,
+                            );
+                        }
+                    });
+
                 ui.separator();
                 ui.label("API key");
                 ui.add_sized(
@@ -1127,6 +1461,8 @@ impl LeetcodeApp {
             .show(ctx, |ui| {
                 self.show_project_panel(ui);
                 ui.separator();
+                self.show_orchestration_panel(ui);
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.heading("Git");
                     if ui.button("Обновить").clicked() {
@@ -1197,11 +1533,14 @@ impl LeetcodeApp {
 
         if self.project_profiles.is_empty() {
             ui.label(RichText::new("No project profile detected").weak());
+            self.show_game_workflow_buttons(ui);
             return;
         }
 
         let profiles = self.project_profiles.clone();
         for profile in profiles {
+            let profile_commands = profile.commands.clone();
+            let preview_hooks = profile.previews.clone();
             ui.group(|ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(&profile.kind).strong());
@@ -1235,9 +1574,188 @@ impl LeetcodeApp {
                         }
                     });
                 }
+
+                if !preview_hooks.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Preview").weak());
+                        for hook in preview_hooks {
+                            let response = ui
+                                .add_enabled(
+                                    !self.project_is_running,
+                                    egui::Button::new(&hook.label),
+                                )
+                                .on_hover_text(&hook.description);
+                            if response.clicked() {
+                                if let Some(url) = hook.url.as_deref() {
+                                    self.open_preview_url_from_ui(url);
+                                } else if let Some(command_id) = hook.command_id.as_deref() {
+                                    if let Some(command) = profile_commands
+                                        .iter()
+                                        .find(|command| command.id == command_id)
+                                        .cloned()
+                                    {
+                                        self.start_project_command(command);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
             });
             ui.add_space(6.0);
         }
+
+        self.show_game_workflow_buttons(ui);
+    }
+
+    fn show_game_workflow_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Game workflows", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for spec in workflow_specs() {
+                    if ui
+                        .add_enabled(self.workspace.is_some(), egui::Button::new(spec.label))
+                        .on_hover_text(spec.description)
+                        .clicked()
+                    {
+                        self.create_game_workflow_from_ui(spec.id);
+                    }
+                }
+            });
+        });
+    }
+
+    fn create_agent_handoff_from_ui(&mut self, role_id: &str) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.orchestration_status = "workspace is not selected".to_string();
+            return;
+        };
+        let Some(role) = parse_agent_role(role_id) else {
+            self.orchestration_status = format!("unknown agent role: {role_id}");
+            return;
+        };
+
+        let task = if self.input.trim().is_empty() {
+            format!(
+                "Review the current {} workspace and propose the next useful actions.",
+                workspace.display_name()
+            )
+        } else {
+            self.input.trim().to_string()
+        };
+        let context = format!(
+            "Workspace: {}\nSelected file: {}\nCurrent prompt: {}",
+            workspace.display_name(),
+            self.selected_file.as_deref().unwrap_or("none"),
+            if self.input.trim().is_empty() {
+                "none"
+            } else {
+                self.input.trim()
+            }
+        );
+
+        match record_handoff(
+            &workspace,
+            role,
+            "Leetcode UI".to_string(),
+            task,
+            context,
+            "Specialist recommendation, risks, and next actions".to_string(),
+        ) {
+            Ok(record) => {
+                self.orchestration_status = format!("handoff recorded: {}", record.id);
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => {
+                self.orchestration_status = format!("handoff failed: {err}");
+            }
+        }
+    }
+
+    fn export_trace_from_ui(&mut self) {
+        let Some(workspace) = &self.workspace else {
+            self.orchestration_status = "workspace is not selected".to_string();
+            return;
+        };
+
+        match export_trace(workspace) {
+            Ok(path) => {
+                self.orchestration_status = format!("trace exported: {path}");
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => {
+                self.orchestration_status = format!("trace export failed: {err}");
+            }
+        }
+    }
+
+    fn add_orchestration_snapshot_to_log(&mut self) {
+        let Some(workspace) = &self.workspace else {
+            self.orchestration_status = "workspace is not selected".to_string();
+            return;
+        };
+
+        let snapshot = orchestration_snapshot(workspace);
+        let content = serde_json::to_string_pretty(&snapshot)
+            .unwrap_or_else(|_| "failed to serialize orchestration snapshot".to_string());
+        self.tool_log.push(ToolLogLine {
+            title: "orchestration snapshot".to_string(),
+            content,
+        });
+        self.orchestration_status = "snapshot added to tool log".to_string();
+    }
+
+    fn show_orchestration_panel(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Agents", |ui| {
+            if self.workspace.is_none() {
+                ui.label(RichText::new("No workspace selected").weak());
+                return;
+            }
+
+            let state = self.workspace.as_ref().map(load_orchestration_state);
+            if let Some(state) = &state {
+                ui.label(
+                    RichText::new(format!(
+                        "handoffs: {} | subagents: {} | summaries: {} | evals: {}",
+                        state.handoffs.len(),
+                        state.subagent_runs.len(),
+                        state.run_summaries.len(),
+                        state.evals.len()
+                    ))
+                    .weak(),
+                );
+                if !state.context.summary.trim().is_empty() {
+                    ui.label(compact(&state.context.summary, 180));
+                }
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Snapshot").clicked() {
+                    self.add_orchestration_snapshot_to_log();
+                }
+                if ui.button("Export trace").clicked() {
+                    self.export_trace_from_ui();
+                }
+            });
+
+            if !self.orchestration_status.is_empty() {
+                ui.label(RichText::new(&self.orchestration_status).weak());
+            }
+
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                for spec in agent_role_specs() {
+                    if ui
+                        .add_enabled(self.workspace.is_some(), egui::Button::new(spec.label))
+                        .on_hover_text(spec.purpose)
+                        .clicked()
+                    {
+                        self.create_agent_handoff_from_ui(spec.id);
+                    }
+                }
+            });
+        });
     }
 
     fn show_asset_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1264,31 +1782,68 @@ impl LeetcodeApp {
         });
 
         let old_asset_provider = self.asset_provider_input.clone();
+        let old_asset_kind = self.asset_kind_input.clone();
         ui.horizontal(|ui| {
-            ui.label("Image provider");
-            egui::ComboBox::from_id_salt("asset_provider_select")
-                .selected_text(image_provider_name(&self.asset_provider_input))
-                .width(150.0)
+            ui.label("Kind");
+            egui::ComboBox::from_id_salt("asset_kind_select")
+                .selected_text(match self.asset_kind_input.as_str() {
+                    "spritesheet" => "Spritesheet",
+                    "audio" => "Audio",
+                    "video" => "Video",
+                    _ => "Image",
+                })
+                .width(118.0)
                 .show_ui(ui, |ui| {
-                    for provider in image_provider_specs() {
-                        ui.selectable_value(
-                            &mut self.asset_provider_input,
-                            provider.id.to_string(),
-                            provider.name,
-                        );
+                    for (id, label) in [
+                        ("image", "Image"),
+                        ("spritesheet", "Spritesheet"),
+                        ("audio", "Audio"),
+                        ("video", "Video"),
+                    ] {
+                        ui.selectable_value(&mut self.asset_kind_input, id.to_string(), label);
                     }
                 });
         });
-        if self.asset_provider_input != old_asset_provider {
+        if self.asset_kind_input != old_asset_kind {
             self.sync_asset_provider_settings_for(&old_asset_provider);
-            self.switch_asset_provider_from_ui(self.asset_provider_input.clone());
+            self.switch_asset_kind_from_ui();
         }
+        if matches!(self.asset_kind_input.as_str(), "image" | "spritesheet") {
+            ui.horizontal(|ui| {
+                ui.label("Image provider");
+                egui::ComboBox::from_id_salt("asset_provider_select")
+                    .selected_text(image_provider_name(&self.asset_provider_input))
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for provider in image_provider_specs() {
+                            ui.selectable_value(
+                                &mut self.asset_provider_input,
+                                provider.id.to_string(),
+                                provider.name,
+                            );
+                        }
+                    });
+            });
+            if self.asset_provider_input != old_asset_provider {
+                self.sync_asset_provider_settings_for(&old_asset_provider);
+                self.switch_asset_provider_from_ui(self.asset_provider_input.clone());
+            }
 
-        if let Some(provider) = image_provider_specs()
-            .iter()
-            .find(|provider| provider.id == self.asset_provider_input)
-        {
-            ui.label(RichText::new(format!("{} | {}", provider.notes, provider.env_var)).weak());
+            if let Some(provider) = image_provider_specs()
+                .iter()
+                .find(|provider| provider.id == self.asset_provider_input)
+            {
+                ui.label(
+                    RichText::new(format!("{} | {}", provider.notes, provider.env_var)).weak(),
+                );
+            }
+        } else {
+            let provider_label = if self.asset_kind_input == "video" {
+                video_provider_name(OPENAI_VIDEO_PROVIDER_ID)
+            } else {
+                audio_provider_name(OPENAI_AUDIO_PROVIDER_ID)
+            };
+            ui.label(RichText::new(format!("{provider_label} | OPENAI_API_KEY")).weak());
         }
 
         ui.horizontal(|ui| {
@@ -1300,7 +1855,13 @@ impl LeetcodeApp {
         });
 
         ui.horizontal(|ui| {
-            ui.label("Image key");
+            ui.label(
+                if matches!(self.asset_kind_input.as_str(), "image" | "spritesheet") {
+                    "Image key"
+                } else {
+                    "Media key"
+                },
+            );
             let key_width = (ui.available_width() - 76.0).max(120.0);
             ui.add_sized(
                 [key_width, 22.0],
@@ -1314,7 +1875,7 @@ impl LeetcodeApp {
 
         ui.add(
             TextEdit::multiline(&mut self.asset_prompt)
-                .hint_text("Image prompt for a game/app asset")
+                .hint_text("Prompt for a game/app asset")
                 .desired_width(f32::INFINITY)
                 .desired_rows(3),
         );
@@ -1332,14 +1893,24 @@ impl LeetcodeApp {
                 .selected_text(&self.asset_image_size)
                 .width(72.0)
                 .show_ui(ui, |ui| {
-                    for size in ["0.5K", "1K", "2K", "4K"] {
-                        ui.selectable_value(&mut self.asset_image_size, size.to_string(), size);
+                    let sizes: &[&str] = if self.asset_kind_input == "video" {
+                        &["1280x720", "720x1280", "1920x1080", "1080x1920"]
+                    } else {
+                        &["0.5K", "1K", "2K", "4K"]
+                    };
+                    for size in sizes {
+                        ui.selectable_value(&mut self.asset_image_size, (*size).to_string(), *size);
                     }
                 });
             if ui
                 .add_enabled(
                     !self.asset_is_running && self.workspace.is_some(),
-                    egui::Button::new("Generate image"),
+                    egui::Button::new(match self.asset_kind_input.as_str() {
+                        "spritesheet" => "Generate spritesheet",
+                        "audio" => "Generate audio",
+                        "video" => "Generate video",
+                        _ => "Generate image",
+                    }),
                 )
                 .clicked()
             {
@@ -1420,6 +1991,15 @@ impl LeetcodeApp {
                 if let Some(output) = first_output.as_deref() {
                     if ui.button("Use icon").clicked() {
                         self.use_asset_as_app_icon(output);
+                    }
+                    if ui.button("Upscale").clicked() {
+                        self.upscale_asset_output(output);
+                    }
+                    if ui.button("Export").clicked() {
+                        self.export_asset_output(output);
+                    }
+                    if ui.button("Attach").clicked() {
+                        self.attach_asset_output(output);
                     }
                     if ui.button("Open folder").clicked() {
                         self.open_asset_folder(output);
@@ -1559,6 +2139,20 @@ fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
     }
 }
 
+fn media_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
+    let direct_key = config.api_key_for_provider(provider_id);
+    if !direct_key.trim().is_empty() {
+        return direct_key;
+    }
+
+    match provider_id {
+        OPENAI_AUDIO_PROVIDER_ID | OPENAI_VIDEO_PROVIDER_ID => {
+            config.api_key_for_provider(OPENAI_PROVIDER_ID)
+        }
+        _ => String::new(),
+    }
+}
+
 fn image_model_from_config(config: &AppConfig, provider_id: &str) -> String {
     config
         .providers
@@ -1572,6 +2166,21 @@ fn image_model_from_config(config: &AppConfig, provider_id: &str) -> String {
             }
         })
         .unwrap_or_else(|| default_image_model(provider_id).to_string())
+}
+
+fn media_model_from_config(config: &AppConfig, provider_id: &str, default_model: &str) -> String {
+    config
+        .providers
+        .get(provider_id)
+        .and_then(|settings| {
+            let model = settings.model.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        })
+        .unwrap_or_else(|| default_model.to_string())
 }
 
 fn compact(text: &str, max_chars: usize) -> String {

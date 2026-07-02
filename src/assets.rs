@@ -12,6 +12,8 @@ const JOBS_PATH: &str = "assets/generated/asset_jobs.json";
 const REPLICATE_POLL_LIMIT: usize = 45;
 
 pub const OPENAI_IMAGE_PROVIDER_ID: &str = "openai-image";
+pub const OPENAI_AUDIO_PROVIDER_ID: &str = "openai-audio";
+pub const OPENAI_VIDEO_PROVIDER_ID: &str = "openai-video";
 pub const GEMINI_IMAGE_PROVIDER_ID: &str = "gemini-image";
 pub const STABILITY_IMAGE_PROVIDER_ID: &str = "stability-image";
 pub const REPLICATE_IMAGE_PROVIDER_ID: &str = "replicate-image";
@@ -58,6 +60,41 @@ pub fn image_provider_specs() -> &'static [ImageProviderSpec] {
     ];
 
     SPECS
+}
+
+pub fn audio_provider_name(provider_id: &str) -> &'static str {
+    match provider_id {
+        OPENAI_AUDIO_PROVIDER_ID | "openai" => "OpenAI Audio",
+        _ => "Audio Provider",
+    }
+}
+
+pub fn video_provider_name(provider_id: &str) -> &'static str {
+    match provider_id {
+        OPENAI_VIDEO_PROVIDER_ID | "openai" => "OpenAI Video",
+        _ => "Video Provider",
+    }
+}
+
+pub fn default_audio_model(provider_id: &str) -> &'static str {
+    match provider_id {
+        OPENAI_AUDIO_PROVIDER_ID | "openai" => "gpt-audio-1.5",
+        _ => "gpt-audio-1.5",
+    }
+}
+
+pub fn default_video_model(provider_id: &str) -> &'static str {
+    match provider_id {
+        OPENAI_VIDEO_PROVIDER_ID | "openai" => "sora-2",
+        _ => "sora-2",
+    }
+}
+
+pub fn asset_provider_env_var(provider_id: &str) -> &'static str {
+    match provider_id {
+        OPENAI_AUDIO_PROVIDER_ID | OPENAI_VIDEO_PROVIDER_ID => "OPENAI_API_KEY",
+        _ => image_provider_env_var(provider_id),
+    }
 }
 
 pub fn image_provider_name(provider_id: &str) -> &'static str {
@@ -113,6 +150,7 @@ pub fn normalize_image_provider(provider_id: &str) -> String {
 #[serde(rename_all = "snake_case")]
 pub enum AssetKind {
     Image,
+    Spritesheet,
     Audio,
     Video,
 }
@@ -152,12 +190,48 @@ pub struct ImageAssetRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct SpritesheetAssetRequest {
+    pub provider: String,
+    pub prompt: String,
+    pub model: String,
+    pub aspect_ratio: String,
+    pub image_size: String,
+    pub columns: u32,
+    pub rows: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct AudioAssetRequest {
+    pub provider: String,
+    pub prompt: String,
+    pub model: String,
+    pub voice: String,
+    pub format: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct VideoAssetRequest {
+    pub provider: String,
+    pub prompt: String,
+    pub model: String,
+    pub size: String,
+    pub seconds: u32,
+}
+
+#[derive(Clone, Debug)]
 pub enum AssetEvent {
     JobUpdated(AssetJob),
     Done,
 }
 
 struct GeneratedImage {
+    bytes: Vec<u8>,
+    mime_type: String,
+    api: &'static str,
+    metadata: Value,
+}
+
+struct GeneratedBinary {
     bytes: Vec<u8>,
     mime_type: String,
     api: &'static str,
@@ -185,6 +259,102 @@ impl AssetJob {
                 "aspect_ratio": request.aspect_ratio,
                 "image_size": request.image_size,
                 "mime_type": "image/png"
+            }),
+            output_files: Vec::new(),
+            metadata: json!({}),
+            error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn new_spritesheet(request: &SpritesheetAssetRequest) -> Self {
+        let now = unix_timestamp();
+        let provider = normalize_image_provider(&request.provider);
+        let model = if request.model.trim().is_empty() {
+            default_image_model(&provider).to_string()
+        } else {
+            request.model.clone()
+        };
+
+        Self {
+            id: format!("sheet-{}", uuid::Uuid::new_v4()),
+            kind: AssetKind::Spritesheet,
+            status: AssetStatus::Pending,
+            provider,
+            model,
+            prompt: request.prompt.clone(),
+            parameters: json!({
+                "aspect_ratio": request.aspect_ratio,
+                "image_size": request.image_size,
+                "columns": request.columns.max(1),
+                "rows": request.rows.max(1),
+                "mime_type": "image/png"
+            }),
+            output_files: Vec::new(),
+            metadata: json!({}),
+            error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn new_audio(request: &AudioAssetRequest) -> Self {
+        let now = unix_timestamp();
+        let provider = if request.provider.trim().is_empty() {
+            OPENAI_AUDIO_PROVIDER_ID.to_string()
+        } else {
+            request.provider.trim().to_ascii_lowercase()
+        };
+        let model = if request.model.trim().is_empty() {
+            default_audio_model(&provider).to_string()
+        } else {
+            request.model.clone()
+        };
+
+        Self {
+            id: format!("aud-{}", uuid::Uuid::new_v4()),
+            kind: AssetKind::Audio,
+            status: AssetStatus::Pending,
+            provider,
+            model,
+            prompt: request.prompt.clone(),
+            parameters: json!({
+                "voice": request.voice,
+                "format": request.format
+            }),
+            output_files: Vec::new(),
+            metadata: json!({}),
+            error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn new_video(request: &VideoAssetRequest) -> Self {
+        let now = unix_timestamp();
+        let provider = if request.provider.trim().is_empty() {
+            OPENAI_VIDEO_PROVIDER_ID.to_string()
+        } else {
+            request.provider.trim().to_ascii_lowercase()
+        };
+        let model = if request.model.trim().is_empty() {
+            default_video_model(&provider).to_string()
+        } else {
+            request.model.clone()
+        };
+
+        Self {
+            id: format!("vid-{}", uuid::Uuid::new_v4()),
+            kind: AssetKind::Video,
+            status: AssetStatus::Pending,
+            provider,
+            model,
+            prompt: request.prompt.clone(),
+            parameters: json!({
+                "size": request.size,
+                "seconds": request.seconds.clamp(1, 20),
+                "mime_type": "video/mp4"
             }),
             output_files: Vec::new(),
             metadata: json!({}),
@@ -275,7 +445,190 @@ pub async fn run_image_job(
                         "image_size": request.image_size
                     },
                     "details": generated.metadata,
-                    "license_note": "Generated asset metadata only; check provider terms before production use."
+                    "license": license_metadata(&request.provider)
+                });
+                job.error = None;
+            }
+            Err(err) => {
+                job.status = AssetStatus::Failed;
+                job.error = Some(err.to_string());
+            }
+        },
+        Err(err) => {
+            job.status = AssetStatus::Failed;
+            job.error = Some(err.to_string());
+        }
+    }
+
+    job.updated_at = unix_timestamp();
+    let _ = upsert_job(&workspace, &job);
+    job
+}
+
+pub async fn run_spritesheet_job(
+    workspace: Workspace,
+    api_key: String,
+    request: SpritesheetAssetRequest,
+    mut job: AssetJob,
+) -> AssetJob {
+    let image_request = ImageAssetRequest {
+        provider: request.provider.clone(),
+        prompt: format!(
+            "{}\n\nCreate a clean game spritesheet laid out as a {} columns by {} rows grid. Keep each cell consistent, isolated, and ready for slicing. Avoid text labels.",
+            request.prompt,
+            request.columns.max(1),
+            request.rows.max(1)
+        ),
+        model: request.model.clone(),
+        aspect_ratio: request.aspect_ratio.clone(),
+        image_size: request.image_size.clone(),
+    };
+
+    job.status = AssetStatus::Running;
+    job.updated_at = unix_timestamp();
+    let _ = upsert_job(&workspace, &job);
+
+    match generate_image(&api_key, &image_request).await {
+        Ok(generated) => match save_generated_image(&workspace, &image_request, &job, &generated) {
+            Ok(output_file) => {
+                job.status = AssetStatus::Done;
+                job.output_files = vec![output_file];
+                job.metadata = json!({
+                    "provider": image_provider_name(&job.provider),
+                    "provider_id": job.provider,
+                    "asset_kind": "spritesheet",
+                    "api": generated.api,
+                    "model": job.model,
+                    "parameters": {
+                        "columns": request.columns.max(1),
+                        "rows": request.rows.max(1),
+                        "aspect_ratio": request.aspect_ratio,
+                        "image_size": request.image_size
+                    },
+                    "details": generated.metadata,
+                    "license": license_metadata(&job.provider)
+                });
+                job.error = None;
+            }
+            Err(err) => {
+                job.status = AssetStatus::Failed;
+                job.error = Some(err.to_string());
+            }
+        },
+        Err(err) => {
+            job.status = AssetStatus::Failed;
+            job.error = Some(err.to_string());
+        }
+    }
+
+    job.updated_at = unix_timestamp();
+    let _ = upsert_job(&workspace, &job);
+    job
+}
+
+pub async fn run_audio_job(
+    workspace: Workspace,
+    api_key: String,
+    mut request: AudioAssetRequest,
+    mut job: AssetJob,
+) -> AssetJob {
+    if request.provider.trim().is_empty() {
+        request.provider = OPENAI_AUDIO_PROVIDER_ID.to_string();
+    }
+    if request.model.trim().is_empty() {
+        request.model = default_audio_model(&request.provider).to_string();
+    }
+
+    job.status = AssetStatus::Running;
+    job.provider = request.provider.clone();
+    job.model = request.model.clone();
+    job.updated_at = unix_timestamp();
+    let _ = upsert_job(&workspace, &job);
+
+    match generate_audio(&api_key, &request).await {
+        Ok(generated) => match save_generated_binary(
+            &workspace,
+            "assets/generated/audio",
+            &request.prompt,
+            &job,
+            &generated,
+        ) {
+            Ok(output_file) => {
+                job.status = AssetStatus::Done;
+                job.output_files = vec![output_file];
+                job.metadata = json!({
+                    "provider": audio_provider_name(&request.provider),
+                    "provider_id": request.provider,
+                    "api": generated.api,
+                    "model": request.model,
+                    "mime_type": generated.mime_type,
+                    "parameters": {
+                        "voice": request.voice,
+                        "format": request.format
+                    },
+                    "details": generated.metadata,
+                    "license": license_metadata(&job.provider)
+                });
+                job.error = None;
+            }
+            Err(err) => {
+                job.status = AssetStatus::Failed;
+                job.error = Some(err.to_string());
+            }
+        },
+        Err(err) => {
+            job.status = AssetStatus::Failed;
+            job.error = Some(err.to_string());
+        }
+    }
+
+    job.updated_at = unix_timestamp();
+    let _ = upsert_job(&workspace, &job);
+    job
+}
+
+pub async fn run_video_job(
+    workspace: Workspace,
+    api_key: String,
+    mut request: VideoAssetRequest,
+    mut job: AssetJob,
+) -> AssetJob {
+    if request.provider.trim().is_empty() {
+        request.provider = OPENAI_VIDEO_PROVIDER_ID.to_string();
+    }
+    if request.model.trim().is_empty() {
+        request.model = default_video_model(&request.provider).to_string();
+    }
+
+    job.status = AssetStatus::Running;
+    job.provider = request.provider.clone();
+    job.model = request.model.clone();
+    job.updated_at = unix_timestamp();
+    let _ = upsert_job(&workspace, &job);
+
+    match generate_video(&api_key, &request).await {
+        Ok(generated) => match save_generated_binary(
+            &workspace,
+            "assets/generated/video",
+            &request.prompt,
+            &job,
+            &generated,
+        ) {
+            Ok(output_file) => {
+                job.status = AssetStatus::Done;
+                job.output_files = vec![output_file];
+                job.metadata = json!({
+                    "provider": video_provider_name(&request.provider),
+                    "provider_id": request.provider,
+                    "api": generated.api,
+                    "model": request.model,
+                    "mime_type": generated.mime_type,
+                    "parameters": {
+                        "size": request.size,
+                        "seconds": request.seconds.clamp(1, 20)
+                    },
+                    "details": generated.metadata,
+                    "license": license_metadata(&job.provider)
                 });
                 job.error = None;
             }
@@ -316,6 +669,151 @@ async fn generate_image(
         REPLICATE_IMAGE_PROVIDER_ID => generate_replicate_image(api_key, request).await,
         _ => anyhow::bail!("Unsupported image provider: {}", request.provider),
     }
+}
+
+async fn generate_audio(
+    api_key: &str,
+    request: &AudioAssetRequest,
+) -> anyhow::Result<GeneratedBinary> {
+    if api_key.trim().is_empty() {
+        anyhow::bail!("OPENAI_API_KEY is empty. Save a key before generating audio assets.");
+    }
+    if request.prompt.trim().is_empty() {
+        anyhow::bail!("Audio prompt is empty");
+    }
+    if request.provider != OPENAI_AUDIO_PROVIDER_ID {
+        anyhow::bail!("Unsupported audio provider: {}", request.provider);
+    }
+
+    let format = normalize_audio_format(&request.format);
+    let body = json!({
+        "model": request.model,
+        "modalities": ["text", "audio"],
+        "audio": {
+            "voice": normalize_voice(&request.voice),
+            "format": format
+        },
+        "messages": [{
+            "role": "user",
+            "content": request.prompt
+        }]
+    });
+
+    let response = reqwest::Client::new()
+        .post("https://api.openai.com/v1/chat/completions")
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("OpenAI audio API error {status}: {text}");
+    }
+
+    let value = serde_json::from_str::<Value>(&text)?;
+    let encoded = value
+        .pointer("/choices/0/message/audio/data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("OpenAI audio response did not include audio data"))?;
+
+    Ok(GeneratedBinary {
+        bytes: general_purpose::STANDARD.decode(encoded)?,
+        mime_type: mime_for_audio_format(format).to_string(),
+        api: "chat/completions.audio",
+        metadata: json!({
+            "transcript": value.pointer("/choices/0/message/audio/transcript").and_then(Value::as_str)
+        }),
+    })
+}
+
+async fn generate_video(
+    api_key: &str,
+    request: &VideoAssetRequest,
+) -> anyhow::Result<GeneratedBinary> {
+    if api_key.trim().is_empty() {
+        anyhow::bail!("OPENAI_API_KEY is empty. Save a key before generating video assets.");
+    }
+    if request.prompt.trim().is_empty() {
+        anyhow::bail!("Video prompt is empty");
+    }
+    if request.provider != OPENAI_VIDEO_PROVIDER_ID {
+        anyhow::bail!("Unsupported video provider: {}", request.provider);
+    }
+
+    let client = reqwest::Client::new();
+    let form = multipart::Form::new()
+        .text("model", request.model.clone())
+        .text("prompt", request.prompt.clone())
+        .text("size", normalize_video_size(&request.size).to_string())
+        .text("seconds", request.seconds.clamp(1, 20).to_string());
+    let response = client
+        .post("https://api.openai.com/v1/videos")
+        .bearer_auth(api_key)
+        .multipart(form)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        anyhow::bail!("OpenAI video API error {status}: {text}");
+    }
+
+    let mut value = serde_json::from_str::<Value>(&text)?;
+    let video_id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("OpenAI video response did not include id"))?
+        .to_string();
+
+    for _ in 0..120 {
+        let status_text = value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match status_text {
+            "completed" | "succeeded" => {
+                let content_url = format!("https://api.openai.com/v1/videos/{video_id}/content");
+                let content = client.get(content_url).bearer_auth(api_key).send().await?;
+                let content_status = content.status();
+                if !content_status.is_success() {
+                    let text = content.text().await.unwrap_or_default();
+                    anyhow::bail!("OpenAI video content download failed {content_status}: {text}");
+                }
+                return Ok(GeneratedBinary {
+                    bytes: content.bytes().await?.to_vec(),
+                    mime_type: "video/mp4".to_string(),
+                    api: "videos",
+                    metadata: json!({
+                        "video_id": video_id,
+                        "final_status": status_text,
+                        "job": value
+                    }),
+                });
+            }
+            "failed" | "cancelled" | "canceled" => {
+                anyhow::bail!("OpenAI video generation failed: {value}");
+            }
+            _ => {}
+        }
+
+        sleep(Duration::from_secs(5)).await;
+        let response = client
+            .get(format!("https://api.openai.com/v1/videos/{video_id}"))
+            .bearer_auth(api_key)
+            .send()
+            .await?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("OpenAI video polling error {status}: {text}");
+        }
+        value = serde_json::from_str::<Value>(&text)?;
+    }
+
+    anyhow::bail!("OpenAI video generation did not finish before timeout");
 }
 
 async fn generate_openai_image(
@@ -593,6 +1091,25 @@ fn save_generated_image(
     Ok(rel_path)
 }
 
+fn save_generated_binary(
+    workspace: &Workspace,
+    folder: &str,
+    prompt: &str,
+    job: &AssetJob,
+    generated: &GeneratedBinary,
+) -> anyhow::Result<String> {
+    let extension = extension_for_mime(&generated.mime_type);
+    let file_name = format!("{}-{}.{}", slugify(prompt), job.id, extension);
+    let rel_path = format!("{folder}/{file_name}");
+    let output_path = workspace.resolve_for_write(&rel_path)?;
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, &generated.bytes)?;
+
+    Ok(rel_path)
+}
+
 fn extract_image_data(value: &Value) -> Option<(&str, &str)> {
     if let Some(data) = value.pointer("/output_image/data").and_then(Value::as_str) {
         let mime = value
@@ -641,6 +1158,165 @@ pub fn absolute_output_path(workspace: &Workspace, rel_path: &str) -> Option<Pat
     workspace.resolve_existing(rel_path).ok()
 }
 
+pub fn export_asset(
+    workspace: &Workspace,
+    source_path: &str,
+    target_name: Option<&str>,
+) -> anyhow::Result<AssetJob> {
+    let source = workspace.resolve_existing(source_path)?;
+    if !source.is_file() {
+        anyhow::bail!("export source must be a file");
+    }
+
+    let now = unix_timestamp();
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("bin");
+    let stem = target_name
+        .filter(|name| !name.trim().is_empty())
+        .map(slugify)
+        .unwrap_or_else(|| {
+            source
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(slugify)
+                .unwrap_or_else(|| "asset-export".to_string())
+        });
+    let mut job = AssetJob {
+        id: format!("export-{}", uuid::Uuid::new_v4()),
+        kind: kind_for_path(&source),
+        status: AssetStatus::Running,
+        provider: "local-export".to_string(),
+        model: "local-copy".to_string(),
+        prompt: format!("Export {source_path}"),
+        parameters: json!({
+            "source_path": source_path,
+            "target_name": target_name
+        }),
+        output_files: Vec::new(),
+        metadata: json!({}),
+        error: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let rel_path = format!("assets/generated/exports/{}-{}.{}", stem, job.id, extension);
+    let target = workspace.resolve_for_write(&rel_path)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &target)?;
+    job.status = AssetStatus::Done;
+    job.output_files = vec![rel_path];
+    job.metadata = json!({
+        "operation": "export",
+        "source_path": source_path,
+        "license": license_metadata("local-export")
+    });
+    job.updated_at = unix_timestamp();
+    upsert_job(workspace, &job)?;
+    Ok(job)
+}
+
+pub fn upscale_asset(
+    workspace: &Workspace,
+    source_path: &str,
+    scale: u32,
+) -> anyhow::Result<AssetJob> {
+    let source = workspace.resolve_existing(source_path)?;
+    if !is_image_path(&source) {
+        anyhow::bail!("upscale source must be an image");
+    }
+    let scale = scale.clamp(2, 4);
+    let now = unix_timestamp();
+    let mut job = AssetJob {
+        id: format!("upscale-{}", uuid::Uuid::new_v4()),
+        kind: AssetKind::Image,
+        status: AssetStatus::Running,
+        provider: "local-upscale".to_string(),
+        model: "lanczos3".to_string(),
+        prompt: format!("Upscale {source_path} by {scale}x"),
+        parameters: json!({
+            "source_path": source_path,
+            "scale": scale
+        }),
+        output_files: Vec::new(),
+        metadata: json!({}),
+        error: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let image = image::open(&source)?;
+    let width = image.width().saturating_mul(scale);
+    let height = image.height().saturating_mul(scale);
+    let resized = image.resize(width, height, image::imageops::FilterType::Lanczos3);
+    let rel_path = format!(
+        "assets/generated/exports/{}-{}.png",
+        slugify(source_path),
+        job.id
+    );
+    let target = workspace.resolve_for_write(&rel_path)?;
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    resized.save_with_format(&target, image::ImageFormat::Png)?;
+    job.status = AssetStatus::Done;
+    job.output_files = vec![rel_path];
+    job.metadata = json!({
+        "operation": "upscale",
+        "source_path": source_path,
+        "scale": scale,
+        "width": width,
+        "height": height,
+        "license": license_metadata("local-upscale")
+    });
+    job.updated_at = unix_timestamp();
+    upsert_job(workspace, &job)?;
+    Ok(job)
+}
+
+pub fn attach_asset_context(workspace: &Workspace, source_path: &str) -> anyhow::Result<Value> {
+    let source = workspace.resolve_existing(source_path)?;
+    if !source.is_file() {
+        anyhow::bail!("attach source must be a file");
+    }
+    let metadata = load_jobs(workspace)
+        .into_iter()
+        .find(|job| job.output_files.iter().any(|output| output == source_path))
+        .map(|job| {
+            json!({
+                "job_id": job.id,
+                "kind": job.kind,
+                "provider": job.provider,
+                "model": job.model,
+                "prompt": job.prompt,
+                "parameters": job.parameters,
+                "metadata": job.metadata
+            })
+        })
+        .unwrap_or_else(|| json!({}));
+    let bytes = fs::metadata(&source)?.len();
+    let context = json!({
+        "path": source_path,
+        "bytes": bytes,
+        "is_image": is_image_path(&source),
+        "metadata": metadata
+    });
+    let attachments_path = "assets/generated/attachments/attached_assets.json";
+    let mut attachments = workspace
+        .read_text(attachments_path, 2_000_000)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
+        .unwrap_or_default();
+    attachments.push(context.clone());
+    workspace.write_text(
+        attachments_path,
+        &serde_json::to_string_pretty(&attachments)?,
+    )?;
+    Ok(context)
+}
+
 pub fn is_image_path(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -649,6 +1325,18 @@ pub fn is_image_path(path: &Path) -> bool {
             .as_deref(),
         Some("png" | "jpg" | "jpeg" | "webp")
     )
+}
+
+fn kind_for_path(path: &Path) -> AssetKind {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("wav" | "mp3" | "ogg" | "opus") => AssetKind::Audio,
+        Some("mp4" | "mov" | "webm") => AssetKind::Video,
+        _ => AssetKind::Image,
+    }
 }
 
 pub fn openai_size_for_aspect_ratio(aspect_ratio: &str) -> &'static str {
@@ -677,8 +1365,68 @@ fn extension_for_mime(mime_type: &str) -> &'static str {
     match mime_type {
         "image/jpeg" | "image/jpg" => "jpg",
         "image/webp" => "webp",
+        "audio/mpeg" => "mp3",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/ogg" => "ogg",
+        "video/mp4" => "mp4",
         _ => "png",
     }
+}
+
+fn normalize_audio_format(format: &str) -> &'static str {
+    match format.trim().to_ascii_lowercase().as_str() {
+        "mp3" => "mp3",
+        "ogg" | "opus" => "opus",
+        _ => "wav",
+    }
+}
+
+fn mime_for_audio_format(format: &str) -> &'static str {
+    match format {
+        "mp3" => "audio/mpeg",
+        "opus" => "audio/ogg",
+        _ => "audio/wav",
+    }
+}
+
+fn normalize_voice(voice: &str) -> &'static str {
+    match voice.trim().to_ascii_lowercase().as_str() {
+        "ash" => "ash",
+        "ballad" => "ballad",
+        "coral" => "coral",
+        "echo" => "echo",
+        "sage" => "sage",
+        "shimmer" => "shimmer",
+        "verse" => "verse",
+        _ => "alloy",
+    }
+}
+
+fn normalize_video_size(size: &str) -> &'static str {
+    match size.trim().to_ascii_lowercase().as_str() {
+        "720x1280" | "9:16" => "720x1280",
+        "1280x720" | "16:9" => "1280x720",
+        "1920x1080" => "1920x1080",
+        "1080x1920" => "1080x1920",
+        _ => "1280x720",
+    }
+}
+
+fn license_metadata(provider_id: &str) -> Value {
+    let (provider, terms_url) = match provider_id {
+        OPENAI_IMAGE_PROVIDER_ID | OPENAI_AUDIO_PROVIDER_ID | OPENAI_VIDEO_PROVIDER_ID => {
+            ("OpenAI", "https://openai.com/policies/terms-of-use/")
+        }
+        GEMINI_IMAGE_PROVIDER_ID => ("Google Gemini", "https://ai.google.dev/gemini-api/terms"),
+        STABILITY_IMAGE_PROVIDER_ID => ("Stability AI", "https://stability.ai/terms-of-use"),
+        REPLICATE_IMAGE_PROVIDER_ID => ("Replicate", "https://replicate.com/terms"),
+        _ => ("Unknown", ""),
+    };
+    json!({
+        "provider": provider,
+        "terms_url": terms_url,
+        "note": "Review provider terms and project license requirements before production use."
+    })
 }
 
 fn slugify(text: &str) -> String {

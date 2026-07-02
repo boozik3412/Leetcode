@@ -6,13 +6,14 @@ use crate::agent::models::{
     ANTHROPIC_PROVIDER_ID, DEEPSEEK_PROVIDER_ID, GEMINI_PROVIDER_ID, OPENAI_PROVIDER_ID,
 };
 use crate::agent::openai::OpenAiClient;
+use crate::agent::routing::{friendly_provider_error, RouteCandidate};
 use crate::agent::types::{AppEvent, ToolCall};
 use crate::config::AppConfig;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::mpsc::Sender;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ProviderInput {
     Text(String),
     ToolOutputs(Vec<Value>),
@@ -63,10 +64,18 @@ pub fn normalized_tool_outputs(outputs: &[Value]) -> Vec<(String, String)> {
         .collect()
 }
 
+#[allow(dead_code)]
 pub fn build_provider(config: &AppConfig) -> anyhow::Result<Box<dyn ModelProvider>> {
     let provider_id = config.provider_id();
-    ensure_provider_supports_tools(provider_id, &config.model_for_provider(provider_id))?;
+    build_provider_for(config, provider_id, &config.model_for_provider(provider_id))
+}
 
+pub fn build_provider_for(
+    config: &AppConfig,
+    provider_id: &str,
+    model: &str,
+) -> anyhow::Result<Box<dyn ModelProvider>> {
+    ensure_provider_supports_tools(provider_id, model)?;
     match provider_id {
         OPENAI_PROVIDER_ID => {
             let api_key = config.api_key_for_provider(OPENAI_PROVIDER_ID);
@@ -76,8 +85,10 @@ pub fn build_provider(config: &AppConfig) -> anyhow::Result<Box<dyn ModelProvide
                 );
             }
 
-            let model = config.model_for_provider(OPENAI_PROVIDER_ID);
-            Ok(Box::new(OpenAiClient::new(api_key, model)))
+            Ok(Box::new(OpenAiClient::new(
+                api_key,
+                model.trim().to_string(),
+            )))
         }
         ANTHROPIC_PROVIDER_ID => {
             let api_key = config.api_key_for_provider(ANTHROPIC_PROVIDER_ID);
@@ -89,7 +100,7 @@ pub fn build_provider(config: &AppConfig) -> anyhow::Result<Box<dyn ModelProvide
 
             Ok(Box::new(AnthropicClient::new(
                 api_key,
-                config.model_for_provider(ANTHROPIC_PROVIDER_ID),
+                model.trim().to_string(),
             )))
         }
         DEEPSEEK_PROVIDER_ID => {
@@ -102,7 +113,7 @@ pub fn build_provider(config: &AppConfig) -> anyhow::Result<Box<dyn ModelProvide
 
             Ok(Box::new(DeepSeekClient::new(
                 api_key,
-                config.model_for_provider(DEEPSEEK_PROVIDER_ID),
+                model.trim().to_string(),
             )))
         }
         GEMINI_PROVIDER_ID => {
@@ -115,7 +126,7 @@ pub fn build_provider(config: &AppConfig) -> anyhow::Result<Box<dyn ModelProvide
 
             Ok(Box::new(GeminiClient::new(
                 api_key,
-                config.model_for_provider(GEMINI_PROVIDER_ID),
+                model.trim().to_string(),
             )))
         }
         unsupported => anyhow::bail!(
@@ -124,6 +135,18 @@ pub fn build_provider(config: &AppConfig) -> anyhow::Result<Box<dyn ModelProvide
             provider_name(OPENAI_PROVIDER_ID)
         ),
     }
+}
+
+pub fn build_routed_provider(
+    config: &AppConfig,
+    candidate: &RouteCandidate,
+) -> anyhow::Result<Box<dyn ModelProvider>> {
+    build_provider_for(config, &candidate.provider_id, &candidate.model_id).map_err(|err| {
+        anyhow::anyhow!(
+            "{}",
+            friendly_provider_error(&candidate.provider_id, &candidate.model_id, &err)
+        )
+    })
 }
 
 fn ensure_provider_supports_tools(provider_id: &str, model: &str) -> anyhow::Result<()> {

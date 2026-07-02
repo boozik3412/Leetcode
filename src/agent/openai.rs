@@ -345,6 +345,243 @@ pub fn act_tool_schema() -> Value {
                 {
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["game_workflow"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "workflow": {
+                                    "type": "string",
+                                    "enum": [
+                                        "prototype_mechanic",
+                                        "generate_spritesheet",
+                                        "generate_ui_sounds",
+                                        "create_item_icons",
+                                        "build_vertical_slice",
+                                        "run_playtest_checklist"
+                                    ]
+                                },
+                                "title": { "type": "string" },
+                                "brief": { "type": "string" }
+                            },
+                            "required": ["workflow"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["open_project_preview"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "preview": {
+                                    "type": "string",
+                                    "description": "Preview hook id or label such as dev-server, preview-server, trunk-local, godot-editor."
+                                },
+                                "profile": {
+                                    "type": "string",
+                                    "description": "Optional project kind/name filter."
+                                },
+                                "url": {
+                                    "type": "string",
+                                    "description": "Optional explicit local URL to open."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["run_subagent"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "role": {
+                                    "type": "string",
+                                    "enum": [
+                                        "code_agent",
+                                        "game_designer",
+                                        "art_director",
+                                        "audio_agent",
+                                        "qa_agent",
+                                        "build_agent"
+                                    ],
+                                    "description": "Specialist role to run as a bounded helper."
+                                },
+                                "task": {
+                                    "type": "string",
+                                    "description": "Focused task for the subagent."
+                                },
+                                "context": {
+                                    "type": "string",
+                                    "description": "Relevant local context, files, constraints, or expected output."
+                                },
+                                "max_rounds": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 8,
+                                    "description": "Maximum model/tool rounds for the subagent. Defaults to 4."
+                                }
+                            },
+                            "required": ["role", "task"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["delegate_agent"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "role": {
+                                    "type": "string",
+                                    "enum": [
+                                        "code_agent",
+                                        "game_designer",
+                                        "art_director",
+                                        "audio_agent",
+                                        "qa_agent",
+                                        "build_agent"
+                                    ],
+                                    "description": "Specialist role to hand off work to."
+                                },
+                                "task": { "type": "string" },
+                                "context": { "type": "string" },
+                                "expected_output": { "type": "string" },
+                                "from": { "type": "string" }
+                            },
+                            "required": ["role", "task"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["update_workspace_context"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "summary": { "type": "string" },
+                                "decisions": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "open_questions": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "important_files": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "important_assets": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["record_run_summary"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string" },
+                                "summary": { "type": "string" },
+                                "completed": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "next_steps": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "risks": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "required": ["summary"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["export_trace"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["create_replay_eval"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "prompt": { "type": "string" },
+                                "expected_tools": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                },
+                                "success_criteria": {
+                                    "type": "array",
+                                    "items": { "type": "string" }
+                                }
+                            },
+                            "required": ["name", "prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["orchestration_snapshot"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
                         "action": { "type": "string", "enum": ["run_shell"] },
                         "args": {
                             "type": "object",
@@ -405,6 +642,66 @@ pub fn act_tool_schema() -> Value {
                 {
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["generate_spritesheet_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": { "type": "string" },
+                                "provider": { "type": "string" },
+                                "model": { "type": "string" },
+                                "aspect_ratio": { "type": "string" },
+                                "image_size": { "type": "string" },
+                                "columns": { "type": "integer", "minimum": 1, "maximum": 12 },
+                                "rows": { "type": "integer", "minimum": 1, "maximum": 12 }
+                            },
+                            "required": ["prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["generate_audio_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": { "type": "string" },
+                                "model": { "type": "string" },
+                                "voice": { "type": "string" },
+                                "format": { "type": "string", "enum": ["wav", "mp3", "opus"] }
+                            },
+                            "required": ["prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["generate_video_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": { "type": "string" },
+                                "model": { "type": "string" },
+                                "size": { "type": "string", "enum": ["1280x720", "720x1280", "1920x1080", "1080x1920"] },
+                                "seconds": { "type": "integer", "minimum": 1, "maximum": 20 }
+                            },
+                            "required": ["prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
                         "action": { "type": "string", "enum": ["regenerate_image_asset"] },
                         "args": {
                             "type": "object",
@@ -415,6 +712,56 @@ pub fn act_tool_schema() -> Value {
                                 }
                             },
                             "required": ["job_id"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["upscale_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "source_path": { "type": "string" },
+                                "scale": { "type": "integer", "minimum": 2, "maximum": 4 }
+                            },
+                            "required": ["source_path"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["export_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "source_path": { "type": "string" },
+                                "target_name": { "type": "string" }
+                            },
+                            "required": ["source_path"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["attach_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "source_path": { "type": "string" }
+                            },
+                            "required": ["source_path"],
                             "additionalProperties": false
                         }
                     },
@@ -617,10 +964,25 @@ pub fn gemini_act_function_declaration() -> Value {
                         "apply_patch",
                         "grep",
                         "project_command",
+                        "game_workflow",
+                        "open_project_preview",
+                        "run_subagent",
+                        "delegate_agent",
+                        "update_workspace_context",
+                        "record_run_summary",
+                        "export_trace",
+                        "create_replay_eval",
+                        "orchestration_snapshot",
                         "run_shell",
                         "generate_image_asset",
+                        "generate_spritesheet_asset",
+                        "generate_audio_asset",
+                        "generate_video_asset",
                         "regenerate_image_asset",
                         "vary_image_asset",
+                        "upscale_asset",
+                        "export_asset",
+                        "attach_asset",
                         "use_asset_as_app_icon",
                         "open_asset_folder",
                         "screenshot",
@@ -653,10 +1015,25 @@ fn act_compatible_parameters_schema() -> Value {
                     "apply_patch",
                     "grep",
                     "project_command",
+                    "game_workflow",
+                    "open_project_preview",
+                    "run_subagent",
+                    "delegate_agent",
+                    "update_workspace_context",
+                    "record_run_summary",
+                    "export_trace",
+                    "create_replay_eval",
+                    "orchestration_snapshot",
                     "run_shell",
                     "generate_image_asset",
+                    "generate_spritesheet_asset",
+                    "generate_audio_asset",
+                    "generate_video_asset",
                     "regenerate_image_asset",
                     "vary_image_asset",
+                    "upscale_asset",
+                    "export_asset",
+                    "attach_asset",
                     "use_asset_as_app_icon",
                     "open_asset_folder",
                     "screenshot",
@@ -879,6 +1256,21 @@ mod tests {
 
         for schema in [openai_schema, compatible_schema, gemini_schema] {
             assert!(schema.contains("generate_image_asset"));
+            assert!(schema.contains("game_workflow"));
+            assert!(schema.contains("open_project_preview"));
+            assert!(schema.contains("run_subagent"));
+            assert!(schema.contains("delegate_agent"));
+            assert!(schema.contains("update_workspace_context"));
+            assert!(schema.contains("record_run_summary"));
+            assert!(schema.contains("export_trace"));
+            assert!(schema.contains("create_replay_eval"));
+            assert!(schema.contains("orchestration_snapshot"));
+            assert!(schema.contains("generate_spritesheet_asset"));
+            assert!(schema.contains("generate_audio_asset"));
+            assert!(schema.contains("generate_video_asset"));
+            assert!(schema.contains("upscale_asset"));
+            assert!(schema.contains("export_asset"));
+            assert!(schema.contains("attach_asset"));
             assert!(schema.contains("project_command"));
             assert!(schema.contains("regenerate_image_asset"));
             assert!(schema.contains("vary_image_asset"));

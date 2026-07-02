@@ -8,15 +8,22 @@ Minimal desktop coding agent implemented as a Rust desktop app.
 - Editable file buffer with `Save`, `Revert`, and `Reload`.
 - OpenAI Responses API agent loop.
 - Model provider layer with OpenAI, Claude, DeepSeek, and Gemini providers.
-- Per-provider model/API key config foundation.
+- Per-provider model/API key config with task route selection and provider fallback.
+- Task-based model routing for coding, planning, fast, vision, image, audio, video, and realtime workflows.
 - Image asset generation panel with ChatGPT Image, Nano Banana, Stability AI, and Replicate FLUX providers.
+- Media asset jobs for spritesheets, OpenAI audio, and OpenAI/Sora video.
 - Agent-callable `generate_image_asset` tool for creating visual game/app assets from chat requests.
-- Agent-callable asset follow-up tools: `regenerate_image_asset`, `vary_image_asset`, `use_asset_as_app_icon`, and `open_asset_folder`.
+- Agent-callable asset tools: `generate_spritesheet_asset`, `generate_audio_asset`, `generate_video_asset`, `regenerate_image_asset`, `vary_image_asset`, `upscale_asset`, `export_asset`, `attach_asset`, `use_asset_as_app_icon`, and `open_asset_folder`.
 - Agent-callable `screenshot` tool for approved desktop screenshots saved into the selected workspace.
 - Approval-gated desktop control tools: `mouse_click`, `type_text`, and `hotkey`.
 - Project profile detection for Rust, Node/package.json, React/Vite, Python, Godot, Unity, and Unreal workspaces.
 - Project panel quick commands for detected run/check/test/build/dev/lint/editor workflows.
 - Agent-callable `project_command` tool for common project lifecycle commands.
+- Game/app workflow templates for prototype mechanics, spritesheets, UI sounds, item icons, vertical slices, and playtest checklists.
+- Browser/app preview hooks for Vite/React/Next/Trunk URLs and Godot/Unreal editor commands.
+- Multi-agent orchestration layer with Code Agent, Game Designer, Art Director, Audio Agent, QA Agent, and Build Agent handoffs.
+- Bounded subagent execution through `run_subagent`, with role-specific tool allowlists and traceable run records.
+- Shared workspace context, run summaries, trace export, and replayable eval case files under `assets/generated/orchestration`.
 - Project-local generated image outputs under `assets/generated/images`.
 - Streaming model text updates from OpenAI Responses API server-sent events.
 - Single exposed model tool: `act`.
@@ -28,7 +35,23 @@ Minimal desktop coding agent implemented as a Rust desktop app.
   - `apply_patch`
   - `grep`
   - `project_command`
+  - `game_workflow`
+  - `open_project_preview`
+  - `run_subagent`
+  - `delegate_agent`
+  - `update_workspace_context`
+  - `record_run_summary`
+  - `export_trace`
+  - `create_replay_eval`
+  - `orchestration_snapshot`
   - `run_shell`
+  - `generate_image_asset`
+  - `generate_spritesheet_asset`
+  - `generate_audio_asset`
+  - `generate_video_asset`
+  - `upscale_asset`
+  - `export_asset`
+  - `attach_asset`
 - Approval prompts for shell and write/edit actions.
 - Patch dry-run validation with `git apply --check` before approval.
 - Git status/diff summary in the tool panel.
@@ -63,22 +86,29 @@ The provider selector currently supports:
 - DeepSeek through its OpenAI-compatible Chat Completions API.
 - Gemini through the Google Gemini Generate Content API.
 
-OpenAI streams text deltas progressively. Claude, DeepSeek, and Gemini currently return completed provider turns while still supporting the same local `act` tool loop.
+OpenAI streams text deltas progressively. Claude, DeepSeek, and Gemini currently return completed provider turns while still supporting the same local `act` tool loop. The `Route` selector can stay on `Auto` or force a task route such as Coding, Planning, Fast, Vision, Image, Audio, Video, or Realtime. When a routed provider/model fails before a tool step, Leetcode tries the next compatible saved-key fallback and shows a friendly provider error.
 
-Image generation has its own provider selector in the `Assets` panel:
+Asset generation has its own kind/provider controls in the `Assets` panel:
 
 - ChatGPT Image through the OpenAI Images API, default model `gpt-image-2`.
 - Nano Banana through the Gemini Interactions API, default model `gemini-3.1-flash-image`.
 - Stability AI through Stable Image Core, default model label `stable-image-core`.
 - Replicate FLUX through Replicate model predictions, default model `black-forest-labs/flux-schnell`.
+- Spritesheets reuse image providers with a grid-oriented prompt.
+- Audio uses OpenAI audio output, default model `gpt-audio-1.5`.
+- Video uses the OpenAI Videos API/Sora, default model `sora-2`.
 
 OpenAI and Gemini image generation can reuse the saved chat provider keys. Stability AI and Replicate use their own saved image keys or the environment variables above.
 
-The coding agent can also call `generate_image_asset` itself when a user asks for a visual asset. Because this can call paid external APIs, the app asks for approval before the request is sent. Existing asset jobs can be regenerated or varied from the UI and through agent tools. Generated assets can also be applied as `assets/app-icon.png` or revealed in the file explorer. Screenshots are approval-gated and are saved under `assets/generated/screenshots`.
+The coding agent can also call asset tools itself when a user asks for game/app visuals, spritesheets, sounds, or videos. Because this can call paid external APIs, the app asks for approval before the request is sent. Asset jobs include provider/model/parameter/license metadata in `assets/generated/asset_jobs.json`. Existing assets can be varied, upscaled, exported, attached as context, applied as `assets/app-icon.png`, or revealed in the file explorer. Screenshots are approval-gated and are saved under `assets/generated/screenshots`.
 
 Desktop control currently supports approval-gated screenshots, mouse clicks, typed text, and keyboard shortcuts. For desktop work, the intended loop is screenshot first, then act on visible coordinates or the active window.
 
 Project profiles are detected from common root markers such as `Cargo.toml`, `package.json`, `pyproject.toml`, `project.godot`, Unity `ProjectSettings`, and `.uproject` files. The right-side `Project` panel exposes safe quick commands from those profiles, and the agent is instructed to prefer `project_command` for common check/test/run/build/dev/lint tasks before falling back to raw `run_shell`.
+
+The `Project` panel also exposes game workflow templates. They create markdown plans under `docs/game-workflows` and can be called by the agent through `game_workflow`. Preview hooks can open common local URLs such as Vite `5173`, Vite preview `4173`, Next `3000`, Trunk `8080`, or return the editor command to run for Godot/Unreal through `open_project_preview`.
+
+The `Agents` panel exposes the Rust-owned orchestration layer. It can record specialist handoffs from the current prompt, show a workspace orchestration snapshot in the tool log, and export a trace JSON file. The agent can call the same orchestration tools itself. `run_subagent` lets the manager agent execute a bounded specialist mini-loop for a focused task; subagents have role-specific tool allowlists, max-round limits, and their runs are saved in the orchestration trace. For broad tasks, the manager is instructed to propose a compact subagent plan first unless the user has already approved splitting the work. The current architecture keeps orchestration inside the Rust desktop app for a self-contained MVP; an OpenAI Agents SDK sidecar remains the planned upgrade path when independent specialist execution, hosted tracing, or richer session management becomes necessary.
 
 ## Launch
 

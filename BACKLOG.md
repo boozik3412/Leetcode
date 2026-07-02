@@ -19,8 +19,8 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Keep OpenAI Responses as the default coding/reasoning provider.
 - Done: Add provider settings and API key storage per provider.
 - Done: Add implemented Claude, DeepSeek, and Gemini coding-agent providers.
-- Add task-based model routing: coding, planning, cheap/fast, vision, image generation, audio generation, video generation.
-- Add fallback models and clear provider error reporting.
+- Done: Add task-based model routing: coding, planning, cheap/fast, vision, image generation, audio generation, video generation, and realtime.
+- Done: Add fallback model/provider chains and clear provider error reporting.
 
 ## Stage 3 - Asset Generation Pipeline
 
@@ -31,9 +31,10 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Expose image generation as the agent-callable `generate_image_asset` action.
 - Done: Add asset cards with regenerate, variation, use-as-icon, open-folder, and load-prompt actions.
 - Done: Add agent-callable asset follow-up actions: `regenerate_image_asset`, `vary_image_asset`, `use_asset_as_app_icon`, and `open_asset_folder`.
-- Track licensing/provider metadata for generated assets.
-- Add upscale, export, and attach-to-chat workflows.
-- Extend the same job framework to spritesheets, audio, video, and generated UI/game assets.
+- Done: Track licensing/provider metadata for generated assets.
+- Done: Add upscale, export, and attach-to-chat workflows.
+- Done: Extend the same job framework to spritesheets, audio, video, and generated UI/game assets.
+- Done: Expose spritesheet, audio, video, upscale, export, and attach workflows as agent-callable tools.
 
 ## Stage 4 - Game/App Project Profiles
 
@@ -41,15 +42,18 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add project commands for run, test, build, lint, package script, editor, preview, and release where the project exposes them.
 - Done: Add a Project panel with quick commands and streamed output through the existing tool log.
 - Done: Expose quick commands as the agent-callable `project_command` action.
-- Add game-specific flows: prototype mechanic, generate spritesheet, generate UI sounds, create item icons, build vertical slice, run playtest checklist.
-- Add browser/app preview hooks for web and game tooling where available.
+- Done: Add game-specific flows: prototype mechanic, generate spritesheet, generate UI sounds, create item icons, build vertical slice, run playtest checklist.
+- Done: Add browser/app preview hooks for web and game tooling where available.
 
 ## Stage 5 - Multi-Agent Orchestration
 
-- Add specialist roles: Code Agent, Game Designer, Art Director, Audio Agent, QA Agent, Build Agent.
-- Add handoff records and shared workspace context.
-- Evaluate whether to keep the current Rust-owned orchestration or add an OpenAI Agents SDK sidecar for richer tracing, sessions, and handoffs.
-- Add run summaries, trace export, and replayable evaluations.
+- Done: Add specialist roles: Code Agent, Game Designer, Art Director, Audio Agent, QA Agent, Build Agent.
+- Done: Add handoff records and shared workspace context under `assets/generated/orchestration`.
+- Done: Keep Rust-owned orchestration for the desktop MVP and document the future OpenAI Agents SDK sidecar path for richer hosted tracing, sessions, and independent specialist execution.
+- Done: Add run summaries, trace export, replayable evaluation case files, and an `Agents` UI panel.
+- Done: Expose orchestration as agent-callable tools: `run_subagent`, `delegate_agent`, `update_workspace_context`, `record_run_summary`, `export_trace`, `create_replay_eval`, and `orchestration_snapshot`.
+- Done: Add bounded subagent execution with role-specific tool allowlists, max-round limits, approval-gated tool execution, and traceable `SubagentRun` records.
+- Done: Instruct the manager agent to propose a subagent split for broad work before executing it, unless the user already approved using subagents.
 
 ## Stage 6 - Desktop and Computer Control
 

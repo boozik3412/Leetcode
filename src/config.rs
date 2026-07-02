@@ -2,9 +2,10 @@ use crate::agent::models::{
     default_model_for_provider, ANTHROPIC_PROVIDER_ID, DEEPSEEK_PROVIDER_ID, GEMINI_PROVIDER_ID,
     OPENAI_PROVIDER_ID,
 };
+use crate::agent::routing::ROUTE_AUTO;
 use crate::assets::{
-    GEMINI_IMAGE_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID,
-    STABILITY_IMAGE_PROVIDER_ID,
+    GEMINI_IMAGE_PROVIDER_ID, OPENAI_AUDIO_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID,
+    OPENAI_VIDEO_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID, STABILITY_IMAGE_PROVIDER_ID,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -22,6 +23,7 @@ pub struct AppConfig {
     pub last_workspace: Option<PathBuf>,
     pub require_shell_approval: bool,
     pub require_write_approval: bool,
+    pub task_route: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -42,6 +44,8 @@ struct PersistedConfig {
     providers: BTreeMap<String, ProviderSettings>,
     #[serde(default = "default_model")]
     model: String,
+    #[serde(default = "default_task_route")]
+    task_route: String,
     last_workspace: Option<PathBuf>,
     require_shell_approval: bool,
     require_write_approval: bool,
@@ -54,6 +58,7 @@ impl Default for PersistedConfig {
             api_key: String::new(),
             providers: BTreeMap::new(),
             model: default_model(),
+            task_route: default_task_route(),
             last_workspace: None,
             require_shell_approval: true,
             require_write_approval: true,
@@ -85,6 +90,8 @@ impl AppConfig {
         apply_env_api_key(&mut providers, DEEPSEEK_PROVIDER_ID, "DEEPSEEK_API_KEY");
         apply_env_api_key(&mut providers, GEMINI_PROVIDER_ID, "GEMINI_API_KEY");
         apply_env_api_key(&mut providers, OPENAI_IMAGE_PROVIDER_ID, "OPENAI_API_KEY");
+        apply_env_api_key(&mut providers, OPENAI_AUDIO_PROVIDER_ID, "OPENAI_API_KEY");
+        apply_env_api_key(&mut providers, OPENAI_VIDEO_PROVIDER_ID, "OPENAI_API_KEY");
         apply_env_api_key(&mut providers, GEMINI_IMAGE_PROVIDER_ID, "GEMINI_API_KEY");
         apply_env_api_key(
             &mut providers,
@@ -116,6 +123,7 @@ impl AppConfig {
             last_workspace: persisted.last_workspace,
             require_shell_approval: persisted.require_shell_approval,
             require_write_approval: persisted.require_write_approval,
+            task_route: normalize_task_route(&persisted.task_route),
         }
     }
 
@@ -141,6 +149,7 @@ impl AppConfig {
             api_key: self.api_key.clone(),
             providers,
             model: self.model.clone(),
+            task_route: normalize_task_route(&self.task_route),
             last_workspace: self.last_workspace.clone(),
             require_shell_approval: self.require_shell_approval,
             require_write_approval: self.require_write_approval,
@@ -244,6 +253,19 @@ fn default_model() -> String {
     default_model_for_provider(OPENAI_PROVIDER_ID).to_string()
 }
 
+fn default_task_route() -> String {
+    ROUTE_AUTO.to_string()
+}
+
+fn normalize_task_route(task_route: &str) -> String {
+    let task_route = task_route.trim().to_ascii_lowercase().replace('-', "_");
+    if task_route.is_empty() {
+        ROUTE_AUTO.to_string()
+    } else {
+        task_route
+    }
+}
+
 fn normalize_provider(provider_id: &str) -> String {
     let provider_id = provider_id.trim();
     if provider_id.is_empty() {
@@ -306,6 +328,7 @@ mod tests {
     fn loads_config_without_persisted_api_key() {
         let json = r#"{
           "model": "gpt-5.5",
+          "task_route": "auto",
           "last_workspace": null,
           "require_shell_approval": true,
           "require_write_approval": true
@@ -315,6 +338,7 @@ mod tests {
 
         assert!(config.api_key.is_empty());
         assert_eq!(config.model, "gpt-5.5");
+        assert_eq!(config.task_route, "auto");
     }
 
     #[test]
@@ -324,6 +348,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             providers: BTreeMap::new(),
             model: "gpt-5.5".to_string(),
+            task_route: "auto".to_string(),
             last_workspace: None,
             require_shell_approval: true,
             require_write_approval: true,
@@ -349,6 +374,7 @@ mod tests {
             api_key: "sk-openai".to_string(),
             providers,
             model: "gpt-5.4".to_string(),
+            task_route: "coding".to_string(),
             last_workspace: None,
             require_shell_approval: true,
             require_write_approval: true,
@@ -371,6 +397,7 @@ mod tests {
             last_workspace: None,
             require_shell_approval: true,
             require_write_approval: true,
+            task_route: "auto".to_string(),
         };
 
         config.select_provider(GEMINI_PROVIDER_ID);

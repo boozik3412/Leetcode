@@ -92,10 +92,25 @@ pub enum ToolAction {
     ApplyPatch,
     Grep,
     ProjectCommand,
+    GameWorkflow,
+    OpenProjectPreview,
+    RunSubagent,
+    DelegateAgent,
+    UpdateWorkspaceContext,
+    RecordRunSummary,
+    ExportTrace,
+    CreateReplayEval,
+    OrchestrationSnapshot,
     RunShell,
     GenerateImageAsset,
+    GenerateSpritesheetAsset,
+    GenerateAudioAsset,
+    GenerateVideoAsset,
     RegenerateImageAsset,
     VaryImageAsset,
+    UpscaleAsset,
+    ExportAsset,
+    AttachAsset,
     UseAssetAsAppIcon,
     OpenAssetFolder,
     Screenshot,
@@ -211,5 +226,95 @@ mod tests {
         .expect("valid project command request");
 
         assert!(matches!(request.action, ToolAction::ProjectCommand));
+    }
+
+    #[test]
+    fn parses_game_workflow_and_preview_actions() {
+        let workflow = serde_json::from_str::<ActRequest>(
+            r#"{"action":"game_workflow","args":{"workflow":"prototype_mechanic","title":"Dash","brief":"fast movement"}}"#,
+        )
+        .expect("valid workflow request");
+        let preview = serde_json::from_str::<ActRequest>(
+            r#"{"action":"open_project_preview","args":{"preview":"dev-server"}}"#,
+        )
+        .expect("valid preview request");
+
+        assert!(matches!(workflow.action, ToolAction::GameWorkflow));
+        assert!(matches!(preview.action, ToolAction::OpenProjectPreview));
+    }
+
+    #[test]
+    fn parses_orchestration_actions() {
+        let handoff = serde_json::from_str::<ActRequest>(
+            r#"{"action":"delegate_agent","args":{"role":"qa","task":"test combat loop"}}"#,
+        )
+        .expect("valid handoff request");
+        let subagent = serde_json::from_str::<ActRequest>(
+            r#"{"action":"run_subagent","args":{"role":"code_agent","task":"inspect parser","max_rounds":3}}"#,
+        )
+        .expect("valid subagent request");
+        let context = serde_json::from_str::<ActRequest>(
+            r#"{"action":"update_workspace_context","args":{"summary":"prototype","decisions":["ship demo"]}}"#,
+        )
+        .expect("valid context request");
+        let summary = serde_json::from_str::<ActRequest>(
+            r#"{"action":"record_run_summary","args":{"summary":"implemented first pass"}}"#,
+        )
+        .expect("valid run summary request");
+        let trace = serde_json::from_str::<ActRequest>(r#"{"action":"export_trace","args":{}}"#)
+            .expect("valid trace request");
+        let eval = serde_json::from_str::<ActRequest>(
+            r#"{"action":"create_replay_eval","args":{"name":"asset flow","prompt":"make icon"}}"#,
+        )
+        .expect("valid eval request");
+        let snapshot =
+            serde_json::from_str::<ActRequest>(r#"{"action":"orchestration_snapshot","args":{}}"#)
+                .expect("valid snapshot request");
+
+        assert!(matches!(handoff.action, ToolAction::DelegateAgent));
+        assert!(matches!(subagent.action, ToolAction::RunSubagent));
+        assert!(matches!(context.action, ToolAction::UpdateWorkspaceContext));
+        assert!(matches!(summary.action, ToolAction::RecordRunSummary));
+        assert!(matches!(trace.action, ToolAction::ExportTrace));
+        assert!(matches!(eval.action, ToolAction::CreateReplayEval));
+        assert!(matches!(snapshot.action, ToolAction::OrchestrationSnapshot));
+    }
+
+    #[test]
+    fn parses_expanded_asset_actions() {
+        let spritesheet = serde_json::from_str::<ActRequest>(
+            r#"{"action":"generate_spritesheet_asset","args":{"prompt":"hero run cycle"}}"#,
+        )
+        .expect("valid spritesheet request");
+        let audio = serde_json::from_str::<ActRequest>(
+            r#"{"action":"generate_audio_asset","args":{"prompt":"coin pickup sfx"}}"#,
+        )
+        .expect("valid audio request");
+        let video = serde_json::from_str::<ActRequest>(
+            r#"{"action":"generate_video_asset","args":{"prompt":"game trailer shot"}}"#,
+        )
+        .expect("valid video request");
+        let upscale = serde_json::from_str::<ActRequest>(
+            r#"{"action":"upscale_asset","args":{"source_path":"assets/generated/images/a.png"}}"#,
+        )
+        .expect("valid upscale request");
+        let export = serde_json::from_str::<ActRequest>(
+            r#"{"action":"export_asset","args":{"source_path":"assets/generated/images/a.png"}}"#,
+        )
+        .expect("valid export request");
+        let attach = serde_json::from_str::<ActRequest>(
+            r#"{"action":"attach_asset","args":{"source_path":"assets/generated/images/a.png"}}"#,
+        )
+        .expect("valid attach request");
+
+        assert!(matches!(
+            spritesheet.action,
+            ToolAction::GenerateSpritesheetAsset
+        ));
+        assert!(matches!(audio.action, ToolAction::GenerateAudioAsset));
+        assert!(matches!(video.action, ToolAction::GenerateVideoAsset));
+        assert!(matches!(upscale.action, ToolAction::UpscaleAsset));
+        assert!(matches!(export.action, ToolAction::ExportAsset));
+        assert!(matches!(attach.action, ToolAction::AttachAsset));
     }
 }

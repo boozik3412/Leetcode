@@ -1,7 +1,11 @@
+#![recursion_limit = "256"]
+
 mod agent;
 mod app;
 mod assets;
 mod config;
+mod game_workflows;
+mod orchestration;
 mod project;
 mod tools;
 mod workspace;

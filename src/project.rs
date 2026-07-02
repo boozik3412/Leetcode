@@ -9,6 +9,7 @@ pub struct ProjectProfile {
     pub name: String,
     pub markers: Vec<String>,
     pub commands: Vec<ProjectCommand>,
+    pub previews: Vec<ProjectPreviewHook>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,6 +20,33 @@ pub struct ProjectCommand {
     pub cwd: String,
     pub description: String,
     pub timeout_secs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectPreviewHook {
+    pub id: String,
+    pub label: String,
+    pub url: Option<String>,
+    pub command_id: Option<String>,
+    pub description: String,
+}
+
+impl ProjectPreviewHook {
+    fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        url: Option<String>,
+        command_id: Option<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            url,
+            command_id,
+            description: description.into(),
+        }
+    }
 }
 
 impl ProjectCommand {
@@ -66,6 +94,13 @@ pub fn detect_project_profiles(workspace: &Workspace) -> Vec<ProjectProfile> {
                     "Open the Godot editor",
                 ),
             ],
+            previews: vec![ProjectPreviewHook::new(
+                "godot-editor",
+                "Godot Editor",
+                None,
+                Some("editor".to_string()),
+                "Open the Godot editor for local preview/playtesting",
+            )],
         });
     }
     if root
@@ -82,6 +117,7 @@ pub fn detect_project_profiles(workspace: &Workspace) -> Vec<ProjectProfile> {
                 "Assets/".to_string(),
             ],
             commands: Vec::new(),
+            previews: Vec::new(),
         });
     }
     if let Some(uproject) = first_file_with_extension(root, "uproject") {
@@ -99,6 +135,13 @@ pub fn detect_project_profiles(workspace: &Workspace) -> Vec<ProjectProfile> {
                 "Editor",
                 format!("UnrealEditor \"{uproject_name}\""),
                 "Open the Unreal project in the editor",
+            )],
+            previews: vec![ProjectPreviewHook::new(
+                "unreal-editor",
+                "Unreal Editor",
+                None,
+                Some("editor".to_string()),
+                "Open the Unreal editor for local preview/playtesting",
             )],
         });
     }
@@ -133,6 +176,31 @@ pub fn find_project_command(
         .cloned()
 }
 
+pub fn find_project_preview(
+    profiles: &[ProjectProfile],
+    preview: &str,
+    profile_filter: Option<&str>,
+) -> Option<ProjectPreviewHook> {
+    let wanted = normalize(preview);
+    let profile_filter = profile_filter.map(normalize);
+
+    profiles
+        .iter()
+        .filter(|profile| {
+            profile_filter
+                .as_ref()
+                .map(|filter| {
+                    normalize(&profile.kind) == *filter || normalize(&profile.name) == *filter
+                })
+                .unwrap_or(true)
+        })
+        .flat_map(|profile| profile.previews.iter())
+        .find(|candidate| {
+            normalize(&candidate.id) == wanted || normalize(&candidate.label) == wanted
+        })
+        .cloned()
+}
+
 pub fn describe_project_commands(profiles: &[ProjectProfile]) -> String {
     if profiles.is_empty() {
         return "No project profiles detected".to_string();
@@ -163,23 +231,33 @@ fn detect_rust_profile(root: &Path) -> ProjectProfile {
         .ok()
         .and_then(|toml| package_name_from_cargo_toml(&toml))
         .unwrap_or_else(|| "Rust project".to_string());
+    let mut commands = vec![
+        ProjectCommand::new("check", "Check", "cargo check", "Check Rust compilation"),
+        ProjectCommand::new("test", "Test", "cargo test", "Run Rust tests"),
+        ProjectCommand::new("run", "Run", "cargo run", "Run the Rust app"),
+        ProjectCommand::new("build", "Build", "cargo build", "Build debug binary"),
+        ProjectCommand::new(
+            "release",
+            "Release",
+            "cargo build --release",
+            "Build release binary",
+        ),
+    ];
+    if root.join("Trunk.toml").is_file() || root.join("index.html").is_file() {
+        commands.push(ProjectCommand::new(
+            "serve",
+            "Serve",
+            "trunk serve",
+            "Serve a Rust/WASM app with Trunk",
+        ));
+    }
 
     ProjectProfile {
         kind: "Rust".to_string(),
         name,
         markers: vec!["Cargo.toml".to_string()],
-        commands: vec![
-            ProjectCommand::new("check", "Check", "cargo check", "Check Rust compilation"),
-            ProjectCommand::new("test", "Test", "cargo test", "Run Rust tests"),
-            ProjectCommand::new("run", "Run", "cargo run", "Run the Rust app"),
-            ProjectCommand::new("build", "Build", "cargo build", "Build debug binary"),
-            ProjectCommand::new(
-                "release",
-                "Release",
-                "cargo build --release",
-                "Build release binary",
-            ),
-        ],
+        commands,
+        previews: rust_preview_hooks(root),
     }
 }
 
@@ -203,6 +281,10 @@ fn detect_node_profile(root: &Path) -> ProjectProfile {
     let has_react = package
         .as_ref()
         .map(|package| has_package_dep(package, "react"))
+        .unwrap_or(false);
+    let has_next = package
+        .as_ref()
+        .map(|package| has_package_dep(package, "next"))
         .unwrap_or(false);
     let kind = match (has_react, has_vite) {
         (true, true) => "React/Vite",
@@ -262,11 +344,20 @@ fn detect_node_profile(root: &Path) -> ProjectProfile {
         }
     }
 
+    let commands_for_preview = commands.clone();
     ProjectProfile {
         kind: kind.to_string(),
         name,
         markers: node_markers(root),
         commands,
+        previews: node_preview_hooks(
+            root,
+            scripts,
+            has_vite,
+            has_react,
+            has_next,
+            &commands_for_preview,
+        ),
     }
 }
 
@@ -307,6 +398,7 @@ fn detect_python_profile(root: &Path) -> ProjectProfile {
         name: package_name_from_pyproject(root).unwrap_or_else(|| "Python project".to_string()),
         markers,
         commands,
+        previews: Vec::new(),
     }
 }
 
@@ -373,6 +465,77 @@ fn node_markers(root: &Path) -> Vec<String> {
         }
     }
     markers
+}
+
+fn rust_preview_hooks(root: &Path) -> Vec<ProjectPreviewHook> {
+    if root.join("Trunk.toml").is_file() || root.join("index.html").is_file() {
+        vec![ProjectPreviewHook::new(
+            "trunk-local",
+            "Trunk 8080",
+            Some("http://localhost:8080".to_string()),
+            Some("serve".to_string()),
+            "Open a Trunk-served Rust/WASM app preview",
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn node_preview_hooks(
+    _root: &Path,
+    scripts: Option<&serde_json::Map<String, Value>>,
+    has_vite: bool,
+    _has_react: bool,
+    has_next: bool,
+    commands: &[ProjectCommand],
+) -> Vec<ProjectPreviewHook> {
+    let mut hooks = Vec::new();
+    if has_vite || has_script(scripts, "dev") {
+        let url = if has_next {
+            "http://localhost:3000"
+        } else {
+            "http://localhost:5173"
+        };
+        hooks.push(ProjectPreviewHook::new(
+            "dev-server",
+            "Dev URL",
+            Some(url.to_string()),
+            command_id_if_present(commands, "dev"),
+            "Open the local development server URL",
+        ));
+    }
+    if has_script(scripts, "preview") {
+        hooks.push(ProjectPreviewHook::new(
+            "preview-server",
+            "Preview URL",
+            Some("http://localhost:4173".to_string()),
+            command_id_if_present(commands, "preview"),
+            "Open the local production preview URL",
+        ));
+    }
+    if has_script(scripts, "start") && !hooks.iter().any(|hook| hook.id == "dev-server") {
+        hooks.push(ProjectPreviewHook::new(
+            "start-server",
+            "Start URL",
+            Some("http://localhost:3000".to_string()),
+            command_id_if_present(commands, "start"),
+            "Open the common local app server URL",
+        ));
+    }
+    hooks
+}
+
+fn has_script(scripts: Option<&serde_json::Map<String, Value>>, id: &str) -> bool {
+    scripts
+        .map(|scripts| scripts.contains_key(id))
+        .unwrap_or(false)
+}
+
+fn command_id_if_present(commands: &[ProjectCommand], id: &str) -> Option<String> {
+    commands
+        .iter()
+        .any(|command| command.id == id)
+        .then(|| id.to_string())
 }
 
 fn has_package_dep(package: &Value, name: &str) -> bool {
@@ -486,5 +649,23 @@ mod tests {
 
         assert_eq!(profiles[0].kind, "React/Vite");
         assert!(find_project_command(&profiles, "dev", Some("react/vite")).is_some());
+        assert!(find_project_preview(&profiles, "dev-server", Some("react/vite")).is_some());
+    }
+
+    #[test]
+    fn detects_trunk_preview_hook() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"wasm-game\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::write(temp.path().join("Trunk.toml"), "[build]\n").unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+
+        let profiles = detect_project_profiles(&workspace);
+
+        assert!(find_project_command(&profiles, "serve", Some("rust")).is_some());
+        assert!(find_project_preview(&profiles, "trunk-local", Some("rust")).is_some());
     }
 }

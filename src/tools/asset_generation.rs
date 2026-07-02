@@ -1,9 +1,13 @@
 use crate::agent::models::{GEMINI_PROVIDER_ID, OPENAI_PROVIDER_ID};
 use crate::agent::types::{AppEvent, ToolResult};
 use crate::assets::{
-    default_image_model, image_provider_env_var, image_provider_name, image_request_from_job,
-    load_jobs, normalize_image_provider, run_image_job, AssetJob, AssetStatus, ImageAssetRequest,
-    GEMINI_IMAGE_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID,
+    asset_provider_env_var, attach_asset_context, audio_provider_name, default_audio_model,
+    default_image_model, default_video_model, export_asset, image_provider_env_var,
+    image_provider_name, image_request_from_job, load_jobs, normalize_image_provider,
+    run_audio_job, run_image_job, run_spritesheet_job, run_video_job, upscale_asset,
+    video_provider_name, AssetJob, AssetStatus, AudioAssetRequest, ImageAssetRequest,
+    SpritesheetAssetRequest, VideoAssetRequest, GEMINI_IMAGE_PROVIDER_ID, OPENAI_AUDIO_PROVIDER_ID,
+    OPENAI_IMAGE_PROVIDER_ID, OPENAI_VIDEO_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID,
     STABILITY_IMAGE_PROVIDER_ID,
 };
 use crate::config::AppConfig;
@@ -23,6 +27,50 @@ pub struct GenerateImageAssetArgs {
     pub model: Option<String>,
     pub aspect_ratio: Option<String>,
     pub image_size: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateSpritesheetAssetArgs {
+    pub prompt: String,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub aspect_ratio: Option<String>,
+    pub image_size: Option<String>,
+    pub columns: Option<u32>,
+    pub rows: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateAudioAssetArgs {
+    pub prompt: String,
+    pub model: Option<String>,
+    pub voice: Option<String>,
+    pub format: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GenerateVideoAssetArgs {
+    pub prompt: String,
+    pub model: Option<String>,
+    pub size: Option<String>,
+    pub seconds: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpscaleAssetArgs {
+    pub source_path: String,
+    pub scale: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportAssetArgs {
+    pub source_path: String,
+    pub target_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AttachAssetArgs {
+    pub source_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +135,170 @@ pub async fn generate_image_asset(
         "Generate image asset",
     )
     .await
+}
+
+pub async fn generate_spritesheet_asset(
+    workspace: &Workspace,
+    args: GenerateSpritesheetAssetArgs,
+    config: &AppConfig,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let prompt = args.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return ToolResult::error("generate_spritesheet_asset prompt is empty");
+    }
+    let provider = args
+        .provider
+        .as_deref()
+        .map(normalize_image_provider)
+        .unwrap_or_else(|| default_configured_image_provider(config));
+    let model = args
+        .model
+        .filter(|model| !model.trim().is_empty())
+        .unwrap_or_else(|| image_model_from_config(config, &provider));
+    let request = SpritesheetAssetRequest {
+        provider,
+        prompt,
+        model,
+        aspect_ratio: args.aspect_ratio.unwrap_or_else(|| "1:1".to_string()),
+        image_size: args.image_size.unwrap_or_else(|| "2K".to_string()),
+        columns: args.columns.unwrap_or(4).clamp(1, 12),
+        rows: args.rows.unwrap_or(4).clamp(1, 12),
+    };
+    let api_key = image_api_key_from_config(config, &request.provider);
+    if api_key.trim().is_empty() {
+        return ToolResult::error(format!(
+            "{} key is empty. Save it in the Assets panel or set {}.",
+            image_provider_name(&request.provider),
+            image_provider_env_var(&request.provider)
+        ));
+    }
+    if !request_approval(
+        events,
+        approvals,
+        format!(
+            "Generate spritesheet with {}",
+            image_provider_name(&request.provider)
+        ),
+        format!(
+            "Provider: {}\nModel: {}\nGrid: {}x{}\nPrompt:\n{}",
+            image_provider_name(&request.provider),
+            request.model,
+            request.columns,
+            request.rows,
+            request.prompt
+        ),
+    ) {
+        return ToolResult::error("generate_spritesheet_asset denied by user");
+    }
+
+    let job = AssetJob::new_spritesheet(&request);
+    finish_asset_job(run_spritesheet_job(workspace.clone(), api_key, request, job).await)
+}
+
+pub async fn generate_audio_asset(
+    workspace: &Workspace,
+    args: GenerateAudioAssetArgs,
+    config: &AppConfig,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let prompt = args.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return ToolResult::error("generate_audio_asset prompt is empty");
+    }
+    let request = AudioAssetRequest {
+        provider: OPENAI_AUDIO_PROVIDER_ID.to_string(),
+        prompt,
+        model: args
+            .model
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or_else(|| audio_model_from_config(config)),
+        voice: args.voice.unwrap_or_else(|| "alloy".to_string()),
+        format: args.format.unwrap_or_else(|| "wav".to_string()),
+    };
+    let api_key = media_api_key_from_config(config, &request.provider);
+    if api_key.trim().is_empty() {
+        return ToolResult::error(format!(
+            "{} key is empty. Save it or set {}.",
+            audio_provider_name(&request.provider),
+            asset_provider_env_var(&request.provider)
+        ));
+    }
+    if !request_approval(
+        events,
+        approvals,
+        format!(
+            "Generate audio asset with {}",
+            audio_provider_name(&request.provider)
+        ),
+        format!(
+            "Provider: {}\nModel: {}\nVoice: {}\nFormat: {}\n\nPrompt:\n{}",
+            audio_provider_name(&request.provider),
+            request.model,
+            request.voice,
+            request.format,
+            request.prompt
+        ),
+    ) {
+        return ToolResult::error("generate_audio_asset denied by user");
+    }
+
+    let job = AssetJob::new_audio(&request);
+    finish_asset_job(run_audio_job(workspace.clone(), api_key, request, job).await)
+}
+
+pub async fn generate_video_asset(
+    workspace: &Workspace,
+    args: GenerateVideoAssetArgs,
+    config: &AppConfig,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let prompt = args.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return ToolResult::error("generate_video_asset prompt is empty");
+    }
+    let request = VideoAssetRequest {
+        provider: OPENAI_VIDEO_PROVIDER_ID.to_string(),
+        prompt,
+        model: args
+            .model
+            .filter(|model| !model.trim().is_empty())
+            .unwrap_or_else(|| video_model_from_config(config)),
+        size: args.size.unwrap_or_else(|| "1280x720".to_string()),
+        seconds: args.seconds.unwrap_or(8).clamp(1, 20),
+    };
+    let api_key = media_api_key_from_config(config, &request.provider);
+    if api_key.trim().is_empty() {
+        return ToolResult::error(format!(
+            "{} key is empty. Save it or set {}.",
+            video_provider_name(&request.provider),
+            asset_provider_env_var(&request.provider)
+        ));
+    }
+    if !request_approval(
+        events,
+        approvals,
+        format!(
+            "Generate video asset with {}",
+            video_provider_name(&request.provider)
+        ),
+        format!(
+            "Provider: {}\nModel: {}\nSize: {}\nSeconds: {}\n\nPrompt:\n{}",
+            video_provider_name(&request.provider),
+            request.model,
+            request.size,
+            request.seconds,
+            request.prompt
+        ),
+    ) {
+        return ToolResult::error("generate_video_asset denied by user");
+    }
+
+    let job = AssetJob::new_video(&request);
+    finish_asset_job(run_video_job(workspace.clone(), api_key, request, job).await)
 }
 
 pub async fn regenerate_image_asset(
@@ -185,16 +397,7 @@ async fn run_approved_image_request(
     let final_job = run_image_job(workspace.clone(), api_key, request, job).await;
 
     match final_job.status {
-        AssetStatus::Done => ToolResult::ok(
-            serde_json::to_string_pretty(&json!({
-                "job_id": final_job.id,
-                "provider": final_job.provider,
-                "model": final_job.model,
-                "output_files": final_job.output_files,
-                "metadata": final_job.metadata
-            }))
-            .unwrap_or_else(|_| "image asset generated".to_string()),
-        ),
+        AssetStatus::Done => finish_asset_job(final_job),
         AssetStatus::Failed => ToolResult::error(format!(
             "{} failed: {}",
             action_name.to_ascii_lowercase(),
@@ -206,6 +409,110 @@ async fn run_approved_image_request(
             "{} ended before the image job reached a final state",
             action_name.to_ascii_lowercase()
         )),
+    }
+}
+
+pub fn upscale_existing_asset(
+    workspace: &Workspace,
+    args: UpscaleAssetArgs,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let source_path = args.source_path.trim();
+    if source_path.is_empty() {
+        return ToolResult::error("upscale_asset source_path is empty");
+    }
+    let scale = args.scale.unwrap_or(2).clamp(2, 4);
+    if !request_approval(
+        events,
+        approvals,
+        format!("Upscale asset {scale}x"),
+        format!("Source:\n{source_path}\n\nScale: {scale}x"),
+    ) {
+        return ToolResult::error("upscale_asset denied by user");
+    }
+    match upscale_asset(workspace, source_path, scale) {
+        Ok(job) => finish_asset_job(job),
+        Err(err) => ToolResult::error(err.to_string()),
+    }
+}
+
+pub fn export_existing_asset(
+    workspace: &Workspace,
+    args: ExportAssetArgs,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let source_path = args.source_path.trim();
+    if source_path.is_empty() {
+        return ToolResult::error("export_asset source_path is empty");
+    }
+    if !request_approval(
+        events,
+        approvals,
+        "Export asset",
+        format!(
+            "Source:\n{}\n\nTarget name: {}",
+            source_path,
+            args.target_name.as_deref().unwrap_or("(auto)")
+        ),
+    ) {
+        return ToolResult::error("export_asset denied by user");
+    }
+    match export_asset(workspace, source_path, args.target_name.as_deref()) {
+        Ok(job) => finish_asset_job(job),
+        Err(err) => ToolResult::error(err.to_string()),
+    }
+}
+
+pub fn attach_asset(
+    workspace: &Workspace,
+    args: AttachAssetArgs,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let source_path = args.source_path.trim();
+    if source_path.is_empty() {
+        return ToolResult::error("attach_asset source_path is empty");
+    }
+    if !request_approval(
+        events,
+        approvals,
+        "Attach asset context",
+        format!("Attach metadata for:\n{source_path}"),
+    ) {
+        return ToolResult::error("attach_asset denied by user");
+    }
+    match attach_asset_context(workspace, source_path) {
+        Ok(context) => ToolResult::ok(
+            serde_json::to_string_pretty(&context).unwrap_or_else(|_| "asset attached".to_string()),
+        ),
+        Err(err) => ToolResult::error(err.to_string()),
+    }
+}
+
+fn finish_asset_job(final_job: AssetJob) -> ToolResult {
+    match final_job.status {
+        AssetStatus::Done => ToolResult::ok(
+            serde_json::to_string_pretty(&json!({
+                "job_id": final_job.id,
+                "kind": final_job.kind,
+                "provider": final_job.provider,
+                "model": final_job.model,
+                "output_files": final_job.output_files,
+                "metadata": final_job.metadata
+            }))
+            .unwrap_or_else(|_| "asset job finished".to_string()),
+        ),
+        AssetStatus::Failed => ToolResult::error(format!(
+            "asset job failed: {}",
+            final_job
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
+        )),
+        AssetStatus::Pending | AssetStatus::Running => {
+            ToolResult::error("asset job ended before reaching a final state")
+        }
     }
 }
 
@@ -381,6 +688,20 @@ fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
     }
 }
 
+fn media_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
+    let direct_key = config.api_key_for_provider(provider_id);
+    if !direct_key.trim().is_empty() {
+        return direct_key;
+    }
+
+    match provider_id {
+        OPENAI_AUDIO_PROVIDER_ID | OPENAI_VIDEO_PROVIDER_ID => {
+            config.api_key_for_provider(OPENAI_PROVIDER_ID)
+        }
+        _ => String::new(),
+    }
+}
+
 fn image_model_from_config(config: &AppConfig, provider_id: &str) -> String {
     config
         .providers
@@ -394,6 +715,36 @@ fn image_model_from_config(config: &AppConfig, provider_id: &str) -> String {
             }
         })
         .unwrap_or_else(|| default_image_model(provider_id).to_string())
+}
+
+fn audio_model_from_config(config: &AppConfig) -> String {
+    config
+        .providers
+        .get(OPENAI_AUDIO_PROVIDER_ID)
+        .and_then(|settings| {
+            let model = settings.model.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        })
+        .unwrap_or_else(|| default_audio_model(OPENAI_AUDIO_PROVIDER_ID).to_string())
+}
+
+fn video_model_from_config(config: &AppConfig) -> String {
+    config
+        .providers
+        .get(OPENAI_VIDEO_PROVIDER_ID)
+        .and_then(|settings| {
+            let model = settings.model.trim();
+            if model.is_empty() {
+                None
+            } else {
+                Some(model.to_string())
+            }
+        })
+        .unwrap_or_else(|| default_video_model(OPENAI_VIDEO_PROVIDER_ID).to_string())
 }
 
 fn is_supported_image_path(path: &Path) -> bool {
@@ -430,6 +781,7 @@ mod tests {
             last_workspace: None,
             require_shell_approval: true,
             require_write_approval: true,
+            task_route: "auto".to_string(),
         };
 
         assert_eq!(
@@ -448,6 +800,7 @@ mod tests {
             last_workspace: None,
             require_shell_approval: true,
             require_write_approval: true,
+            task_route: "auto".to_string(),
         };
 
         assert_eq!(
