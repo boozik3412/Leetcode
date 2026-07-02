@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub model: String,
     pub providers: BTreeMap<String, ProviderSettings>,
     pub last_workspace: Option<PathBuf>,
+    pub policy_profile: String,
     pub require_shell_approval: bool,
     pub require_write_approval: bool,
     pub task_route: String,
@@ -47,6 +48,8 @@ struct PersistedConfig {
     #[serde(default = "default_task_route")]
     task_route: String,
     last_workspace: Option<PathBuf>,
+    #[serde(default = "default_policy_profile")]
+    policy_profile: String,
     require_shell_approval: bool,
     require_write_approval: bool,
 }
@@ -60,6 +63,7 @@ impl Default for PersistedConfig {
             model: default_model(),
             task_route: default_task_route(),
             last_workspace: None,
+            policy_profile: default_policy_profile(),
             require_shell_approval: true,
             require_write_approval: true,
         }
@@ -121,6 +125,7 @@ impl AppConfig {
             },
             providers,
             last_workspace: persisted.last_workspace,
+            policy_profile: normalize_policy_profile(&persisted.policy_profile),
             require_shell_approval: persisted.require_shell_approval,
             require_write_approval: persisted.require_write_approval,
             task_route: normalize_task_route(&persisted.task_route),
@@ -151,6 +156,7 @@ impl AppConfig {
             model: self.model.clone(),
             task_route: normalize_task_route(&self.task_route),
             last_workspace: self.last_workspace.clone(),
+            policy_profile: normalize_policy_profile(&self.policy_profile),
             require_shell_approval: self.require_shell_approval,
             require_write_approval: self.require_write_approval,
         };
@@ -243,6 +249,57 @@ impl AppConfig {
             settings.model
         };
     }
+
+    pub fn set_policy_profile(&mut self, policy_profile: &str) {
+        self.policy_profile = normalize_policy_profile(policy_profile);
+        match self.policy_profile.as_str() {
+            POLICY_SAFE => {
+                self.require_shell_approval = false;
+                self.require_write_approval = true;
+            }
+            POLICY_NORMAL | POLICY_STRICT => {
+                self.require_shell_approval = true;
+                self.require_write_approval = true;
+            }
+            POLICY_CUSTOM => {}
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+
+    pub fn set_custom_policy(&mut self) {
+        self.policy_profile = POLICY_CUSTOM.to_string();
+    }
+
+    pub fn effective_require_shell_approval(&self) -> bool {
+        match normalize_policy_profile(&self.policy_profile).as_str() {
+            POLICY_SAFE => false,
+            POLICY_NORMAL | POLICY_STRICT => true,
+            POLICY_CUSTOM => self.require_shell_approval,
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+
+    pub fn effective_require_write_approval(&self) -> bool {
+        match normalize_policy_profile(&self.policy_profile).as_str() {
+            POLICY_SAFE | POLICY_NORMAL | POLICY_STRICT => true,
+            POLICY_CUSTOM => self.require_write_approval,
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+}
+
+pub const POLICY_SAFE: &str = "safe";
+pub const POLICY_NORMAL: &str = "normal";
+pub const POLICY_STRICT: &str = "strict";
+pub const POLICY_CUSTOM: &str = "custom";
+
+pub fn policy_profile_labels() -> &'static [(&'static str, &'static str)] {
+    &[
+        (POLICY_NORMAL, "Normal"),
+        (POLICY_SAFE, "Safe"),
+        (POLICY_STRICT, "Strict"),
+        (POLICY_CUSTOM, "Custom"),
+    ]
 }
 
 fn default_provider() -> String {
@@ -255,6 +312,24 @@ fn default_model() -> String {
 
 fn default_task_route() -> String {
     ROUTE_AUTO.to_string()
+}
+
+fn default_policy_profile() -> String {
+    POLICY_NORMAL.to_string()
+}
+
+fn normalize_policy_profile(policy_profile: &str) -> String {
+    match policy_profile
+        .trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .as_str()
+    {
+        POLICY_SAFE => POLICY_SAFE.to_string(),
+        POLICY_STRICT => POLICY_STRICT.to_string(),
+        POLICY_CUSTOM => POLICY_CUSTOM.to_string(),
+        _ => POLICY_NORMAL.to_string(),
+    }
 }
 
 fn normalize_task_route(task_route: &str) -> String {
@@ -320,6 +395,46 @@ pub fn append_journal(entry: impl AsRef<str>) {
     }
 }
 
+pub fn read_journal_tail(limit: usize) -> Vec<String> {
+    let Some(path) = journal_path() else {
+        return Vec::new();
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut lines = text
+        .lines()
+        .rev()
+        .take(limit)
+        .map(render_journal_line)
+        .collect::<Vec<_>>();
+    lines.reverse();
+    lines
+}
+
+pub fn clear_journal() -> anyhow::Result<()> {
+    let Some(path) = journal_path() else {
+        anyhow::bail!("Could not resolve journal directory");
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, "")?;
+    Ok(())
+}
+
+fn render_journal_line(line: &str) -> String {
+    let mut parts = line.splitn(2, '\t');
+    let timestamp = parts.next().unwrap_or_default();
+    let entry = parts.next().unwrap_or_default();
+    if entry.is_empty() {
+        timestamp.to_string()
+    } else {
+        format!("{timestamp}  {entry}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +445,7 @@ mod tests {
           "model": "gpt-5.5",
           "task_route": "auto",
           "last_workspace": null,
+          "policy_profile": "normal",
           "require_shell_approval": true,
           "require_write_approval": true
         }"#;
@@ -350,6 +466,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             task_route: "auto".to_string(),
             last_workspace: None,
+            policy_profile: POLICY_NORMAL.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
         };
@@ -376,6 +493,7 @@ mod tests {
             model: "gpt-5.4".to_string(),
             task_route: "coding".to_string(),
             last_workspace: None,
+            policy_profile: POLICY_NORMAL.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
         };
@@ -395,6 +513,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             providers: BTreeMap::new(),
             last_workspace: None,
+            policy_profile: POLICY_NORMAL.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
             task_route: "auto".to_string(),
@@ -404,5 +523,25 @@ mod tests {
 
         assert_eq!(config.provider_id(), GEMINI_PROVIDER_ID);
         assert_eq!(config.model, default_model_for_provider(GEMINI_PROVIDER_ID));
+    }
+
+    #[test]
+    fn safe_policy_keeps_write_approval_but_skips_routine_shell_approval() {
+        let mut config = AppConfig {
+            provider: OPENAI_PROVIDER_ID.to_string(),
+            api_key: String::new(),
+            model: default_model_for_provider(OPENAI_PROVIDER_ID).to_string(),
+            providers: BTreeMap::new(),
+            last_workspace: None,
+            policy_profile: POLICY_NORMAL.to_string(),
+            require_shell_approval: true,
+            require_write_approval: true,
+            task_route: "auto".to_string(),
+        };
+
+        config.set_policy_profile(POLICY_SAFE);
+
+        assert!(!config.effective_require_shell_approval());
+        assert!(config.effective_require_write_approval());
     }
 }

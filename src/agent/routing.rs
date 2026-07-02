@@ -367,6 +367,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             providers,
             last_workspace: None,
+            policy_profile: "normal".to_string(),
             require_shell_approval: true,
             require_write_approval: true,
             task_route: ROUTE_AUTO.to_string(),

@@ -13,7 +13,9 @@ use crate::assets::{
     ImageAssetRequest, SpritesheetAssetRequest, VideoAssetRequest, GEMINI_IMAGE_PROVIDER_ID,
     OPENAI_AUDIO_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID, OPENAI_VIDEO_PROVIDER_ID,
 };
-use crate::config::{append_journal, AppConfig};
+use crate::config::{
+    append_journal, clear_journal, policy_profile_labels, read_journal_tail, AppConfig,
+};
 use crate::game_workflows::{
     parse_workflow_kind, run_game_workflow, workflow_specs, GameWorkflowRequest,
 };
@@ -53,6 +55,8 @@ pub struct LeetcodeApp {
     input: String,
     chat: Vec<ChatLine>,
     tool_log: Vec<ToolLogLine>,
+    journal_lines: Vec<String>,
+    journal_status: String,
     git_summary: String,
     project_profiles: Vec<ProjectProfile>,
     project_events_rx: Option<Receiver<AppEvent>>,
@@ -117,6 +121,7 @@ impl LeetcodeApp {
         let asset_provider_input = OPENAI_IMAGE_PROVIDER_ID.to_string();
         let asset_api_key_input = image_api_key_from_config(&config, &asset_provider_input);
         let asset_model_input = image_model_from_config(&config, &asset_provider_input);
+        let journal_lines = read_journal_tail(200);
         let approvals = Arc::new(Mutex::new(HashMap::new()));
 
         Self {
@@ -136,6 +141,8 @@ impl LeetcodeApp {
                 "Выбери проект, проверь модель/API key и отправь задачу агенту.",
             )],
             tool_log: Vec::new(),
+            journal_lines,
+            journal_status: String::new(),
             git_summary: String::new(),
             project_profiles,
             project_events_rx: None,
@@ -365,6 +372,23 @@ impl LeetcodeApp {
         self.git_summary = format!("{status_text}\n\n{diff_text}");
     }
 
+    fn refresh_journal(&mut self) {
+        self.journal_lines = read_journal_tail(200);
+        self.journal_status = format!("showing last {} entries", self.journal_lines.len());
+    }
+
+    fn clear_journal_from_ui(&mut self) {
+        match clear_journal() {
+            Ok(()) => {
+                self.journal_lines.clear();
+                self.journal_status = "journal cleared".to_string();
+            }
+            Err(err) => {
+                self.journal_status = format!("journal clear failed: {err}");
+            }
+        }
+    }
+
     fn start_project_command(&mut self, command: ProjectCommand) {
         if self.project_is_running {
             return;
@@ -384,8 +408,8 @@ impl LeetcodeApp {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let policy = PolicyConfig {
-            require_shell_approval: self.config.require_shell_approval,
-            require_write_approval: self.config.require_write_approval,
+            require_shell_approval: self.config.effective_require_shell_approval(),
+            require_write_approval: self.config.effective_require_write_approval(),
         };
         let tool_id = format!("project-{}", command.id);
         let label = command.label.clone();
@@ -1040,6 +1064,7 @@ impl LeetcodeApp {
         self.input.clear();
         self.chat.push(ChatLine::user(message.clone()));
         append_journal(format!("user_input\t{}", compact(&message, 500)));
+        self.refresh_journal();
         self.tool_log.push(ToolLogLine {
             title: "run".to_string(),
             content: "Agent run started".to_string(),
@@ -1109,6 +1134,7 @@ impl LeetcodeApp {
                 events.push(event);
             }
         }
+        let had_events = !events.is_empty();
 
         for event in events {
             append_journal(format!("event\t{}", compact(&format!("{event:?}"), 2_000)));
@@ -1184,6 +1210,10 @@ impl LeetcodeApp {
                 }
             }
         }
+
+        if had_events {
+            self.refresh_journal();
+        }
     }
 
     fn update_desktop_state_from_tool_output(&mut self, output: &str) {
@@ -1237,6 +1267,7 @@ impl LeetcodeApp {
                 events.push(event);
             }
         }
+        let had_events = !events.is_empty();
 
         for event in events {
             append_journal(format!(
@@ -1294,6 +1325,10 @@ impl LeetcodeApp {
                 AppEvent::AssistantText(_) | AppEvent::AssistantDelta(_) => {}
             }
         }
+
+        if had_events {
+            self.refresh_journal();
+        }
     }
 
     fn answer_approval(&mut self, approved: bool) {
@@ -1323,6 +1358,7 @@ impl LeetcodeApp {
             if approved { "approved" } else { "denied" },
             prompt.summary
         ));
+        self.refresh_journal();
     }
 
     fn show_top_bar(&mut self, ctx: &egui::Context) {
@@ -1387,6 +1423,31 @@ impl LeetcodeApp {
                         }
                     });
 
+                ui.label("Policy");
+                let old_policy_profile = self.config.policy_profile.clone();
+                egui::ComboBox::from_id_salt("policy_profile_select")
+                    .selected_text(
+                        policy_profile_labels()
+                            .iter()
+                            .find(|(id, _)| *id == self.config.policy_profile)
+                            .map(|(_, label)| *label)
+                            .unwrap_or("Normal"),
+                    )
+                    .width(76.0)
+                    .show_ui(ui, |ui| {
+                        for (id, label) in policy_profile_labels() {
+                            ui.selectable_value(
+                                &mut self.config.policy_profile,
+                                (*id).to_string(),
+                                *label,
+                            );
+                        }
+                    });
+                if self.config.policy_profile != old_policy_profile {
+                    let selected = self.config.policy_profile.clone();
+                    self.config.set_policy_profile(&selected);
+                }
+
                 ui.separator();
                 ui.label("API key");
                 ui.add_sized(
@@ -1394,8 +1455,15 @@ impl LeetcodeApp {
                     TextEdit::singleline(&mut self.api_key_input).password(true),
                 );
 
-                ui.checkbox(&mut self.config.require_shell_approval, "Confirm shell");
-                ui.checkbox(&mut self.config.require_write_approval, "Confirm write");
+                let shell_changed = ui
+                    .checkbox(&mut self.config.require_shell_approval, "Confirm shell")
+                    .changed();
+                let write_changed = ui
+                    .checkbox(&mut self.config.require_write_approval, "Confirm write")
+                    .changed();
+                if shell_changed || write_changed {
+                    self.config.set_custom_policy();
+                }
 
                 if ui.button("Сохранить").clicked() {
                     self.sync_config_from_inputs();
@@ -1517,11 +1585,112 @@ impl LeetcodeApp {
             });
     }
 
+    fn show_runtime_panel(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Runtime", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "agent: {}",
+                    if self.is_running { "running" } else { "idle" }
+                ));
+                ui.label(format!(
+                    "project: {}",
+                    if self.project_is_running {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                ));
+                ui.label(format!(
+                    "assets: {}",
+                    if self.asset_is_running {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                ));
+                ui.label(format!(
+                    "terminal: {}",
+                    if self.terminal_running {
+                        "running"
+                    } else {
+                        "stopped"
+                    }
+                ));
+            });
+
+            let policy_label = policy_profile_labels()
+                .iter()
+                .find(|(id, _)| *id == self.config.policy_profile)
+                .map(|(_, label)| *label)
+                .unwrap_or("Normal");
+            ui.label(format!(
+                "policy: {policy_label} | shell approval: {} | write approval: {}",
+                yes_no(self.config.effective_require_shell_approval()),
+                yes_no(self.config.effective_require_write_approval())
+            ));
+
+            if let Some(prompt) = &self.pending_approval {
+                ui.label(RichText::new("waiting for approval").strong());
+                ui.label(compact(&prompt.summary, 160));
+            }
+
+            let state_summary = self
+                .agent_state
+                .lock()
+                .map(|state| {
+                    format!(
+                        "provider: {} | model: {} | response: {}",
+                        state.provider_id.as_deref().unwrap_or("none"),
+                        state.model_id.as_deref().unwrap_or("none"),
+                        state
+                            .previous_response_id
+                            .as_deref()
+                            .map(|id| compact(id, 48))
+                            .unwrap_or_else(|| "none".to_string())
+                    )
+                })
+                .unwrap_or_else(|_| "agent state unavailable".to_string());
+            ui.label(RichText::new(state_summary).weak());
+        });
+    }
+
+    fn show_journal_panel(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Journal", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Refresh").clicked() {
+                    self.refresh_journal();
+                }
+                if ui.button("Clear").clicked() {
+                    self.clear_journal_from_ui();
+                }
+            });
+
+            if !self.journal_status.is_empty() {
+                ui.label(RichText::new(&self.journal_status).weak());
+            }
+
+            let mut journal_text = if self.journal_lines.is_empty() {
+                "No journal entries yet".to_string()
+            } else {
+                self.journal_lines.join("\n")
+            };
+            ui.add(
+                TextEdit::multiline(&mut journal_text)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(10)
+                    .interactive(false),
+            );
+        });
+    }
+
     fn show_tool_panel(&mut self, ctx: &egui::Context) {
         egui::SidePanel::right("tools")
             .resizable(true)
             .default_width(380.0)
             .show(ctx, |ui| {
+                self.show_runtime_panel(ui);
+                ui.separator();
                 self.show_project_panel(ui);
                 ui.separator();
                 self.show_desktop_panel(ui, ctx);
@@ -1529,6 +1698,8 @@ impl LeetcodeApp {
                 self.show_terminal_panel(ui);
                 ui.separator();
                 self.show_orchestration_panel(ui);
+                ui.separator();
+                self.show_journal_panel(ui);
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.heading("Git");
@@ -2406,6 +2577,14 @@ fn summarize_window_value(value: &serde_json::Value) -> String {
         format!("active: {title} ({process})")
     } else {
         format!("active: {title} ({process}, pid {pid})")
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
     }
 }
 

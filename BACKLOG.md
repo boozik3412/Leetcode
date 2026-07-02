@@ -4,12 +4,14 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 
 ## Stage 1 - Reliable Coding Runtime
 
-- Stream Responses API events into the UI instead of waiting for full model turns.
-- Tighten tool schemas and validation so model arguments fail clearly and safely.
-- Add dry-run patch validation with `git apply --check` before applying patches.
-- Show patch impact and git status/diff in the UI.
-- Add a durable action journal for agent runs, approvals, shell commands, patch attempts, and failures.
-- Add focused tests for workspace path safety, tool argument parsing, patch validation, and shell command construction.
+- Done: Stream Responses API events into the UI instead of waiting for full model turns.
+- Done: Tighten tool schemas and validation so model arguments fail clearly and safely.
+- Done: Add dry-run patch validation with `git apply --check` before applying patches.
+- Done: Show patch impact and git status/diff in the UI.
+- Done: Add a durable action journal for agent runs, approvals, shell commands, patch attempts, and failures.
+- Done: Add Journal and Runtime UI panels for state visibility and audit review.
+- Done: Add saved Safe/Normal/Strict/Custom policy profiles over shell/write approvals.
+- Done: Add focused tests for workspace path safety, tool argument parsing, patch validation, and shell command construction.
 - Done: Add a persistent terminal session with start/write/read/stop tools, UI panel, and shared state across agent turns.
 
 ## Stage 2 - Model Provider Layer

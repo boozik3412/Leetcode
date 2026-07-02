@@ -49,8 +49,8 @@ pub async fn run_user_turn(
     cancel: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     let policy = PolicyConfig {
-        require_shell_approval: config.require_shell_approval,
-        require_write_approval: config.require_write_approval,
+        require_shell_approval: config.effective_require_shell_approval(),
+        require_write_approval: config.effective_require_write_approval(),
     };
     let dispatcher = ToolDispatcher::new(
         workspace.clone(),
