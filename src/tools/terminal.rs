@@ -3,7 +3,7 @@ use crate::terminal::{
     clear_terminal_output, read_terminal_snapshot, start_terminal_session, stop_terminal_session,
     write_terminal_input,
 };
-use crate::tools::policy::{looks_destructive_shell, request_approval, ApprovalMap, PolicyConfig};
+use crate::tools::policy::{request_approval, ApprovalMap, PolicyConfig};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::json;
@@ -62,7 +62,7 @@ pub fn terminal_write(
     if args.input.is_empty() {
         return ToolResult::error("terminal_write input is empty");
     }
-    let needs_approval = policy.require_shell_approval || looks_destructive_shell(&args.input);
+    let needs_approval = policy.require_shell_for(&args.input);
     if needs_approval
         && !request_approval(
             events,

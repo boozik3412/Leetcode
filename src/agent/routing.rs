@@ -367,9 +367,14 @@ mod tests {
             model: "gpt-5.5".to_string(),
             providers,
             last_workspace: None,
-            policy_profile: "normal".to_string(),
+            policy_profile: "ask".to_string(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
             task_route: ROUTE_AUTO.to_string(),
         };
 

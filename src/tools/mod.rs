@@ -99,12 +99,14 @@ impl ToolDispatcher {
                 let Some(workspace) = &self.workspace else {
                     return ToolResult::error("No workspace selected");
                 };
-                desktop::screenshot(workspace, &self.events, &self.approvals)
+                desktop::screenshot(workspace, &self.events, &self.approvals, &self.policy)
             }
             ToolAction::ActiveWindow => desktop::active_window(),
             ToolAction::FocusWindow => {
                 match serde_json::from_value::<FocusWindowArgs>(request.args) {
-                    Ok(args) => desktop::focus_window(args, &self.events, &self.approvals),
+                    Ok(args) => {
+                        desktop::focus_window(args, &self.events, &self.approvals, &self.policy)
+                    }
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }
@@ -113,24 +115,30 @@ impl ToolDispatcher {
                     return ToolResult::error("No workspace selected");
                 };
                 match serde_json::from_value::<DesktopStepArgs>(request.args) {
-                    Ok(args) => {
-                        desktop::desktop_step(workspace, args, &self.events, &self.approvals)
-                    }
+                    Ok(args) => desktop::desktop_step(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                        &self.policy,
+                    ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }
             ToolAction::MouseClick => {
                 match serde_json::from_value::<MouseClickArgs>(request.args) {
-                    Ok(args) => desktop::mouse_click(args, &self.events, &self.approvals),
+                    Ok(args) => {
+                        desktop::mouse_click(args, &self.events, &self.approvals, &self.policy)
+                    }
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }
             ToolAction::TypeText => match serde_json::from_value::<TypeTextArgs>(request.args) {
-                Ok(args) => desktop::type_text(args, &self.events, &self.approvals),
+                Ok(args) => desktop::type_text(args, &self.events, &self.approvals, &self.policy),
                 Err(err) => ToolResult::error(err.to_string()),
             },
             ToolAction::Hotkey => match serde_json::from_value::<HotkeyArgs>(request.args) {
-                Ok(args) => desktop::hotkey(args, &self.events, &self.approvals),
+                Ok(args) => desktop::hotkey(args, &self.events, &self.approvals, &self.policy),
                 Err(err) => ToolResult::error(err.to_string()),
             },
             ToolAction::ListFiles => {
@@ -235,6 +243,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -249,6 +258,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -283,6 +293,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -297,6 +308,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -311,6 +323,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -326,9 +339,13 @@ impl ToolDispatcher {
                     return ToolResult::error("No workspace selected");
                 };
                 match serde_json::from_value::<CreateReplayEvalArgs>(request.args) {
-                    Ok(args) => {
-                        orchestration::create_eval(workspace, args, &self.events, &self.approvals)
-                    }
+                    Ok(args) => orchestration::create_eval(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                        &self.policy,
+                    ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }
@@ -350,6 +367,7 @@ impl ToolDispatcher {
                             &self.config,
                             &self.events,
                             &self.approvals,
+                            &self.policy,
                         )
                         .await
                     }
@@ -368,6 +386,7 @@ impl ToolDispatcher {
                             &self.config,
                             &self.events,
                             &self.approvals,
+                            &self.policy,
                         )
                         .await
                     }
@@ -386,6 +405,7 @@ impl ToolDispatcher {
                             &self.config,
                             &self.events,
                             &self.approvals,
+                            &self.policy,
                         )
                         .await
                     }
@@ -404,6 +424,7 @@ impl ToolDispatcher {
                             &self.config,
                             &self.events,
                             &self.approvals,
+                            &self.policy,
                         )
                         .await
                     }
@@ -422,6 +443,7 @@ impl ToolDispatcher {
                             &self.config,
                             &self.events,
                             &self.approvals,
+                            &self.policy,
                         )
                         .await
                     }
@@ -440,6 +462,7 @@ impl ToolDispatcher {
                             &self.config,
                             &self.events,
                             &self.approvals,
+                            &self.policy,
                         )
                         .await
                     }
@@ -456,6 +479,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -470,6 +494,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -484,6 +509,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -498,6 +524,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
@@ -512,6 +539,7 @@ impl ToolDispatcher {
                         args,
                         &self.events,
                         &self.approvals,
+                        &self.policy,
                     ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }

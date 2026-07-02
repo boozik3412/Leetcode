@@ -1,5 +1,5 @@
 use crate::agent::types::{AppEvent, ToolResult};
-use crate::tools::policy::{request_approval, ApprovalMap};
+use crate::tools::policy::{request_approval_if, ApprovalMap, PolicyConfig};
 use crate::workspace::Workspace;
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -69,8 +69,10 @@ pub fn screenshot(
     workspace: &Workspace,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_desktop_approval,
         events,
         approvals,
         "Capture desktop screenshot",
@@ -98,6 +100,7 @@ pub fn focus_window(
     args: FocusWindowArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     if args.title.as_deref().unwrap_or("").trim().is_empty()
         && args.process.as_deref().unwrap_or("").trim().is_empty()
@@ -105,7 +108,8 @@ pub fn focus_window(
         return ToolResult::error("focus_window requires title or process");
     }
 
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_desktop_approval,
         events,
         approvals,
         "Focus desktop window",
@@ -132,6 +136,7 @@ pub fn desktop_step(
     args: DesktopStepArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let action = args
         .action
@@ -152,7 +157,8 @@ pub fn desktop_step(
         return ToolResult::error(err);
     }
 
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_desktop_approval,
         events,
         approvals,
         format!("Desktop step: {action}"),
@@ -217,6 +223,7 @@ pub fn mouse_click(
     args: MouseClickArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let button = args.button.clone().unwrap_or_else(|| "left".to_string());
     if mouse_button_flags(&button).is_none() {
@@ -224,7 +231,8 @@ pub fn mouse_click(
     }
     let clicks = args.clicks.unwrap_or(1).clamp(1, 3);
 
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_desktop_approval,
         events,
         approvals,
         format!("Mouse {button} click at {}, {}", args.x, args.y),
@@ -242,13 +250,15 @@ pub fn type_text(
     args: TypeTextArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     if args.text.is_empty() {
         return ToolResult::error("type_text text is empty");
     }
 
     let preview = preview_text(&args.text, 1_000);
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_desktop_approval,
         events,
         approvals,
         format!("Type {} characters", args.text.chars().count()),
@@ -262,7 +272,12 @@ pub fn type_text(
         .unwrap_or_else(ToolResult::error)
 }
 
-pub fn hotkey(args: HotkeyArgs, events: &Sender<AppEvent>, approvals: &ApprovalMap) -> ToolResult {
+pub fn hotkey(
+    args: HotkeyArgs,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+    policy: &PolicyConfig,
+) -> ToolResult {
     if args.keys.is_empty() {
         return ToolResult::error("hotkey keys is empty");
     }
@@ -271,7 +286,8 @@ pub fn hotkey(args: HotkeyArgs, events: &Sender<AppEvent>, approvals: &ApprovalM
     }
 
     let rendered_keys = args.keys.join("+");
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_desktop_approval,
         events,
         approvals,
         format!("Press hotkey {rendered_keys}"),

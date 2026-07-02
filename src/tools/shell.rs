@@ -1,5 +1,5 @@
 use crate::agent::types::{AppEvent, ToolResult};
-use crate::tools::policy::{looks_destructive_shell, request_approval, ApprovalMap, PolicyConfig};
+use crate::tools::policy::{request_approval, ApprovalMap, PolicyConfig};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use std::fs;
@@ -37,7 +37,7 @@ pub async fn run_shell(
         return ToolResult::error("run_shell cwd must be a directory");
     }
 
-    let needs_approval = policy.require_shell_approval || looks_destructive_shell(&args.cmd);
+    let needs_approval = policy.require_shell_for(&args.cmd);
     if needs_approval
         && !request_approval(
             &events,

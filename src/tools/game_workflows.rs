@@ -1,6 +1,6 @@
 use crate::agent::types::{AppEvent, ToolResult};
 use crate::game_workflows::{parse_workflow_kind, run_game_workflow, GameWorkflowRequest};
-use crate::tools::policy::{request_approval, ApprovalMap};
+use crate::tools::policy::{request_approval_if, ApprovalMap, PolicyConfig};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::json;
@@ -18,6 +18,7 @@ pub fn create_game_workflow(
     args: GameWorkflowArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(workflow) = parse_workflow_kind(&args.workflow) else {
         return ToolResult::error(format!("Unknown game workflow: {}", args.workflow));
@@ -30,7 +31,8 @@ pub fn create_game_workflow(
         .to_string();
     let brief = args.brief.unwrap_or_default();
 
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_write_approval,
         events,
         approvals,
         format!("Create game workflow: {title}"),

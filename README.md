@@ -61,9 +61,9 @@ Minimal desktop coding agent implemented as a Rust desktop app.
 - Approval prompts for shell and write/edit actions.
 - Patch dry-run validation with `git apply --check` before approval.
 - Git status/diff summary in the tool panel.
-- Runtime panel with agent/project/assets/terminal state, active model state, policy summary, and pending approval status.
+- Runtime panel with agent/project/assets/terminal state, active model state, permission summary, and pending approval status.
 - Durable action journal under the user data directory with a right-side Journal viewer.
-- Saved Safe/Normal/Strict/Custom policy profiles over shell and write approvals.
+- Saved permission modes in the prompt bar: Ask, Auto, Work, Full, plus backward-compatible Custom configs.
 - Basic cancellation flag for active agent runs.
 
 ## Setup
@@ -110,7 +110,12 @@ OpenAI and Gemini image generation can reuse the saved chat provider keys. Stabi
 
 The coding agent can also call asset tools itself when a user asks for game/app visuals, spritesheets, sounds, or videos. Because this can call paid external APIs, the app asks for approval before the request is sent. Asset jobs include provider/model/parameter/license metadata in `assets/generated/asset_jobs.json`. Existing assets can be varied, upscaled, exported, attached as context, applied as `assets/app-icon.png`, or revealed in the file explorer. Screenshots are approval-gated and are saved under `assets/generated/screenshots`.
 
-The `Policy` selector in the top bar saves a confirmation profile. `Normal` keeps the original confirm-shell and confirm-write behavior, `Safe` confirms file writes and destructive shell commands while allowing routine shell commands, `Strict` confirms shell/write actions, and manual checkbox changes switch the profile to `Custom`.
+The prompt bar has a permission-mode switcher:
+
+- `Запрос` asks before every mutating, shell, paid API, desktop, external, or orchestration action.
+- `Авто` lets the agent edit the selected workspace and run routine commands, but still asks for paid API calls, desktop control, external opens, and destructive shell commands.
+- `Работа` also allows paid asset/model API calls without prompting, while still asking for desktop control, external opens, and destructive shell commands.
+- `Полный` removes approval prompts for all agent actions, while keeping workspace path checks and tool argument validation.
 
 Desktop control currently supports active-window inspection, approval-gated screenshots, window focus, desktop steps, mouse clicks, typed text, and keyboard shortcuts. For desktop work, the preferred loop is `active_window` or `desktop_step` observe first, then one focused `desktop_step` action that captures before and after screenshots.
 
@@ -122,7 +127,7 @@ The `Project` panel also exposes game workflow templates. They create markdown p
 
 The `Agents` panel exposes the Rust-owned orchestration layer. It can record specialist handoffs from the current prompt, show a workspace orchestration snapshot in the tool log, and export a trace JSON file. The agent can call the same orchestration tools itself. `run_subagent` lets the manager agent execute a bounded specialist mini-loop for a focused task; subagents have role-specific tool allowlists, max-round limits, and their runs are saved in the orchestration trace. For broad tasks, the manager is instructed to propose a compact subagent plan first unless the user has already approved splitting the work. The current architecture keeps orchestration inside the Rust desktop app for a self-contained MVP; an OpenAI Agents SDK sidecar remains the planned upgrade path when independent specialist execution, hosted tracing, or richer session management becomes necessary.
 
-The `Runtime` panel shows whether the main agent, project command, asset job, or terminal is running, plus the effective approval policy and current provider/model state. The `Journal` panel shows the latest durable audit entries and can refresh or clear the local journal file.
+The `Runtime` panel shows whether the main agent, project command, asset job, or terminal is running, plus the effective permission mode and current provider/model state. The `Journal` panel shows the latest durable audit entries and can refresh or clear the local journal file.
 
 ## Launch
 

@@ -11,7 +11,7 @@ use crate::assets::{
     STABILITY_IMAGE_PROVIDER_ID,
 };
 use crate::config::AppConfig;
-use crate::tools::policy::{request_approval, ApprovalMap};
+use crate::tools::policy::{request_approval_if, ApprovalMap, PolicyConfig};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::json;
@@ -101,6 +101,7 @@ pub async fn generate_image_asset(
     config: &AppConfig,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -132,6 +133,7 @@ pub async fn generate_image_asset(
         config,
         events,
         approvals,
+        policy,
         "Generate image asset",
     )
     .await
@@ -143,6 +145,7 @@ pub async fn generate_spritesheet_asset(
     config: &AppConfig,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -174,7 +177,8 @@ pub async fn generate_spritesheet_asset(
             image_provider_env_var(&request.provider)
         ));
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_paid_api_approval,
         events,
         approvals,
         format!(
@@ -203,6 +207,7 @@ pub async fn generate_audio_asset(
     config: &AppConfig,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -226,7 +231,8 @@ pub async fn generate_audio_asset(
             asset_provider_env_var(&request.provider)
         ));
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_paid_api_approval,
         events,
         approvals,
         format!(
@@ -255,6 +261,7 @@ pub async fn generate_video_asset(
     config: &AppConfig,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -278,7 +285,8 @@ pub async fn generate_video_asset(
             asset_provider_env_var(&request.provider)
         ));
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_paid_api_approval,
         events,
         approvals,
         format!(
@@ -307,6 +315,7 @@ pub async fn regenerate_image_asset(
     config: &AppConfig,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(job) = find_asset_job(workspace, &args.job_id) else {
         return ToolResult::error(format!("asset job not found: {}", args.job_id));
@@ -319,6 +328,7 @@ pub async fn regenerate_image_asset(
         config,
         events,
         approvals,
+        policy,
         "Regenerate image asset",
     )
     .await
@@ -330,6 +340,7 @@ pub async fn vary_image_asset(
     config: &AppConfig,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(job) = find_asset_job(workspace, &args.job_id) else {
         return ToolResult::error(format!("asset job not found: {}", args.job_id));
@@ -348,6 +359,7 @@ pub async fn vary_image_asset(
         config,
         events,
         approvals,
+        policy,
         "Create image asset variation",
     )
     .await
@@ -359,6 +371,7 @@ async fn run_approved_image_request(
     config: &AppConfig,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
     action_name: &str,
 ) -> ToolResult {
     let api_key = image_api_key_from_config(config, &request.provider);
@@ -370,7 +383,8 @@ async fn run_approved_image_request(
         ));
     }
 
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_paid_api_approval,
         events,
         approvals,
         format!(
@@ -417,13 +431,15 @@ pub fn upscale_existing_asset(
     args: UpscaleAssetArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
         return ToolResult::error("upscale_asset source_path is empty");
     }
     let scale = args.scale.unwrap_or(2).clamp(2, 4);
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_write_approval,
         events,
         approvals,
         format!("Upscale asset {scale}x"),
@@ -442,12 +458,14 @@ pub fn export_existing_asset(
     args: ExportAssetArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
         return ToolResult::error("export_asset source_path is empty");
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_write_approval,
         events,
         approvals,
         "Export asset",
@@ -470,12 +488,14 @@ pub fn attach_asset(
     args: AttachAssetArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
         return ToolResult::error("attach_asset source_path is empty");
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_write_approval,
         events,
         approvals,
         "Attach asset context",
@@ -521,6 +541,7 @@ pub fn use_asset_as_app_icon(
     args: UseAssetAsAppIconArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
@@ -545,7 +566,8 @@ pub fn use_asset_as_app_icon(
         );
     }
 
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_write_approval,
         events,
         approvals,
         format!("Use asset as app icon: {target_path}"),
@@ -591,6 +613,7 @@ pub fn open_asset_folder(
     args: OpenAssetFolderArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let rel_path = args
         .path
@@ -616,7 +639,8 @@ pub fn open_asset_folder(
         Err(err) => return ToolResult::error(err.to_string()),
     };
 
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_external_approval,
         events,
         approvals,
         "Open asset folder",
@@ -779,9 +803,14 @@ mod tests {
             model: "gpt-5.5".to_string(),
             providers,
             last_workspace: None,
-            policy_profile: "normal".to_string(),
+            policy_profile: "ask".to_string(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
             task_route: "auto".to_string(),
         };
 
@@ -799,9 +828,14 @@ mod tests {
             model: "gpt-5.5".to_string(),
             providers: BTreeMap::new(),
             last_workspace: None,
-            policy_profile: "normal".to_string(),
+            policy_profile: "ask".to_string(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
             task_route: "auto".to_string(),
         };
 

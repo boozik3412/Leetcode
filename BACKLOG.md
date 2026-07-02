@@ -66,6 +66,13 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add a `Desktop` panel that shows the latest desktop step screenshot and active-window summary.
 - Keep allowlists and human approval for irreversible desktop actions.
 
+## Stage 7 - Permission Control UX
+
+- Done: Add prompt-bar permission modes: Ask, Auto, Work, and Full.
+- Done: Apply the selected mode across shell, file writes, paid asset APIs, desktop control, external opens, and orchestration tools.
+- Done: Preserve backward compatibility for previous Safe/Normal/Strict/Custom saved configs.
+- Done: Show the effective permission matrix in the Runtime panel.
+
 ## Ongoing Quality Bar
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

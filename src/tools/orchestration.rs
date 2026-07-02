@@ -5,7 +5,7 @@ use crate::orchestration::{
     create_replay_eval, export_trace, orchestration_snapshot, parse_agent_role, record_handoff,
     record_run_summary, update_shared_context, SharedWorkspaceContext,
 };
-use crate::tools::policy::{request_approval, ApprovalMap, PolicyConfig};
+use crate::tools::policy::{request_approval_if, ApprovalMap, PolicyConfig};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::json;
@@ -70,6 +70,7 @@ pub fn delegate_agent(
     args: DelegateAgentArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(role) = parse_agent_role(&args.role) else {
         return ToolResult::error(format!("Unknown agent role: {}", args.role));
@@ -77,7 +78,8 @@ pub fn delegate_agent(
     if args.task.trim().is_empty() {
         return ToolResult::error("delegate_agent task is empty");
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_orchestration_approval,
         events,
         approvals,
         format!("Record handoff to {}", args.role),
@@ -124,7 +126,8 @@ pub async fn run_subagent(
     }
 
     let max_rounds = args.max_rounds.unwrap_or(4).clamp(1, 8);
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_orchestration_approval,
         &events,
         &approvals,
         format!("Run {} subagent", args.role),
@@ -167,8 +170,10 @@ pub fn update_context(
     args: UpdateWorkspaceContextArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_orchestration_approval,
         events,
         approvals,
         "Update shared workspace context",
@@ -208,11 +213,13 @@ pub fn record_summary(
     args: RunSummaryArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     if args.summary.trim().is_empty() {
         return ToolResult::error("record_run_summary summary is empty");
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_orchestration_approval,
         events,
         approvals,
         "Record run summary",
@@ -252,11 +259,13 @@ pub fn create_eval(
     args: CreateReplayEvalArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     if args.prompt.trim().is_empty() {
         return ToolResult::error("create_replay_eval prompt is empty");
     }
-    if !request_approval(
+    if !request_approval_if(
+        policy.require_orchestration_approval,
         events,
         approvals,
         format!("Create replay eval: {}", args.name),

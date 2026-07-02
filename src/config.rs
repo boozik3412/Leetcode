@@ -24,6 +24,11 @@ pub struct AppConfig {
     pub policy_profile: String,
     pub require_shell_approval: bool,
     pub require_write_approval: bool,
+    pub require_paid_api_approval: bool,
+    pub require_desktop_approval: bool,
+    pub require_external_approval: bool,
+    pub require_orchestration_approval: bool,
+    pub allow_destructive_shell: bool,
     pub task_route: String,
 }
 
@@ -50,8 +55,20 @@ struct PersistedConfig {
     last_workspace: Option<PathBuf>,
     #[serde(default = "default_policy_profile")]
     policy_profile: String,
+    #[serde(default = "default_true")]
     require_shell_approval: bool,
+    #[serde(default = "default_true")]
     require_write_approval: bool,
+    #[serde(default = "default_true")]
+    require_paid_api_approval: bool,
+    #[serde(default = "default_true")]
+    require_desktop_approval: bool,
+    #[serde(default = "default_true")]
+    require_external_approval: bool,
+    #[serde(default = "default_true")]
+    require_orchestration_approval: bool,
+    #[serde(default)]
+    allow_destructive_shell: bool,
 }
 
 impl Default for PersistedConfig {
@@ -66,6 +83,11 @@ impl Default for PersistedConfig {
             policy_profile: default_policy_profile(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
         }
     }
 }
@@ -128,6 +150,11 @@ impl AppConfig {
             policy_profile: normalize_policy_profile(&persisted.policy_profile),
             require_shell_approval: persisted.require_shell_approval,
             require_write_approval: persisted.require_write_approval,
+            require_paid_api_approval: persisted.require_paid_api_approval,
+            require_desktop_approval: persisted.require_desktop_approval,
+            require_external_approval: persisted.require_external_approval,
+            require_orchestration_approval: persisted.require_orchestration_approval,
+            allow_destructive_shell: persisted.allow_destructive_shell,
             task_route: normalize_task_route(&persisted.task_route),
         }
     }
@@ -159,6 +186,11 @@ impl AppConfig {
             policy_profile: normalize_policy_profile(&self.policy_profile),
             require_shell_approval: self.require_shell_approval,
             require_write_approval: self.require_write_approval,
+            require_paid_api_approval: self.require_paid_api_approval,
+            require_desktop_approval: self.require_desktop_approval,
+            require_external_approval: self.require_external_approval,
+            require_orchestration_approval: self.require_orchestration_approval,
+            allow_destructive_shell: self.allow_destructive_shell,
         };
 
         fs::write(path, serde_json::to_string_pretty(&persisted)?)?;
@@ -253,27 +285,51 @@ impl AppConfig {
     pub fn set_policy_profile(&mut self, policy_profile: &str) {
         self.policy_profile = normalize_policy_profile(policy_profile);
         match self.policy_profile.as_str() {
-            POLICY_SAFE => {
-                self.require_shell_approval = false;
-                self.require_write_approval = true;
-            }
-            POLICY_NORMAL | POLICY_STRICT => {
+            PERMISSION_ASK => {
                 self.require_shell_approval = true;
                 self.require_write_approval = true;
+                self.require_paid_api_approval = true;
+                self.require_desktop_approval = true;
+                self.require_external_approval = true;
+                self.require_orchestration_approval = true;
+                self.allow_destructive_shell = false;
+            }
+            PERMISSION_AUTO => {
+                self.require_shell_approval = false;
+                self.require_write_approval = false;
+                self.require_paid_api_approval = true;
+                self.require_desktop_approval = true;
+                self.require_external_approval = true;
+                self.require_orchestration_approval = false;
+                self.allow_destructive_shell = false;
+            }
+            PERMISSION_WORK => {
+                self.require_shell_approval = false;
+                self.require_write_approval = false;
+                self.require_paid_api_approval = false;
+                self.require_desktop_approval = true;
+                self.require_external_approval = true;
+                self.require_orchestration_approval = false;
+                self.allow_destructive_shell = false;
+            }
+            PERMISSION_FULL => {
+                self.require_shell_approval = false;
+                self.require_write_approval = false;
+                self.require_paid_api_approval = false;
+                self.require_desktop_approval = false;
+                self.require_external_approval = false;
+                self.require_orchestration_approval = false;
+                self.allow_destructive_shell = true;
             }
             POLICY_CUSTOM => {}
             _ => unreachable!("policy profile is normalized"),
         }
     }
 
-    pub fn set_custom_policy(&mut self) {
-        self.policy_profile = POLICY_CUSTOM.to_string();
-    }
-
     pub fn effective_require_shell_approval(&self) -> bool {
         match normalize_policy_profile(&self.policy_profile).as_str() {
-            POLICY_SAFE => false,
-            POLICY_NORMAL | POLICY_STRICT => true,
+            PERMISSION_ASK => true,
+            PERMISSION_AUTO | PERMISSION_WORK | PERMISSION_FULL => false,
             POLICY_CUSTOM => self.require_shell_approval,
             _ => unreachable!("policy profile is normalized"),
         }
@@ -281,25 +337,84 @@ impl AppConfig {
 
     pub fn effective_require_write_approval(&self) -> bool {
         match normalize_policy_profile(&self.policy_profile).as_str() {
-            POLICY_SAFE | POLICY_NORMAL | POLICY_STRICT => true,
+            PERMISSION_ASK => true,
+            PERMISSION_AUTO | PERMISSION_WORK | PERMISSION_FULL => false,
             POLICY_CUSTOM => self.require_write_approval,
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+
+    pub fn effective_require_paid_api_approval(&self) -> bool {
+        match normalize_policy_profile(&self.policy_profile).as_str() {
+            PERMISSION_ASK | PERMISSION_AUTO => true,
+            PERMISSION_WORK | PERMISSION_FULL => false,
+            POLICY_CUSTOM => self.require_paid_api_approval,
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+
+    pub fn effective_require_desktop_approval(&self) -> bool {
+        match normalize_policy_profile(&self.policy_profile).as_str() {
+            PERMISSION_ASK | PERMISSION_AUTO | PERMISSION_WORK => true,
+            PERMISSION_FULL => false,
+            POLICY_CUSTOM => self.require_desktop_approval,
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+
+    pub fn effective_require_external_approval(&self) -> bool {
+        match normalize_policy_profile(&self.policy_profile).as_str() {
+            PERMISSION_ASK | PERMISSION_AUTO | PERMISSION_WORK => true,
+            PERMISSION_FULL => false,
+            POLICY_CUSTOM => self.require_external_approval,
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+
+    pub fn effective_require_orchestration_approval(&self) -> bool {
+        match normalize_policy_profile(&self.policy_profile).as_str() {
+            PERMISSION_ASK => true,
+            PERMISSION_AUTO | PERMISSION_WORK | PERMISSION_FULL => false,
+            POLICY_CUSTOM => self.require_orchestration_approval,
+            _ => unreachable!("policy profile is normalized"),
+        }
+    }
+
+    pub fn effective_allow_destructive_shell(&self) -> bool {
+        match normalize_policy_profile(&self.policy_profile).as_str() {
+            PERMISSION_FULL => true,
+            PERMISSION_ASK | PERMISSION_AUTO | PERMISSION_WORK => false,
+            POLICY_CUSTOM => self.allow_destructive_shell,
             _ => unreachable!("policy profile is normalized"),
         }
     }
 }
 
-pub const POLICY_SAFE: &str = "safe";
-pub const POLICY_NORMAL: &str = "normal";
-pub const POLICY_STRICT: &str = "strict";
+pub const PERMISSION_ASK: &str = "ask";
+pub const PERMISSION_AUTO: &str = "auto";
+pub const PERMISSION_WORK: &str = "work";
+pub const PERMISSION_FULL: &str = "full";
 pub const POLICY_CUSTOM: &str = "custom";
 
 pub fn policy_profile_labels() -> &'static [(&'static str, &'static str)] {
     &[
-        (POLICY_NORMAL, "Normal"),
-        (POLICY_SAFE, "Safe"),
-        (POLICY_STRICT, "Strict"),
-        (POLICY_CUSTOM, "Custom"),
+        (PERMISSION_ASK, "Запрос"),
+        (PERMISSION_AUTO, "Авто"),
+        (PERMISSION_WORK, "Работа"),
+        (PERMISSION_FULL, "Полный"),
+        (POLICY_CUSTOM, "Особый"),
     ]
+}
+
+pub fn permission_mode_description(mode: &str) -> &'static str {
+    match normalize_policy_profile(mode).as_str() {
+        PERMISSION_ASK => "Запрашивать подтверждение для всех действий с эффектами.",
+        PERMISSION_AUTO => "Автоматически работать в проекте; спрашивать для платных API, desktop и внешних открытий.",
+        PERMISSION_WORK => "Автоматически менять проект и вызывать asset API; спрашивать для desktop и внешних открытий.",
+        PERMISSION_FULL => "Полный доступ: выполнять действия без подтверждений, сохраняя проверки путей workspace.",
+        POLICY_CUSTOM => "Особая ручная комбинация разрешений.",
+        _ => "Режим разрешений.",
+    }
 }
 
 fn default_provider() -> String {
@@ -315,20 +430,23 @@ fn default_task_route() -> String {
 }
 
 fn default_policy_profile() -> String {
-    POLICY_NORMAL.to_string()
+    PERMISSION_ASK.to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn normalize_policy_profile(policy_profile: &str) -> String {
-    match policy_profile
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .as_str()
-    {
-        POLICY_SAFE => POLICY_SAFE.to_string(),
-        POLICY_STRICT => POLICY_STRICT.to_string(),
+    let normalized = policy_profile.trim().to_ascii_lowercase().replace('-', "_");
+
+    match normalized.as_str() {
+        PERMISSION_ASK | "normal" | "strict" => PERMISSION_ASK.to_string(),
+        PERMISSION_AUTO | "safe" => PERMISSION_AUTO.to_string(),
+        PERMISSION_WORK => PERMISSION_WORK.to_string(),
+        PERMISSION_FULL | "full_access" => PERMISSION_FULL.to_string(),
         POLICY_CUSTOM => POLICY_CUSTOM.to_string(),
-        _ => POLICY_NORMAL.to_string(),
+        _ => PERMISSION_ASK.to_string(),
     }
 }
 
@@ -455,6 +573,10 @@ mod tests {
         assert!(config.api_key.is_empty());
         assert_eq!(config.model, "gpt-5.5");
         assert_eq!(config.task_route, "auto");
+        assert_eq!(
+            normalize_policy_profile(&config.policy_profile),
+            PERMISSION_ASK
+        );
     }
 
     #[test]
@@ -466,9 +588,14 @@ mod tests {
             model: "gpt-5.5".to_string(),
             task_route: "auto".to_string(),
             last_workspace: None,
-            policy_profile: POLICY_NORMAL.to_string(),
+            policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -493,9 +620,14 @@ mod tests {
             model: "gpt-5.4".to_string(),
             task_route: "coding".to_string(),
             last_workspace: None,
-            policy_profile: POLICY_NORMAL.to_string(),
+            policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -513,9 +645,14 @@ mod tests {
             model: "gpt-5.5".to_string(),
             providers: BTreeMap::new(),
             last_workspace: None,
-            policy_profile: POLICY_NORMAL.to_string(),
+            policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
             task_route: "auto".to_string(),
         };
 
@@ -526,22 +663,58 @@ mod tests {
     }
 
     #[test]
-    fn safe_policy_keeps_write_approval_but_skips_routine_shell_approval() {
+    fn auto_mode_allows_workspace_work_but_keeps_paid_and_desktop_approval() {
         let mut config = AppConfig {
             provider: OPENAI_PROVIDER_ID.to_string(),
             api_key: String::new(),
             model: default_model_for_provider(OPENAI_PROVIDER_ID).to_string(),
             providers: BTreeMap::new(),
             last_workspace: None,
-            policy_profile: POLICY_NORMAL.to_string(),
+            policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
             task_route: "auto".to_string(),
         };
 
-        config.set_policy_profile(POLICY_SAFE);
+        config.set_policy_profile(PERMISSION_AUTO);
 
         assert!(!config.effective_require_shell_approval());
-        assert!(config.effective_require_write_approval());
+        assert!(!config.effective_require_write_approval());
+        assert!(config.effective_require_paid_api_approval());
+        assert!(config.effective_require_desktop_approval());
+        assert!(!config.effective_allow_destructive_shell());
+    }
+
+    #[test]
+    fn full_mode_removes_approval_gates() {
+        let mut config = AppConfig {
+            provider: OPENAI_PROVIDER_ID.to_string(),
+            api_key: String::new(),
+            model: default_model_for_provider(OPENAI_PROVIDER_ID).to_string(),
+            providers: BTreeMap::new(),
+            last_workspace: None,
+            policy_profile: PERMISSION_ASK.to_string(),
+            require_shell_approval: true,
+            require_write_approval: true,
+            require_paid_api_approval: true,
+            require_desktop_approval: true,
+            require_external_approval: true,
+            require_orchestration_approval: true,
+            allow_destructive_shell: false,
+            task_route: "auto".to_string(),
+        };
+
+        config.set_policy_profile(PERMISSION_FULL);
+
+        assert!(!config.effective_require_shell_approval());
+        assert!(!config.effective_require_write_approval());
+        assert!(!config.effective_require_paid_api_approval());
+        assert!(!config.effective_require_desktop_approval());
+        assert!(config.effective_allow_destructive_shell());
     }
 }

@@ -14,7 +14,8 @@ use crate::assets::{
     OPENAI_AUDIO_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID, OPENAI_VIDEO_PROVIDER_ID,
 };
 use crate::config::{
-    append_journal, clear_journal, policy_profile_labels, read_journal_tail, AppConfig,
+    append_journal, clear_journal, permission_mode_description, policy_profile_labels,
+    read_journal_tail, AppConfig,
 };
 use crate::game_workflows::{
     parse_workflow_kind, run_game_workflow, workflow_specs, GameWorkflowRequest,
@@ -407,10 +408,7 @@ impl LeetcodeApp {
         let approvals = self.approvals.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
-        let policy = PolicyConfig {
-            require_shell_approval: self.config.effective_require_shell_approval(),
-            require_write_approval: self.config.effective_require_write_approval(),
-        };
+        let policy = PolicyConfig::from_config(&self.config);
         let tool_id = format!("project-{}", command.id);
         let label = command.label.clone();
         let summary = format!("{}: {}", command.label, command.command);
@@ -1423,47 +1421,12 @@ impl LeetcodeApp {
                         }
                     });
 
-                ui.label("Policy");
-                let old_policy_profile = self.config.policy_profile.clone();
-                egui::ComboBox::from_id_salt("policy_profile_select")
-                    .selected_text(
-                        policy_profile_labels()
-                            .iter()
-                            .find(|(id, _)| *id == self.config.policy_profile)
-                            .map(|(_, label)| *label)
-                            .unwrap_or("Normal"),
-                    )
-                    .width(76.0)
-                    .show_ui(ui, |ui| {
-                        for (id, label) in policy_profile_labels() {
-                            ui.selectable_value(
-                                &mut self.config.policy_profile,
-                                (*id).to_string(),
-                                *label,
-                            );
-                        }
-                    });
-                if self.config.policy_profile != old_policy_profile {
-                    let selected = self.config.policy_profile.clone();
-                    self.config.set_policy_profile(&selected);
-                }
-
                 ui.separator();
                 ui.label("API key");
                 ui.add_sized(
                     [230.0, 22.0],
                     TextEdit::singleline(&mut self.api_key_input).password(true),
                 );
-
-                let shell_changed = ui
-                    .checkbox(&mut self.config.require_shell_approval, "Confirm shell")
-                    .changed();
-                let write_changed = ui
-                    .checkbox(&mut self.config.require_write_approval, "Confirm write")
-                    .changed();
-                if shell_changed || write_changed {
-                    self.config.set_custom_policy();
-                }
 
                 if ui.button("Сохранить").clicked() {
                     self.sync_config_from_inputs();
@@ -1624,9 +1587,12 @@ impl LeetcodeApp {
                 .map(|(_, label)| *label)
                 .unwrap_or("Normal");
             ui.label(format!(
-                "policy: {policy_label} | shell approval: {} | write approval: {}",
+                "policy: {policy_label} | shell: {} | write: {} | paid API: {} | desktop: {} | external: {}",
                 yes_no(self.config.effective_require_shell_approval()),
-                yes_no(self.config.effective_require_write_approval())
+                yes_no(self.config.effective_require_write_approval()),
+                yes_no(self.config.effective_require_paid_api_approval()),
+                yes_no(self.config.effective_require_desktop_approval()),
+                yes_no(self.config.effective_require_external_approval())
             ));
 
             if let Some(prompt) = &self.pending_approval {
@@ -2411,11 +2377,37 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_permission_mode_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Режим").weak());
+            for (id, label) in policy_profile_labels() {
+                if *id == "custom" {
+                    continue;
+                }
+                let selected = self.config.policy_profile == *id;
+                let response = ui
+                    .selectable_label(selected, *label)
+                    .on_hover_text(permission_mode_description(id));
+                if response.clicked() && !selected {
+                    self.config.set_policy_profile(id);
+                    self.sync_config_from_inputs();
+                    self.sync_asset_provider_settings();
+                    let _ = self.config.save();
+                }
+            }
+            ui.label(
+                RichText::new(permission_mode_description(&self.config.policy_profile)).weak(),
+            );
+        });
+    }
+
     fn show_input_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("input_bar")
-            .exact_height(88.0)
+            .exact_height(112.0)
             .show(ctx, |ui| {
                 ui.add_space(6.0);
+                self.show_permission_mode_controls(ui);
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     let send_width = 112.0;
                     let input_width = (ui.available_width() - send_width - 12.0).max(220.0);

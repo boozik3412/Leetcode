@@ -1,6 +1,6 @@
 use crate::agent::types::{AppEvent, ToolResult};
 use crate::project::{detect_project_profiles, find_project_preview};
-use crate::tools::policy::{request_approval, ApprovalMap};
+use crate::tools::policy::{request_approval_if, ApprovalMap, PolicyConfig};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::json;
@@ -19,6 +19,7 @@ pub fn open_project_preview(
     args: OpenProjectPreviewArgs,
     events: &Sender<AppEvent>,
     approvals: &ApprovalMap,
+    policy: &PolicyConfig,
 ) -> ToolResult {
     let hook = if args
         .url
@@ -51,7 +52,8 @@ pub fn open_project_preview(
         .or_else(|| hook.as_ref().and_then(|hook| hook.url.clone()));
 
     if let Some(url) = url {
-        if !request_approval(
+        if !request_approval_if(
+            policy.require_external_approval,
             events,
             approvals,
             "Open project preview",
