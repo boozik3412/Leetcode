@@ -29,8 +29,10 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Save generated image outputs into `assets/generated/images`.
 - Done: Add image providers: ChatGPT Image, Nano Banana, Stability AI, and Replicate FLUX.
 - Done: Expose image generation as the agent-callable `generate_image_asset` action.
+- Done: Add asset cards with regenerate, variation, use-as-icon, open-folder, and load-prompt actions.
+- Done: Add agent-callable asset follow-up actions: `regenerate_image_asset`, `vary_image_asset`, `use_asset_as_app_icon`, and `open_asset_folder`.
 - Track licensing/provider metadata for generated assets.
-- Add regenerate, variation, upscale, export, and attach-to-chat workflows.
+- Add upscale, export, and attach-to-chat workflows.
 - Extend the same job framework to spritesheets, audio, video, and generated UI/game assets.
 
 ## Stage 4 - Game/App Project Profiles

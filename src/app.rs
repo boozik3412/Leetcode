@@ -5,14 +5,16 @@ use crate::agent::types::{AppEvent, ChatLine, ChatRole, ToolLogLine};
 use crate::agent::{run_user_turn, AgentState};
 use crate::assets::{
     absolute_output_path, default_image_model, image_provider_env_var, image_provider_name,
-    image_provider_specs, is_image_path, load_jobs, run_image_job, AssetEvent, AssetJob,
-    AssetStatus, ImageAssetRequest, GEMINI_IMAGE_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID,
+    image_provider_specs, image_request_from_job, is_image_path, load_jobs, run_image_job,
+    AssetEvent, AssetJob, AssetStatus, ImageAssetRequest, GEMINI_IMAGE_PROVIDER_ID,
+    OPENAI_IMAGE_PROVIDER_ID,
 };
 use crate::config::{append_journal, AppConfig};
 use crate::tools::policy::ApprovalMap;
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use std::collections::HashMap;
+use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -269,34 +271,41 @@ impl LeetcodeApp {
             return;
         }
 
+        self.sync_config_from_inputs();
+        self.sync_asset_provider_settings();
+        let _ = self.config.save();
+
+        let request = ImageAssetRequest {
+            provider: self.asset_provider_input.clone(),
+            prompt,
+            model: self.asset_model_input.trim().to_string(),
+            aspect_ratio: self.asset_aspect_ratio.clone(),
+            image_size: self.asset_image_size.clone(),
+        };
+
+        self.start_image_asset_request(request);
+    }
+
+    fn start_image_asset_request(&mut self, request: ImageAssetRequest) {
+        if self.asset_is_running {
+            return;
+        }
+
         let Some(workspace) = self.workspace.clone() else {
             self.asset_status = "workspace is not selected".to_string();
             return;
         };
 
-        self.sync_config_from_inputs();
-        self.sync_asset_provider_settings();
-        let _ = self.config.save();
-
-        let provider = self.asset_provider_input.clone();
-        let model = self.asset_model_input.trim().to_string();
-        let api_key = self.asset_api_key_input.trim().to_string();
+        let api_key = image_api_key_from_config(&self.config, &request.provider);
         if api_key.trim().is_empty() {
             self.asset_status = format!(
                 "Save a {} key ({}) before generating image assets",
-                image_provider_name(&provider),
-                image_provider_env_var(&provider)
+                image_provider_name(&request.provider),
+                image_provider_env_var(&request.provider)
             );
             return;
         }
 
-        let request = ImageAssetRequest {
-            provider,
-            prompt,
-            model,
-            aspect_ratio: self.asset_aspect_ratio.clone(),
-            image_size: self.asset_image_size.clone(),
-        };
         let job = AssetJob::new_image(&request);
         self.upsert_asset_job(job.clone());
         self.asset_status = format!("running {}", job.id);
@@ -312,6 +321,133 @@ impl LeetcodeApp {
             let _ = tx.send(AssetEvent::JobUpdated(final_job));
             let _ = tx.send(AssetEvent::Done);
         });
+    }
+
+    fn regenerate_asset_job(&mut self, job: &AssetJob) {
+        self.start_image_asset_request(image_request_from_job(job, None));
+    }
+
+    fn vary_asset_job(&mut self, job: &AssetJob) {
+        let prompt = format!(
+            "{}\n\nCreate a polished variation that keeps the same purpose, composition, and game/app asset usability, but changes visual details enough to offer a fresh option.",
+            job.prompt
+        );
+        self.start_image_asset_request(image_request_from_job(job, Some(prompt)));
+    }
+
+    fn load_asset_job_into_form(&mut self, job: &AssetJob) {
+        let request = image_request_from_job(job, None);
+        self.asset_provider_input = request.provider;
+        self.asset_model_input = request.model;
+        self.asset_prompt = request.prompt;
+        self.asset_aspect_ratio = request.aspect_ratio;
+        self.asset_image_size = request.image_size;
+        self.asset_api_key_input =
+            image_api_key_from_config(&self.config, &self.asset_provider_input);
+        self.asset_status = "loaded asset prompt".to_string();
+    }
+
+    fn open_asset_folder(&mut self, rel_path: &str) {
+        let Some(workspace) = &self.workspace else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        let Some(path) = absolute_output_path(workspace, rel_path) else {
+            self.asset_status = "asset file not found".to_string();
+            return;
+        };
+
+        #[cfg(target_os = "windows")]
+        let result = Command::new("explorer")
+            .arg("/select,")
+            .arg(&path)
+            .spawn()
+            .map(|_| ());
+        #[cfg(not(target_os = "windows"))]
+        let result = Command::new("open")
+            .arg(path.parent().unwrap_or_else(|| workspace.root()))
+            .spawn()
+            .map(|_| ());
+
+        self.asset_status = match result {
+            Ok(()) => "opened asset folder".to_string(),
+            Err(err) => format!("open asset folder failed: {err}"),
+        };
+    }
+
+    fn open_generated_assets_folder(&mut self) {
+        let Some(workspace) = &self.workspace else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        let folder = match workspace.resolve_for_write("assets/generated/images") {
+            Ok(path) => path,
+            Err(err) => {
+                self.asset_status = format!("asset folder failed: {err}");
+                return;
+            }
+        };
+        if let Err(err) = fs::create_dir_all(&folder) {
+            self.asset_status = format!("asset folder failed: {err}");
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        let result = Command::new("explorer").arg(&folder).spawn().map(|_| ());
+        #[cfg(not(target_os = "windows"))]
+        let result = Command::new("open").arg(&folder).spawn().map(|_| ());
+
+        self.asset_status = match result {
+            Ok(()) => "opened generated images".to_string(),
+            Err(err) => format!("open generated images failed: {err}"),
+        };
+    }
+
+    fn use_asset_as_app_icon(&mut self, rel_path: &str) {
+        let Some(workspace) = &self.workspace else {
+            self.asset_status = "workspace is not selected".to_string();
+            return;
+        };
+        let Some(source) = absolute_output_path(workspace, rel_path) else {
+            self.asset_status = "asset file not found".to_string();
+            return;
+        };
+        if !is_image_path(&source) {
+            self.asset_status = "asset is not an image".to_string();
+            return;
+        }
+
+        let target = match workspace.resolve_for_write("assets/app-icon.png") {
+            Ok(path) => path,
+            Err(err) => {
+                self.asset_status = format!("app icon target failed: {err}");
+                return;
+            }
+        };
+        if let Some(parent) = target.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                self.asset_status = format!("app icon directory failed: {err}");
+                return;
+            }
+        }
+
+        let result = fs::read(&source)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| image::load_from_memory(&bytes).map_err(anyhow::Error::from))
+            .and_then(|image| {
+                image
+                    .save_with_format(&target, image::ImageFormat::Png)
+                    .map_err(anyhow::Error::from)
+            });
+        match result {
+            Ok(()) => {
+                self.asset_status = "saved assets/app-icon.png".to_string();
+                self.asset_previews.remove("assets/app-icon.png");
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => self.asset_status = format!("save app icon failed: {err}"),
+        }
     }
 
     fn drain_asset_events(&mut self) {
@@ -865,6 +1001,20 @@ impl LeetcodeApp {
             if self.asset_is_running {
                 ui.spinner();
             }
+            if ui
+                .add_enabled(self.workspace.is_some(), egui::Button::new("Open folder"))
+                .clicked()
+            {
+                self.open_generated_assets_folder();
+            }
+            if ui
+                .add_enabled(self.workspace.is_some(), egui::Button::new("Refresh"))
+                .clicked()
+            {
+                if let Some(workspace) = &self.workspace {
+                    self.asset_jobs = load_jobs(workspace);
+                }
+            }
         });
 
         let old_asset_provider = self.asset_provider_input.clone();
@@ -972,26 +1122,69 @@ impl LeetcodeApp {
                     .cloned()
                     .collect::<Vec<_>>();
                 for job in jobs {
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(format!("{:?}", job.status)).strong());
-                        ui.label(RichText::new(image_provider_name(&job.provider)).weak());
-                        ui.label(RichText::new(&job.model).weak());
-                    });
-                    ui.label(compact(&job.prompt, 160));
-                    if let Some(error) = &job.error {
-                        ui.label(RichText::new(compact(error, 180)).weak());
-                    }
-                    for output in &job.output_files {
-                        if let Some(texture) = self.texture_for_asset(ctx, output) {
-                            let size = texture.size_vec2();
-                            let scale = (120.0 / size.x.max(size.y)).min(1.0);
-                            ui.image((texture.id(), size * scale));
-                        }
-                        ui.label(RichText::new(output).text_style(egui::TextStyle::Monospace));
-                    }
+                    self.show_asset_card(ui, ctx, job);
                 }
             });
+    }
+
+    fn show_asset_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, job: AssetJob) {
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{:?}", job.status)).strong());
+                ui.label(RichText::new(image_provider_name(&job.provider)).weak());
+                ui.label(RichText::new(&job.model).weak());
+            });
+
+            ui.label(compact(&job.prompt, 170));
+            if let Some(error) = &job.error {
+                ui.label(RichText::new(compact(error, 180)).weak());
+            }
+
+            let first_output = job.output_files.first().cloned();
+            if let Some(output) = &first_output {
+                if let Some(texture) = self.texture_for_asset(ctx, output) {
+                    let size = texture.size_vec2();
+                    let scale = (132.0 / size.x.max(size.y)).min(1.0);
+                    ui.image((texture.id(), size * scale));
+                }
+                ui.label(RichText::new(output).text_style(egui::TextStyle::Monospace));
+            } else {
+                ui.label(RichText::new("No output file").weak());
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.asset_is_running && self.workspace.is_some(),
+                        egui::Button::new("Regenerate"),
+                    )
+                    .clicked()
+                {
+                    self.regenerate_asset_job(&job);
+                }
+                if ui
+                    .add_enabled(
+                        !self.asset_is_running && self.workspace.is_some(),
+                        egui::Button::new("Variation"),
+                    )
+                    .clicked()
+                {
+                    self.vary_asset_job(&job);
+                }
+                if let Some(output) = first_output.as_deref() {
+                    if ui.button("Use icon").clicked() {
+                        self.use_asset_as_app_icon(output);
+                    }
+                    if ui.button("Open folder").clicked() {
+                        self.open_asset_folder(output);
+                    }
+                }
+                if ui.button("Load prompt").clicked() {
+                    self.load_asset_job_into_form(&job);
+                }
+            });
+        });
+        ui.add_space(6.0);
     }
 
     fn show_chat_panel(&mut self, ctx: &egui::Context) {

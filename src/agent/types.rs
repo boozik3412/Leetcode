@@ -93,6 +93,10 @@ pub enum ToolAction {
     Grep,
     RunShell,
     GenerateImageAsset,
+    RegenerateImageAsset,
+    VaryImageAsset,
+    UseAssetAsAppIcon,
+    OpenAssetFolder,
     Screenshot,
     MouseClick,
     TypeText,
@@ -139,6 +143,44 @@ mod tests {
         .expect("valid act request");
 
         assert!(matches!(request.action, ToolAction::GenerateImageAsset));
+    }
+
+    #[test]
+    fn parses_use_asset_as_app_icon_action() {
+        let request = serde_json::from_str::<ActRequest>(
+            r#"{"action":"use_asset_as_app_icon","args":{"source_path":"assets/generated/images/icon.png"}}"#,
+        )
+        .expect("valid act request");
+
+        assert!(matches!(request.action, ToolAction::UseAssetAsAppIcon));
+    }
+
+    #[test]
+    fn parses_open_asset_folder_action() {
+        let request = serde_json::from_str::<ActRequest>(
+            r#"{"action":"open_asset_folder","args":{"path":"assets/generated/images"}}"#,
+        )
+        .expect("valid act request");
+
+        assert!(matches!(request.action, ToolAction::OpenAssetFolder));
+    }
+
+    #[test]
+    fn parses_image_job_followup_actions() {
+        let regenerate = serde_json::from_str::<ActRequest>(
+            r#"{"action":"regenerate_image_asset","args":{"job_id":"img-1"}}"#,
+        )
+        .expect("valid regenerate request");
+        let variation = serde_json::from_str::<ActRequest>(
+            r#"{"action":"vary_image_asset","args":{"job_id":"img-1"}}"#,
+        )
+        .expect("valid variation request");
+
+        assert!(matches!(
+            regenerate.action,
+            ToolAction::RegenerateImageAsset
+        ));
+        assert!(matches!(variation.action, ToolAction::VaryImageAsset));
     }
 
     #[test]

@@ -11,6 +11,7 @@ Minimal desktop coding agent implemented as a Rust desktop app.
 - Per-provider model/API key config foundation.
 - Image asset generation panel with ChatGPT Image, Nano Banana, Stability AI, and Replicate FLUX providers.
 - Agent-callable `generate_image_asset` tool for creating visual game/app assets from chat requests.
+- Agent-callable asset follow-up tools: `regenerate_image_asset`, `vary_image_asset`, `use_asset_as_app_icon`, and `open_asset_folder`.
 - Agent-callable `screenshot` tool for approved desktop screenshots saved into the selected workspace.
 - Approval-gated desktop control tools: `mouse_click`, `type_text`, and `hotkey`.
 - Project-local generated image outputs under `assets/generated/images`.
@@ -69,7 +70,7 @@ Image generation has its own provider selector in the `Assets` panel:
 
 OpenAI and Gemini image generation can reuse the saved chat provider keys. Stability AI and Replicate use their own saved image keys or the environment variables above.
 
-The coding agent can also call `generate_image_asset` itself when a user asks for a visual asset. Because this can call paid external APIs, the app asks for approval before the request is sent. Screenshots are also approval-gated and are saved under `assets/generated/screenshots`.
+The coding agent can also call `generate_image_asset` itself when a user asks for a visual asset. Because this can call paid external APIs, the app asks for approval before the request is sent. Existing asset jobs can be regenerated or varied from the UI and through agent tools. Generated assets can also be applied as `assets/app-icon.png` or revealed in the file explorer. Screenshots are approval-gated and are saved under `assets/generated/screenshots`.
 
 Desktop control currently supports approval-gated screenshots, mouse clicks, typed text, and keyboard shortcuts. For desktop work, the intended loop is screenshot first, then act on visible coordinates or the active window.
 

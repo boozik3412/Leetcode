@@ -382,6 +382,89 @@ pub fn act_tool_schema() -> Value {
                 {
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["regenerate_image_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "job_id": {
+                                    "type": "string",
+                                    "description": "Asset job id to regenerate."
+                                }
+                            },
+                            "required": ["job_id"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["vary_image_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "job_id": {
+                                    "type": "string",
+                                    "description": "Asset job id to use as the base for a variation."
+                                },
+                                "prompt": {
+                                    "type": "string",
+                                    "description": "Optional custom variation prompt."
+                                }
+                            },
+                            "required": ["job_id"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["use_asset_as_app_icon"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "source_path": {
+                                    "type": "string",
+                                    "description": "Relative path to an existing generated image asset."
+                                },
+                                "target_path": {
+                                    "type": "string",
+                                    "description": "Optional relative target path. Defaults to assets/app-icon.png."
+                                }
+                            },
+                            "required": ["source_path"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["open_asset_folder"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "path": {
+                                    "type": "string",
+                                    "description": "Optional relative folder or asset path to open/reveal. Defaults to assets/generated/images."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
                         "action": { "type": "string", "enum": ["screenshot"] },
                         "args": {
                             "type": "object",
@@ -512,6 +595,10 @@ pub fn gemini_act_function_declaration() -> Value {
                         "grep",
                         "run_shell",
                         "generate_image_asset",
+                        "regenerate_image_asset",
+                        "vary_image_asset",
+                        "use_asset_as_app_icon",
+                        "open_asset_folder",
                         "screenshot",
                         "mouse_click",
                         "type_text",
@@ -543,6 +630,10 @@ fn act_compatible_parameters_schema() -> Value {
                     "grep",
                     "run_shell",
                     "generate_image_asset",
+                    "regenerate_image_asset",
+                    "vary_image_asset",
+                    "use_asset_as_app_icon",
+                    "open_asset_folder",
                     "screenshot",
                     "mouse_click",
                     "type_text",
@@ -763,6 +854,10 @@ mod tests {
 
         for schema in [openai_schema, compatible_schema, gemini_schema] {
             assert!(schema.contains("generate_image_asset"));
+            assert!(schema.contains("regenerate_image_asset"));
+            assert!(schema.contains("vary_image_asset"));
+            assert!(schema.contains("use_asset_as_app_icon"));
+            assert!(schema.contains("open_asset_folder"));
             assert!(schema.contains("screenshot"));
             assert!(schema.contains("mouse_click"));
             assert!(schema.contains("type_text"));

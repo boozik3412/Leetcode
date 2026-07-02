@@ -6,7 +6,10 @@ pub mod shell;
 
 use crate::agent::types::{ActRequest, AppEvent, ToolAction, ToolCall, ToolResult};
 use crate::config::AppConfig;
-use crate::tools::asset_generation::GenerateImageAssetArgs;
+use crate::tools::asset_generation::{
+    GenerateImageAssetArgs, OpenAssetFolderArgs, RegenerateImageAssetArgs, UseAssetAsAppIconArgs,
+    VaryImageAssetArgs,
+};
 use crate::tools::desktop::{HotkeyArgs, MouseClickArgs, TypeTextArgs};
 use crate::tools::filesystem::{
     ApplyPatchArgs, EditFileArgs, GrepArgs, ListFilesArgs, ReadFileArgs, WriteFileArgs,
@@ -183,6 +186,70 @@ impl ToolDispatcher {
                         )
                         .await
                     }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RegenerateImageAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<RegenerateImageAssetArgs>(request.args) {
+                    Ok(args) => {
+                        asset_generation::regenerate_image_asset(
+                            workspace,
+                            args,
+                            &self.config,
+                            &self.events,
+                            &self.approvals,
+                        )
+                        .await
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::VaryImageAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<VaryImageAssetArgs>(request.args) {
+                    Ok(args) => {
+                        asset_generation::vary_image_asset(
+                            workspace,
+                            args,
+                            &self.config,
+                            &self.events,
+                            &self.approvals,
+                        )
+                        .await
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::UseAssetAsAppIcon => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<UseAssetAsAppIconArgs>(request.args) {
+                    Ok(args) => asset_generation::use_asset_as_app_icon(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::OpenAssetFolder => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<OpenAssetFolderArgs>(request.args) {
+                    Ok(args) => asset_generation::open_asset_folder(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                    ),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }

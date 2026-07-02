@@ -78,7 +78,7 @@ Current model provider: {} ({}). \
 Use the act tool whenever you need to inspect files, edit files, search code, run shell commands, capture a screenshot, control the desktop, or generate image assets. \
 All file paths must be relative to the selected workspace. Current workspace root: {workspace_text}. \
 Before writing code, inspect the relevant files. Prefer apply_patch for multi-line code edits, \
-and use edit_file only for small unique string replacements. Use generate_image_asset for requested game/app visuals. For desktop work, call screenshot first, then use mouse_click, type_text, or hotkey only when coordinates or the active window are clear. Keep user-facing explanations short and concrete.",
+and use edit_file only for small unique string replacements. Use generate_image_asset for requested game/app visuals, regenerate_image_asset or vary_image_asset for existing asset jobs, use_asset_as_app_icon to apply a generated icon asset, and open_asset_folder when the user wants to reveal generated assets. For desktop work, call screenshot first, then use mouse_click, type_text, or hotkey only when coordinates or the active window are clear. Keep user-facing explanations short and concrete.",
         provider.display_name(),
         provider.id()
     );

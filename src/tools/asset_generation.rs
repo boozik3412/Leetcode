@@ -1,15 +1,19 @@
 use crate::agent::models::{GEMINI_PROVIDER_ID, OPENAI_PROVIDER_ID};
 use crate::agent::types::{AppEvent, ToolResult};
 use crate::assets::{
-    default_image_model, image_provider_env_var, image_provider_name, normalize_image_provider,
-    run_image_job, AssetJob, AssetStatus, ImageAssetRequest, GEMINI_IMAGE_PROVIDER_ID,
-    OPENAI_IMAGE_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID, STABILITY_IMAGE_PROVIDER_ID,
+    default_image_model, image_provider_env_var, image_provider_name, image_request_from_job,
+    load_jobs, normalize_image_provider, run_image_job, AssetJob, AssetStatus, ImageAssetRequest,
+    GEMINI_IMAGE_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID,
+    STABILITY_IMAGE_PROVIDER_ID,
 };
 use crate::config::AppConfig;
 use crate::tools::policy::{request_approval, ApprovalMap};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::json;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::Sender;
 
 #[derive(Debug, Deserialize)]
@@ -19,6 +23,28 @@ pub struct GenerateImageAssetArgs {
     pub model: Option<String>,
     pub aspect_ratio: Option<String>,
     pub image_size: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UseAssetAsAppIconArgs {
+    pub source_path: String,
+    pub target_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegenerateImageAssetArgs {
+    pub job_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VaryImageAssetArgs {
+    pub job_id: String,
+    pub prompt: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OpenAssetFolderArgs {
+    pub path: Option<String>,
 }
 
 pub async fn generate_image_asset(
@@ -44,31 +70,6 @@ pub async fn generate_image_asset(
         .unwrap_or_else(|| image_model_from_config(config, &provider));
     let aspect_ratio = args.aspect_ratio.unwrap_or_else(|| "1:1".to_string());
     let image_size = args.image_size.unwrap_or_else(|| "1K".to_string());
-    let api_key = image_api_key_from_config(config, &provider);
-
-    if api_key.trim().is_empty() {
-        return ToolResult::error(format!(
-            "{} key is empty. Save it in the Assets panel or set {}.",
-            image_provider_name(&provider),
-            image_provider_env_var(&provider)
-        ));
-    }
-
-    if !request_approval(
-        events,
-        approvals,
-        format!(
-            "Generate image asset with {} ({model})",
-            image_provider_name(&provider)
-        ),
-        format!(
-            "Provider: {}\nModel: {model}\nAspect ratio: {aspect_ratio}\nImage size: {image_size}\n\nPrompt:\n{prompt}",
-            image_provider_name(&provider)
-        ),
-    ) {
-        return ToolResult::error("generate_image_asset denied by user");
-    }
-
     let request = ImageAssetRequest {
         provider,
         prompt,
@@ -76,6 +77,110 @@ pub async fn generate_image_asset(
         aspect_ratio,
         image_size,
     };
+
+    run_approved_image_request(
+        workspace,
+        request,
+        config,
+        events,
+        approvals,
+        "Generate image asset",
+    )
+    .await
+}
+
+pub async fn regenerate_image_asset(
+    workspace: &Workspace,
+    args: RegenerateImageAssetArgs,
+    config: &AppConfig,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let Some(job) = find_asset_job(workspace, &args.job_id) else {
+        return ToolResult::error(format!("asset job not found: {}", args.job_id));
+    };
+    let request = image_request_from_job(&job, None);
+
+    run_approved_image_request(
+        workspace,
+        request,
+        config,
+        events,
+        approvals,
+        "Regenerate image asset",
+    )
+    .await
+}
+
+pub async fn vary_image_asset(
+    workspace: &Workspace,
+    args: VaryImageAssetArgs,
+    config: &AppConfig,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let Some(job) = find_asset_job(workspace, &args.job_id) else {
+        return ToolResult::error(format!("asset job not found: {}", args.job_id));
+    };
+    let prompt = args.prompt.unwrap_or_else(|| {
+        format!(
+            "{}\n\nCreate a polished variation that keeps the same purpose, composition, and game/app asset usability, but changes visual details enough to offer a fresh option.",
+            job.prompt
+        )
+    });
+    let request = image_request_from_job(&job, Some(prompt));
+
+    run_approved_image_request(
+        workspace,
+        request,
+        config,
+        events,
+        approvals,
+        "Create image asset variation",
+    )
+    .await
+}
+
+async fn run_approved_image_request(
+    workspace: &Workspace,
+    request: ImageAssetRequest,
+    config: &AppConfig,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+    action_name: &str,
+) -> ToolResult {
+    let api_key = image_api_key_from_config(config, &request.provider);
+    if api_key.trim().is_empty() {
+        return ToolResult::error(format!(
+            "{} key is empty. Save it in the Assets panel or set {}.",
+            image_provider_name(&request.provider),
+            image_provider_env_var(&request.provider)
+        ));
+    }
+
+    if !request_approval(
+        events,
+        approvals,
+        format!(
+            "{action_name} with {} ({})",
+            image_provider_name(&request.provider),
+            request.model
+        ),
+        format!(
+            "Provider: {}\nModel: {}\nAspect ratio: {}\nImage size: {}\n\nPrompt:\n{}",
+            image_provider_name(&request.provider),
+            request.model,
+            request.aspect_ratio,
+            request.image_size,
+            request.prompt
+        ),
+    ) {
+        return ToolResult::error(format!(
+            "{} denied by user",
+            action_name.to_ascii_lowercase()
+        ));
+    }
+
     let job = AssetJob::new_image(&request);
     let final_job = run_image_job(workspace.clone(), api_key, request, job).await;
 
@@ -91,14 +196,151 @@ pub async fn generate_image_asset(
             .unwrap_or_else(|_| "image asset generated".to_string()),
         ),
         AssetStatus::Failed => ToolResult::error(format!(
-            "generate_image_asset failed: {}",
+            "{} failed: {}",
+            action_name.to_ascii_lowercase(),
             final_job
                 .error
                 .unwrap_or_else(|| "unknown error".to_string())
         )),
-        AssetStatus::Pending | AssetStatus::Running => ToolResult::error(
-            "generate_image_asset ended before the image job reached a final state",
-        ),
+        AssetStatus::Pending | AssetStatus::Running => ToolResult::error(format!(
+            "{} ended before the image job reached a final state",
+            action_name.to_ascii_lowercase()
+        )),
+    }
+}
+
+pub fn use_asset_as_app_icon(
+    workspace: &Workspace,
+    args: UseAssetAsAppIconArgs,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let source_path = args.source_path.trim();
+    if source_path.is_empty() {
+        return ToolResult::error("use_asset_as_app_icon source_path is empty");
+    }
+    let target_path = args
+        .target_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or("assets/app-icon.png");
+
+    let source = match workspace.resolve_existing(source_path) {
+        Ok(path) => path,
+        Err(err) => return ToolResult::error(err.to_string()),
+    };
+    if !source.is_file() {
+        return ToolResult::error("use_asset_as_app_icon source_path must point to a file");
+    }
+    if !is_supported_image_path(&source) {
+        return ToolResult::error(
+            "use_asset_as_app_icon source_path must be png, jpg, jpeg, or webp",
+        );
+    }
+
+    if !request_approval(
+        events,
+        approvals,
+        format!("Use asset as app icon: {target_path}"),
+        format!("Source:\n{source_path}\n\nTarget:\n{target_path}"),
+    ) {
+        return ToolResult::error("use_asset_as_app_icon denied by user");
+    }
+
+    let target = match workspace.resolve_for_write(target_path) {
+        Ok(path) => path,
+        Err(err) => return ToolResult::error(err.to_string()),
+    };
+    if let Some(parent) = target.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            return ToolResult::error(err.to_string());
+        }
+    }
+
+    let bytes = match fs::read(&source) {
+        Ok(bytes) => bytes,
+        Err(err) => return ToolResult::error(err.to_string()),
+    };
+    let image = match image::load_from_memory(&bytes) {
+        Ok(image) => image,
+        Err(err) => return ToolResult::error(err.to_string()),
+    };
+    if let Err(err) = image.save_with_format(&target, image::ImageFormat::Png) {
+        return ToolResult::error(err.to_string());
+    }
+
+    ToolResult::ok(
+        serde_json::to_string_pretty(&json!({
+            "source_path": source_path,
+            "target_path": target_path,
+            "format": "png"
+        }))
+        .unwrap_or_else(|_| format!("saved {target_path}")),
+    )
+}
+
+pub fn open_asset_folder(
+    workspace: &Workspace,
+    args: OpenAssetFolderArgs,
+    events: &Sender<AppEvent>,
+    approvals: &ApprovalMap,
+) -> ToolResult {
+    let rel_path = args
+        .path
+        .unwrap_or_else(|| "assets/generated/images".to_string());
+    let target = if rel_path.trim().is_empty() {
+        "assets/generated/images".to_string()
+    } else {
+        rel_path
+    };
+
+    let path = match workspace.resolve_existing(&target) {
+        Ok(path) => path,
+        Err(_) if target == "assets/generated/images" => {
+            let path = match workspace.resolve_for_write(&target) {
+                Ok(path) => path,
+                Err(err) => return ToolResult::error(err.to_string()),
+            };
+            if let Err(err) = fs::create_dir_all(&path) {
+                return ToolResult::error(err.to_string());
+            }
+            path
+        }
+        Err(err) => return ToolResult::error(err.to_string()),
+    };
+
+    if !request_approval(
+        events,
+        approvals,
+        "Open asset folder",
+        format!("Open or reveal:\n{}", path.display()),
+    ) {
+        return ToolResult::error("open_asset_folder denied by user");
+    }
+
+    #[cfg(target_os = "windows")]
+    let result = if path.is_file() {
+        Command::new("explorer")
+            .arg("/select,")
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+    } else {
+        Command::new("explorer").arg(&path).spawn().map(|_| ())
+    };
+    #[cfg(not(target_os = "windows"))]
+    let result = Command::new("open")
+        .arg(if path.is_file() {
+            path.parent().unwrap_or_else(|| workspace.root())
+        } else {
+            &path
+        })
+        .spawn()
+        .map(|_| ());
+
+    match result {
+        Ok(()) => ToolResult::ok(format!("opened {}", path.display())),
+        Err(err) => ToolResult::error(err.to_string()),
     }
 }
 
@@ -118,6 +360,12 @@ fn default_configured_image_provider(config: &AppConfig) -> String {
     }
 
     OPENAI_IMAGE_PROVIDER_ID.to_string()
+}
+
+fn find_asset_job(workspace: &Workspace, job_id: &str) -> Option<AssetJob> {
+    load_jobs(workspace)
+        .into_iter()
+        .find(|job| job.id == job_id || job.id.starts_with(job_id))
 }
 
 fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
@@ -146,6 +394,16 @@ fn image_model_from_config(config: &AppConfig, provider_id: &str) -> String {
             }
         })
         .unwrap_or_else(|| default_image_model(provider_id).to_string())
+}
+
+fn is_supported_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp")
+    )
 }
 
 #[cfg(test)]
@@ -196,5 +454,18 @@ mod tests {
             image_api_key_from_config(&config, OPENAI_IMAGE_PROVIDER_ID),
             "sk-openai"
         );
+    }
+
+    #[test]
+    fn recognizes_supported_icon_sources() {
+        assert!(is_supported_image_path(Path::new(
+            "assets/generated/icon.png"
+        )));
+        assert!(is_supported_image_path(Path::new(
+            "assets/generated/icon.webp"
+        )));
+        assert!(!is_supported_image_path(Path::new(
+            "assets/generated/icon.txt"
+        )));
     }
 }

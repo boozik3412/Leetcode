@@ -1,0 +1,36 @@
+[
+  {
+    "id": "img-0f029742-b008-47e3-80bb-c7f8e2455237",
+    "kind": "image",
+    "status": "done",
+    "provider": "openai-image",
+    "model": "gpt-image-2",
+    "prompt": "Create a polished app icon/logo for a Windows desktop AI coding assistant named \"Leetcode\". Concept: friendly local coding agent + Rust desktop app + project workspace. Visual: stylized lowercase L or angle-bracket code symbol integrated with a subtle robot/assistant face and a small file tree/grid motif. Modern minimal vector style, crisp edges, high contrast, suitable for app icon at small sizes. Color palette: deep navy background, electric cyan and warm orange accents inspired by Rust/coding, slight gradient, no photorealism, no clutter. Include no long text; if any text, only a simple abstract L mark. Centered composition, transparent-looking clean icon, professional software product logo.",
+    "parameters": {
+      "aspect_ratio": "1:1",
+      "image_size": "1K",
+      "mime_type": "image/png"
+    },
+    "output_files": [
+      "assets/generated/images/create-a-polished-app-iconlogo-for-a-windows-des-img-0f029742-b008-47e3-80bb-c7f8e2455237.png"
+    ],
+    "metadata": {
+      "api": "images/generations",
+      "details": {
+        "size": "1024x1024"
+      },
+      "license_note": "Generated asset metadata only; check provider terms before production use.",
+      "mime_type": "image/png",
+      "model": "gpt-image-2",
+      "parameters": {
+        "aspect_ratio": "1:1",
+        "image_size": "1K"
+      },
+      "provider": "ChatGPT Image",
+      "provider_id": "openai-image"
+    },
+    "error": null,
+    "created_at": 1782973890,
+    "updated_at": 1782973914
+  }
+]

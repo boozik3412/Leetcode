@@ -216,6 +216,32 @@ pub fn upsert_job(workspace: &Workspace, job: &AssetJob) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn image_request_from_job(
+    job: &AssetJob,
+    prompt_override: Option<String>,
+) -> ImageAssetRequest {
+    let aspect_ratio = job
+        .parameters
+        .get("aspect_ratio")
+        .and_then(Value::as_str)
+        .unwrap_or("1:1")
+        .to_string();
+    let image_size = job
+        .parameters
+        .get("image_size")
+        .and_then(Value::as_str)
+        .unwrap_or("1K")
+        .to_string();
+
+    ImageAssetRequest {
+        provider: job.provider.clone(),
+        prompt: prompt_override.unwrap_or_else(|| job.prompt.clone()),
+        model: job.model.clone(),
+        aspect_ratio,
+        image_size,
+    }
+}
+
 pub async fn run_image_job(
     workspace: Workspace,
     api_key: String,
@@ -718,6 +744,25 @@ mod tests {
 
         assert_eq!(job.provider, STABILITY_IMAGE_PROVIDER_ID);
         assert_eq!(job.model, "stable-image-core");
+    }
+
+    #[test]
+    fn rebuilds_image_request_from_job_metadata() {
+        let request = ImageAssetRequest {
+            provider: OPENAI_IMAGE_PROVIDER_ID.to_string(),
+            prompt: "app icon".to_string(),
+            model: "gpt-image-2".to_string(),
+            aspect_ratio: "16:9".to_string(),
+            image_size: "2K".to_string(),
+        };
+        let job = AssetJob::new_image(&request);
+
+        let rebuilt = image_request_from_job(&job, Some("variation".to_string()));
+
+        assert_eq!(rebuilt.provider, OPENAI_IMAGE_PROVIDER_ID);
+        assert_eq!(rebuilt.prompt, "variation");
+        assert_eq!(rebuilt.aspect_ratio, "16:9");
+        assert_eq!(rebuilt.image_size, "2K");
     }
 
     #[test]
