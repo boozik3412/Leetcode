@@ -7,6 +7,7 @@ pub mod policy;
 pub mod project_commands;
 pub mod project_preview;
 pub mod shell;
+pub mod terminal;
 
 use crate::agent::types::{ActRequest, AppEvent, ToolAction, ToolCall, ToolResult};
 use crate::config::AppConfig;
@@ -15,7 +16,9 @@ use crate::tools::asset_generation::{
     GenerateSpritesheetAssetArgs, GenerateVideoAssetArgs, OpenAssetFolderArgs,
     RegenerateImageAssetArgs, UpscaleAssetArgs, UseAssetAsAppIconArgs, VaryImageAssetArgs,
 };
-use crate::tools::desktop::{HotkeyArgs, MouseClickArgs, TypeTextArgs};
+use crate::tools::desktop::{
+    DesktopStepArgs, FocusWindowArgs, HotkeyArgs, MouseClickArgs, TypeTextArgs,
+};
 use crate::tools::filesystem::{
     ApplyPatchArgs, EditFileArgs, GrepArgs, ListFilesArgs, ReadFileArgs, WriteFileArgs,
 };
@@ -28,6 +31,7 @@ use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::project_commands::ProjectCommandArgs;
 use crate::tools::project_preview::OpenProjectPreviewArgs;
 use crate::tools::shell::RunShellArgs;
+use crate::tools::terminal::{TerminalReadArgs, TerminalStartArgs, TerminalWriteArgs};
 use crate::workspace::Workspace;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
@@ -96,6 +100,24 @@ impl ToolDispatcher {
                     return ToolResult::error("No workspace selected");
                 };
                 desktop::screenshot(workspace, &self.events, &self.approvals)
+            }
+            ToolAction::ActiveWindow => desktop::active_window(),
+            ToolAction::FocusWindow => {
+                match serde_json::from_value::<FocusWindowArgs>(request.args) {
+                    Ok(args) => desktop::focus_window(args, &self.events, &self.approvals),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::DesktopStep => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<DesktopStepArgs>(request.args) {
+                    Ok(args) => {
+                        desktop::desktop_step(workspace, args, &self.events, &self.approvals)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
             }
             ToolAction::MouseClick => {
                 match serde_json::from_value::<MouseClickArgs>(request.args) {
@@ -514,6 +536,39 @@ impl ToolDispatcher {
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }
+            ToolAction::TerminalStart => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<TerminalStartArgs>(request.args) {
+                    Ok(args) => terminal::terminal_start(
+                        workspace,
+                        args,
+                        &self.events,
+                        &self.approvals,
+                        &self.policy,
+                    ),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::TerminalWrite => {
+                match serde_json::from_value::<TerminalWriteArgs>(request.args) {
+                    Ok(args) => {
+                        terminal::terminal_write(args, &self.events, &self.approvals, &self.policy)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::TerminalRead => {
+                match serde_json::from_value::<TerminalReadArgs>(request.args) {
+                    Ok(args) => terminal::terminal_read(args),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::TerminalStop => {
+                terminal::terminal_stop(&self.events, &self.approvals, &self.policy)
+            }
+            ToolAction::TerminalClear => terminal::terminal_clear(),
         }
     }
 }

@@ -208,6 +208,10 @@ pub fn allowed_actions_for_role(role: AgentRole) -> BTreeSet<&'static str> {
                 "apply_patch",
                 "project_command",
                 "run_shell",
+                "terminal_start",
+                "terminal_write",
+                "terminal_read",
+                "terminal_stop",
             ]);
         }
         AgentRole::GameDesigner => {
@@ -241,12 +245,20 @@ pub fn allowed_actions_for_role(role: AgentRole) -> BTreeSet<&'static str> {
                 "open_project_preview",
                 "game_workflow",
                 "screenshot",
+                "active_window",
+                "focus_window",
+                "desktop_step",
+                "terminal_read",
             ]);
         }
         AgentRole::BuildAgent => {
             actions.extend([
                 "project_command",
                 "run_shell",
+                "terminal_start",
+                "terminal_write",
+                "terminal_read",
+                "terminal_stop",
                 "open_project_preview",
                 "export_trace",
             ]);

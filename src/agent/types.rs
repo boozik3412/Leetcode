@@ -102,6 +102,11 @@ pub enum ToolAction {
     CreateReplayEval,
     OrchestrationSnapshot,
     RunShell,
+    TerminalStart,
+    TerminalWrite,
+    TerminalRead,
+    TerminalStop,
+    TerminalClear,
     GenerateImageAsset,
     GenerateSpritesheetAsset,
     GenerateAudioAsset,
@@ -114,6 +119,9 @@ pub enum ToolAction {
     UseAssetAsAppIcon,
     OpenAssetFolder,
     Screenshot,
+    ActiveWindow,
+    FocusWindow,
+    DesktopStep,
     MouseClick,
     TypeText,
     Hotkey,
@@ -201,6 +209,16 @@ mod tests {
 
     #[test]
     fn parses_desktop_control_actions() {
+        let active = serde_json::from_str::<ActRequest>(r#"{"action":"active_window","args":{}}"#)
+            .expect("valid active window request");
+        let focus = serde_json::from_str::<ActRequest>(
+            r#"{"action":"focus_window","args":{"title":"Leetcode"}}"#,
+        )
+        .expect("valid focus request");
+        let step = serde_json::from_str::<ActRequest>(
+            r#"{"action":"desktop_step","args":{"action":"observe"}}"#,
+        )
+        .expect("valid desktop step request");
         let click = serde_json::from_str::<ActRequest>(
             r#"{"action":"mouse_click","args":{"x":100,"y":200}}"#,
         )
@@ -213,6 +231,9 @@ mod tests {
         )
         .expect("valid hotkey request");
 
+        assert!(matches!(active.action, ToolAction::ActiveWindow));
+        assert!(matches!(focus.action, ToolAction::FocusWindow));
+        assert!(matches!(step.action, ToolAction::DesktopStep));
         assert!(matches!(click.action, ToolAction::MouseClick));
         assert!(matches!(typing.action, ToolAction::TypeText));
         assert!(matches!(hotkey.action, ToolAction::Hotkey));
@@ -226,6 +247,31 @@ mod tests {
         .expect("valid project command request");
 
         assert!(matches!(request.action, ToolAction::ProjectCommand));
+    }
+
+    #[test]
+    fn parses_terminal_actions() {
+        let start = serde_json::from_str::<ActRequest>(
+            r#"{"action":"terminal_start","args":{"cwd":".","shell":"powershell"}}"#,
+        )
+        .expect("valid terminal start");
+        let write = serde_json::from_str::<ActRequest>(
+            r#"{"action":"terminal_write","args":{"input":"cargo check","enter":true}}"#,
+        )
+        .expect("valid terminal write");
+        let read =
+            serde_json::from_str::<ActRequest>(r#"{"action":"terminal_read","args":{"lines":50}}"#)
+                .expect("valid terminal read");
+        let stop = serde_json::from_str::<ActRequest>(r#"{"action":"terminal_stop","args":{}}"#)
+            .expect("valid terminal stop");
+        let clear = serde_json::from_str::<ActRequest>(r#"{"action":"terminal_clear","args":{}}"#)
+            .expect("valid terminal clear");
+
+        assert!(matches!(start.action, ToolAction::TerminalStart));
+        assert!(matches!(write.action, ToolAction::TerminalWrite));
+        assert!(matches!(read.action, ToolAction::TerminalRead));
+        assert!(matches!(stop.action, ToolAction::TerminalStop));
+        assert!(matches!(clear.action, ToolAction::TerminalClear));
     }
 
     #[test]

@@ -7,6 +7,7 @@ mod config;
 mod game_workflows;
 mod orchestration;
 mod project;
+mod terminal;
 mod tools;
 mod workspace;
 

@@ -22,6 +22,10 @@ use crate::orchestration::{
     parse_agent_role, record_handoff,
 };
 use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
+use crate::terminal::{
+    clear_terminal_output, read_terminal_snapshot, start_terminal_session, stop_terminal_session,
+    write_terminal_input,
+};
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::shell::{run_shell, RunShellArgs};
 use crate::workspace::Workspace;
@@ -55,6 +59,13 @@ pub struct LeetcodeApp {
     project_is_running: bool,
     project_cancel: Option<Arc<AtomicBool>>,
     project_status: String,
+    desktop_status: String,
+    desktop_last_screenshot: Option<String>,
+    desktop_active_window: String,
+    terminal_input: String,
+    terminal_output: String,
+    terminal_status: String,
+    terminal_running: bool,
     orchestration_status: String,
     asset_provider_input: String,
     asset_kind_input: String,
@@ -131,6 +142,13 @@ impl LeetcodeApp {
             project_is_running: false,
             project_cancel: None,
             project_status: String::new(),
+            desktop_status: String::new(),
+            desktop_last_screenshot: None,
+            desktop_active_window: String::new(),
+            terminal_input: String::new(),
+            terminal_output: String::new(),
+            terminal_status: String::new(),
+            terminal_running: false,
             orchestration_status: String::new(),
             asset_provider_input,
             asset_kind_input: "image".to_string(),
@@ -1122,6 +1140,7 @@ impl LeetcodeApp {
                     });
                 }
                 AppEvent::ToolFinished { id, output } => {
+                    self.update_desktop_state_from_tool_output(&output);
                     self.tool_log.push(ToolLogLine {
                         title: format!("done {id}"),
                         content: compact(&output, 2_000),
@@ -1164,6 +1183,50 @@ impl LeetcodeApp {
                     });
                 }
             }
+        }
+    }
+
+    fn update_desktop_state_from_tool_output(&mut self, output: &str) {
+        let trimmed = output.trim();
+        if trimmed.starts_with("assets/generated/screenshots/") && trimmed.ends_with(".png") {
+            self.desktop_last_screenshot = Some(trimmed.to_string());
+            self.desktop_status = format!("screenshot: {trimmed}");
+            return;
+        }
+
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            return;
+        };
+
+        if let Some(path) = value
+            .get("after_screenshot")
+            .and_then(serde_json::Value::as_str)
+        {
+            self.desktop_last_screenshot = Some(path.to_string());
+            self.desktop_status = value
+                .get("action")
+                .and_then(serde_json::Value::as_str)
+                .map(|action| format!("desktop step: {action}"))
+                .unwrap_or_else(|| "desktop step finished".to_string());
+        } else if let Some(path) = value
+            .get("before_screenshot")
+            .and_then(serde_json::Value::as_str)
+        {
+            self.desktop_last_screenshot = Some(path.to_string());
+        }
+
+        if let Some(window) = value
+            .get("after_window")
+            .or_else(|| value.get("active_window"))
+            .or_else(|| {
+                if value.get("title").is_some() && value.get("process_name").is_some() {
+                    Some(&value)
+                } else {
+                    None
+                }
+            })
+        {
+            self.desktop_active_window = summarize_window_value(window);
         }
     }
 
@@ -1461,6 +1524,10 @@ impl LeetcodeApp {
             .show(ctx, |ui| {
                 self.show_project_panel(ui);
                 ui.separator();
+                self.show_desktop_panel(ui, ctx);
+                ui.separator();
+                self.show_terminal_panel(ui);
+                ui.separator();
                 self.show_orchestration_panel(ui);
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -1606,6 +1673,138 @@ impl LeetcodeApp {
         }
 
         self.show_game_workflow_buttons(ui);
+    }
+
+    fn show_desktop_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.collapsing("Desktop", |ui| {
+            if self.desktop_status.is_empty()
+                && self.desktop_active_window.is_empty()
+                && self.desktop_last_screenshot.is_none()
+            {
+                ui.label(RichText::new("No desktop step captured yet").weak());
+            }
+
+            if !self.desktop_active_window.is_empty() {
+                ui.label(RichText::new(&self.desktop_active_window).weak());
+            }
+            if !self.desktop_status.is_empty() {
+                ui.label(RichText::new(&self.desktop_status).weak());
+            }
+
+            if let Some(path) = self.desktop_last_screenshot.clone() {
+                if let Some(texture) = self.texture_for_asset(ctx, &path) {
+                    let size = texture.size_vec2();
+                    let scale = (180.0 / size.x.max(size.y)).min(1.0);
+                    ui.image((texture.id(), size * scale));
+                }
+                ui.label(RichText::new(path).text_style(egui::TextStyle::Monospace));
+            }
+        });
+    }
+
+    fn refresh_terminal_snapshot(&mut self) {
+        let snapshot = read_terminal_snapshot(Some(400), None);
+        self.terminal_running = snapshot.running;
+        self.terminal_status = match (&snapshot.shell, &snapshot.cwd) {
+            (Some(shell), Some(cwd)) => {
+                format!("{} | {} | {}", snapshot.status, shell, cwd)
+            }
+            _ => snapshot.status,
+        };
+        self.terminal_output = snapshot
+            .lines
+            .iter()
+            .map(|line| format!("{:>5} [{}] {}", line.seq, line.stream, line.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    fn start_terminal_from_ui(&mut self) {
+        let Some(workspace) = &self.workspace else {
+            self.terminal_status = "workspace is not selected".to_string();
+            return;
+        };
+        match start_terminal_session(workspace, None, Some("powershell")) {
+            Ok(_) => self.refresh_terminal_snapshot(),
+            Err(err) => self.terminal_status = format!("terminal start failed: {err}"),
+        }
+    }
+
+    fn write_terminal_from_ui(&mut self) {
+        let input = self.terminal_input.trim_end().to_string();
+        if input.is_empty() {
+            return;
+        }
+        match write_terminal_input(&input, true) {
+            Ok(_) => {
+                self.terminal_input.clear();
+                self.refresh_terminal_snapshot();
+            }
+            Err(err) => self.terminal_status = format!("terminal write failed: {err}"),
+        }
+    }
+
+    fn stop_terminal_from_ui(&mut self) {
+        match stop_terminal_session() {
+            Ok(_) => self.refresh_terminal_snapshot(),
+            Err(err) => self.terminal_status = format!("terminal stop failed: {err}"),
+        }
+    }
+
+    fn clear_terminal_from_ui(&mut self) {
+        let _ = clear_terminal_output();
+        self.refresh_terminal_snapshot();
+    }
+
+    fn show_terminal_panel(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Terminal", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        self.workspace.is_some() && !self.terminal_running,
+                        egui::Button::new("Start"),
+                    )
+                    .clicked()
+                {
+                    self.start_terminal_from_ui();
+                }
+                if ui
+                    .add_enabled(self.terminal_running, egui::Button::new("Stop"))
+                    .clicked()
+                {
+                    self.stop_terminal_from_ui();
+                }
+                if ui.button("Clear").clicked() {
+                    self.clear_terminal_from_ui();
+                }
+                if ui.button("Refresh").clicked() {
+                    self.refresh_terminal_snapshot();
+                }
+            });
+            if !self.terminal_status.is_empty() {
+                ui.label(RichText::new(&self.terminal_status).weak());
+            }
+
+            let response = ui.add(
+                TextEdit::singleline(&mut self.terminal_input)
+                    .hint_text("Command")
+                    .desired_width(f32::INFINITY),
+            );
+            let enter_pressed =
+                response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            if (enter_pressed || ui.button("Send").clicked()) && self.terminal_running {
+                self.write_terminal_from_ui();
+            }
+
+            let mut output = self.terminal_output.clone();
+            ui.add(
+                TextEdit::multiline(&mut output)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(12)
+                    .interactive(false),
+            );
+        });
     }
 
     fn show_game_workflow_buttons(&mut self, ui: &mut egui::Ui) {
@@ -2113,6 +2312,7 @@ impl eframe::App for LeetcodeApp {
         self.drain_events();
         self.drain_project_events();
         self.drain_asset_events();
+        self.refresh_terminal_snapshot();
         self.show_top_bar(ctx);
         self.show_input_bar(ctx);
         self.show_file_panel(ctx);
@@ -2120,7 +2320,11 @@ impl eframe::App for LeetcodeApp {
         self.show_chat_panel(ctx);
         self.show_approval_window(ctx);
 
-        if self.is_running || self.project_is_running || self.asset_is_running {
+        if self.is_running
+            || self.project_is_running
+            || self.asset_is_running
+            || self.terminal_running
+        {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
@@ -2181,6 +2385,28 @@ fn media_model_from_config(config: &AppConfig, provider_id: &str, default_model:
             }
         })
         .unwrap_or_else(|| default_model.to_string())
+}
+
+fn summarize_window_value(value: &serde_json::Value) -> String {
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Untitled");
+    let process = value
+        .get("process_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let pid = value
+        .get("process_id")
+        .and_then(serde_json::Value::as_u64)
+        .map(|pid| pid.to_string())
+        .unwrap_or_default();
+
+    if pid.is_empty() {
+        format!("active: {title} ({process})")
+    } else {
+        format!("active: {title} ({process}, pid {pid})")
+    }
 }
 
 fn compact(text: &str, max_chars: usize) -> String {

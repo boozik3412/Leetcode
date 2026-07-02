@@ -10,7 +10,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Show patch impact and git status/diff in the UI.
 - Add a durable action journal for agent runs, approvals, shell commands, patch attempts, and failures.
 - Add focused tests for workspace path safety, tool argument parsing, patch validation, and shell command construction.
-- Add a persistent terminal/PTY after the streaming and patch path is stable.
+- Done: Add a persistent terminal session with start/write/read/stop tools, UI panel, and shared state across agent turns.
 
 ## Stage 2 - Model Provider Layer
 
@@ -57,10 +57,11 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 
 ## Stage 6 - Desktop and Computer Control
 
-- Add screenshot capture, click, type, hotkey, and window focus tools.
+- Done: Add screenshot capture, click, type, hotkey, active-window inspection, and window focus tools.
 - Done: Add approval-gated screenshot capture into `assets/generated/screenshots`.
 - Done: Add approval-gated mouse click, text typing, and hotkey desktop tools.
-- Follow the computer-use loop: screenshot, model action, execute, screenshot output.
+- Done: Add `desktop_step` for the computer-use loop: screenshot, model action, execute, screenshot output.
+- Done: Add a `Desktop` panel that shows the latest desktop step screenshot and active-window summary.
 - Keep allowlists and human approval for irreversible desktop actions.
 
 ## Ongoing Quality Bar

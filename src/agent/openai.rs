@@ -601,6 +601,101 @@ pub fn act_tool_schema() -> Value {
                 {
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["terminal_start"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "cwd": {
+                                    "type": "string",
+                                    "description": "Optional workspace-relative working directory. Defaults to the workspace root."
+                                },
+                                "shell": {
+                                    "type": "string",
+                                    "enum": ["powershell", "cmd"],
+                                    "description": "Persistent shell to start. Defaults to powershell on Windows."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["terminal_write"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string",
+                                    "description": "Text or command to write to the persistent terminal."
+                                },
+                                "enter": {
+                                    "type": "boolean",
+                                    "description": "Append Enter after the input. Defaults to true."
+                                }
+                            },
+                            "required": ["input"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["terminal_read"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "lines": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 1000
+                                },
+                                "since_seq": {
+                                    "type": "integer",
+                                    "minimum": 0
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["terminal_stop"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["terminal_clear"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
                         "action": { "type": "string", "enum": ["generate_image_asset"] },
                         "args": {
                             "type": "object",
@@ -848,6 +943,105 @@ pub fn act_tool_schema() -> Value {
                 {
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["active_window"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["focus_window"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "title": {
+                                    "type": "string",
+                                    "description": "Visible window title or substring to focus."
+                                },
+                                "process": {
+                                    "type": "string",
+                                    "description": "Process name or substring to focus."
+                                },
+                                "exact": {
+                                    "type": "boolean",
+                                    "description": "Use exact title/process matching instead of substring matching."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["desktop_step"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "type": "string",
+                                    "enum": ["observe", "click", "type_text", "hotkey", "focus_window"]
+                                },
+                                "x": {
+                                    "type": "integer",
+                                    "description": "Absolute desktop x coordinate for click."
+                                },
+                                "y": {
+                                    "type": "integer",
+                                    "description": "Absolute desktop y coordinate for click."
+                                },
+                                "button": {
+                                    "type": "string",
+                                    "enum": ["left", "right", "middle"]
+                                },
+                                "clicks": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 3
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "Text for type_text desktop step."
+                                },
+                                "keys": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 1,
+                                    "maxItems": 6
+                                },
+                                "title": {
+                                    "type": "string",
+                                    "description": "Window title or substring for focus_window desktop step."
+                                },
+                                "process": {
+                                    "type": "string",
+                                    "description": "Process name or substring for focus_window desktop step."
+                                },
+                                "exact": {
+                                    "type": "boolean"
+                                },
+                                "note": {
+                                    "type": "string",
+                                    "description": "Short reason for the step."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
                         "action": { "type": "string", "enum": ["mouse_click"] },
                         "args": {
                             "type": "object",
@@ -974,6 +1168,11 @@ pub fn gemini_act_function_declaration() -> Value {
                         "create_replay_eval",
                         "orchestration_snapshot",
                         "run_shell",
+                        "terminal_start",
+                        "terminal_write",
+                        "terminal_read",
+                        "terminal_stop",
+                        "terminal_clear",
                         "generate_image_asset",
                         "generate_spritesheet_asset",
                         "generate_audio_asset",
@@ -986,6 +1185,9 @@ pub fn gemini_act_function_declaration() -> Value {
                         "use_asset_as_app_icon",
                         "open_asset_folder",
                         "screenshot",
+                        "active_window",
+                        "focus_window",
+                        "desktop_step",
                         "mouse_click",
                         "type_text",
                         "hotkey"
@@ -1025,6 +1227,11 @@ fn act_compatible_parameters_schema() -> Value {
                     "create_replay_eval",
                     "orchestration_snapshot",
                     "run_shell",
+                    "terminal_start",
+                    "terminal_write",
+                    "terminal_read",
+                    "terminal_stop",
+                    "terminal_clear",
                     "generate_image_asset",
                     "generate_spritesheet_asset",
                     "generate_audio_asset",
@@ -1037,6 +1244,9 @@ fn act_compatible_parameters_schema() -> Value {
                     "use_asset_as_app_icon",
                     "open_asset_folder",
                     "screenshot",
+                    "active_window",
+                    "focus_window",
+                    "desktop_step",
                     "mouse_click",
                     "type_text",
                     "hotkey"
@@ -1265,6 +1475,11 @@ mod tests {
             assert!(schema.contains("export_trace"));
             assert!(schema.contains("create_replay_eval"));
             assert!(schema.contains("orchestration_snapshot"));
+            assert!(schema.contains("terminal_start"));
+            assert!(schema.contains("terminal_write"));
+            assert!(schema.contains("terminal_read"));
+            assert!(schema.contains("terminal_stop"));
+            assert!(schema.contains("terminal_clear"));
             assert!(schema.contains("generate_spritesheet_asset"));
             assert!(schema.contains("generate_audio_asset"));
             assert!(schema.contains("generate_video_asset"));
@@ -1277,6 +1492,9 @@ mod tests {
             assert!(schema.contains("use_asset_as_app_icon"));
             assert!(schema.contains("open_asset_folder"));
             assert!(schema.contains("screenshot"));
+            assert!(schema.contains("active_window"));
+            assert!(schema.contains("focus_window"));
+            assert!(schema.contains("desktop_step"));
             assert!(schema.contains("mouse_click"));
             assert!(schema.contains("type_text"));
             assert!(schema.contains("hotkey"));

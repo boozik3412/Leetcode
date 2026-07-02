@@ -15,10 +15,11 @@ Minimal desktop coding agent implemented as a Rust desktop app.
 - Agent-callable `generate_image_asset` tool for creating visual game/app assets from chat requests.
 - Agent-callable asset tools: `generate_spritesheet_asset`, `generate_audio_asset`, `generate_video_asset`, `regenerate_image_asset`, `vary_image_asset`, `upscale_asset`, `export_asset`, `attach_asset`, `use_asset_as_app_icon`, and `open_asset_folder`.
 - Agent-callable `screenshot` tool for approved desktop screenshots saved into the selected workspace.
-- Approval-gated desktop control tools: `mouse_click`, `type_text`, and `hotkey`.
+- Approval-gated desktop control tools: `active_window`, `focus_window`, `desktop_step`, `mouse_click`, `type_text`, and `hotkey`.
 - Project profile detection for Rust, Node/package.json, React/Vite, Python, Godot, Unity, and Unreal workspaces.
 - Project panel quick commands for detected run/check/test/build/dev/lint/editor workflows.
 - Agent-callable `project_command` tool for common project lifecycle commands.
+- Persistent terminal panel for long-running shells, REPLs, dev servers, and watchers.
 - Game/app workflow templates for prototype mechanics, spritesheets, UI sounds, item icons, vertical slices, and playtest checklists.
 - Browser/app preview hooks for Vite/React/Next/Trunk URLs and Godot/Unreal editor commands.
 - Multi-agent orchestration layer with Code Agent, Game Designer, Art Director, Audio Agent, QA Agent, and Build Agent handoffs.
@@ -45,6 +46,11 @@ Minimal desktop coding agent implemented as a Rust desktop app.
   - `create_replay_eval`
   - `orchestration_snapshot`
   - `run_shell`
+  - `terminal_start`
+  - `terminal_write`
+  - `terminal_read`
+  - `terminal_stop`
+  - `terminal_clear`
   - `generate_image_asset`
   - `generate_spritesheet_asset`
   - `generate_audio_asset`
@@ -102,9 +108,11 @@ OpenAI and Gemini image generation can reuse the saved chat provider keys. Stabi
 
 The coding agent can also call asset tools itself when a user asks for game/app visuals, spritesheets, sounds, or videos. Because this can call paid external APIs, the app asks for approval before the request is sent. Asset jobs include provider/model/parameter/license metadata in `assets/generated/asset_jobs.json`. Existing assets can be varied, upscaled, exported, attached as context, applied as `assets/app-icon.png`, or revealed in the file explorer. Screenshots are approval-gated and are saved under `assets/generated/screenshots`.
 
-Desktop control currently supports approval-gated screenshots, mouse clicks, typed text, and keyboard shortcuts. For desktop work, the intended loop is screenshot first, then act on visible coordinates or the active window.
+Desktop control currently supports active-window inspection, approval-gated screenshots, window focus, desktop steps, mouse clicks, typed text, and keyboard shortcuts. For desktop work, the preferred loop is `active_window` or `desktop_step` observe first, then one focused `desktop_step` action that captures before and after screenshots.
 
 Project profiles are detected from common root markers such as `Cargo.toml`, `package.json`, `pyproject.toml`, `project.godot`, Unity `ProjectSettings`, and `.uproject` files. The right-side `Project` panel exposes safe quick commands from those profiles, and the agent is instructed to prefer `project_command` for common check/test/run/build/dev/lint tasks before falling back to raw `run_shell`.
+
+The `Terminal` panel owns one persistent shell session shared by the UI and agent tools. Use it for dev servers, REPLs, watchers, game engine logs, and commands where the shell state should persist across turns. The agent can call `terminal_start`, `terminal_write`, `terminal_read`, `terminal_stop`, and `terminal_clear`; writes and stops are approval-gated when shell approval is enabled.
 
 The `Project` panel also exposes game workflow templates. They create markdown plans under `docs/game-workflows` and can be called by the agent through `game_workflow`. Preview hooks can open common local URLs such as Vite `5173`, Vite preview `4173`, Next `3000`, Trunk `8080`, or return the editor command to run for Godot/Unreal through `open_project_preview`.
 
@@ -129,9 +137,11 @@ The launcher uses the local `.cargo` and `.rustup` toolchain folders when they e
 
 ## Notes
 
-Desktop actions operate on the currently active Windows desktop and are intentionally approval-gated. Use screenshots first when asking the agent to interact with UI coordinates.
+Desktop actions operate on the currently active Windows desktop and are intentionally approval-gated. Use `desktop_step` when asking the agent to interact with UI coordinates because it captures the screen before and after each action. The right-side `Desktop` panel shows the latest captured screenshot and active-window summary.
 
 `run_shell` uses Windows PowerShell by default and writes commands to a temporary `.ps1` file before execution. This is more reliable for multi-line commands and nested quotes than `cmd /C`. Agents can still request `shell: "cmd"` when a command specifically needs `cmd.exe`.
+
+For interactive or long-running work, prefer the persistent terminal tools over `run_shell`.
 
 ## Validation
 
