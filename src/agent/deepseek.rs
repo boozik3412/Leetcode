@@ -17,9 +17,9 @@ pub struct DeepSeekClient {
 }
 
 impl DeepSeekClient {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, client: reqwest::Client) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key,
             model,
             messages: Mutex::new(Vec::new()),
@@ -104,7 +104,7 @@ impl ModelProvider for DeepSeekClient {
             .json(&body)
             .send()
             .await
-            .context("DeepSeek request failed")?;
+            .context("запрос DeepSeek не выполнен")?;
 
         let status = response.status();
         let text = response.text().await.unwrap_or_default();

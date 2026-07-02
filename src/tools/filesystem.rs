@@ -68,7 +68,7 @@ pub fn list_files(workspace: &Workspace, args: ListFilesArgs) -> ToolResult {
         .filter_map(Result::ok)
     {
         if rows.len() >= limit {
-            rows.push("... truncated ...".to_string());
+            rows.push("... обрезано ...".to_string());
             break;
         }
         if entry.path() == workspace.root() {
@@ -86,7 +86,7 @@ pub fn list_files(workspace: &Workspace, args: ListFilesArgs) -> ToolResult {
     }
 
     ToolResult::ok(if rows.is_empty() {
-        "none".to_string()
+        "нет".to_string()
     } else {
         rows.join("\n")
     })
@@ -98,7 +98,7 @@ pub fn read_file(workspace: &Workspace, args: ReadFileArgs) -> ToolResult {
         Err(err) => return ToolResult::error(err.to_string()),
     };
     if path.is_dir() {
-        return ToolResult::error("read_file expects a file, got a directory");
+        return ToolResult::error("read_file ожидает файл, получена папка");
     }
 
     let text = match fs::read_to_string(&path) {
@@ -117,7 +117,7 @@ pub fn read_file(workspace: &Workspace, args: ReadFileArgs) -> ToolResult {
         .join("\n");
 
     ToolResult::ok(if rendered.is_empty() {
-        "(empty)".to_string()
+        "(пусто)".to_string()
     } else {
         rendered
     })
@@ -134,11 +134,11 @@ pub fn write_file(
         && !request_approval(
             events,
             approvals,
-            format!("Write file {}", args.path),
+            format!("Записать файл {}", args.path),
             preview_text(&args.content),
         )
     {
-        return ToolResult::error("write_file denied by user");
+        return ToolResult::error("write_file отклонён пользователем");
     }
 
     let path = match workspace.resolve_for_write(&args.path) {
@@ -153,7 +153,7 @@ pub fn write_file(
     }
 
     match fs::write(path, args.content) {
-        Ok(()) => ToolResult::ok("ok"),
+        Ok(()) => ToolResult::ok("ок"),
         Err(err) => ToolResult::error(err.to_string()),
     }
 }
@@ -170,7 +170,7 @@ pub fn edit_file(
         Err(err) => return ToolResult::error(err.to_string()),
     };
     if path.is_dir() {
-        return ToolResult::error("edit_file expects a file, got a directory");
+        return ToolResult::error("edit_file ожидает файл, получена папка");
     }
 
     let text = match fs::read_to_string(&path) {
@@ -179,12 +179,12 @@ pub fn edit_file(
     };
 
     if !text.contains(&args.old) {
-        return ToolResult::error("old string not found");
+        return ToolResult::error("исходная строка не найдена");
     }
     let count = text.matches(&args.old).count();
     if !args.all.unwrap_or(false) && count > 1 {
         return ToolResult::error(format!(
-            "old string appears {count} times; set all=true or make it unique"
+            "исходная строка встречается {count} раз; задайте all=true или сделайте её уникальной"
         ));
     }
 
@@ -192,11 +192,11 @@ pub fn edit_file(
         && !request_approval(
             events,
             approvals,
-            format!("Edit file {}", args.path),
-            format!("Replace:\n{}\n\nWith:\n{}", args.old, args.new),
+            format!("Изменить файл {}", args.path),
+            format!("Заменить:\n{}\n\nНа:\n{}", args.old, args.new),
         )
     {
-        return ToolResult::error("edit_file denied by user");
+        return ToolResult::error("edit_file отклонён пользователем");
     }
 
     let replaced = if args.all.unwrap_or(false) {
@@ -206,7 +206,7 @@ pub fn edit_file(
     };
 
     match fs::write(path, replaced) {
-        Ok(()) => ToolResult::ok("ok"),
+        Ok(()) => ToolResult::ok("ок"),
         Err(err) => ToolResult::error(err.to_string()),
     }
 }
@@ -219,37 +219,37 @@ pub fn apply_patch(
     policy: &PolicyConfig,
 ) -> ToolResult {
     if args.patch.trim().is_empty() {
-        return ToolResult::error("patch is empty");
+        return ToolResult::error("patch пустой");
     }
 
     if patch_looks_outside_workspace(&args.patch) {
-        return ToolResult::error("patch appears to reference paths outside the workspace");
+        return ToolResult::error("patch ссылается на пути вне рабочей папки");
     }
 
     let check = run_git_apply(workspace, &args.patch, true);
     if !check.status_success {
         return ToolResult::error(format!(
-            "git apply --check failed\nstdout:\n{}\nstderr:\n{}",
+            "git apply --check не выполнен\nstdout:\n{}\nstderr:\n{}",
             check.stdout, check.stderr
         ));
     }
 
     let affected = patch_affected_files(&args.patch);
     let impact = if affected.is_empty() {
-        "Affected files: unknown".to_string()
+        "Затронутые файлы: неизвестно".to_string()
     } else {
-        format!("Affected files:\n{}", affected.join("\n"))
+        format!("Затронутые файлы:\n{}", affected.join("\n"))
     };
 
     if policy.require_write_approval
         && !request_approval(
             events,
             approvals,
-            "Apply patch",
+            "Применить patch",
             format!("{impact}\n\nPatch:\n{}", preview_text(&args.patch)),
         )
     {
-        return ToolResult::error("apply_patch denied by user");
+        return ToolResult::error("apply_patch отклонён пользователем");
     }
 
     let applied = run_git_apply(workspace, &args.patch, false);
@@ -267,7 +267,7 @@ pub fn apply_patch(
         })
     } else {
         ToolResult::error(format!(
-            "git apply failed with status {}\n{}",
+            "git apply завершился с ошибочным статусом {}\n{}",
             applied.status, rendered
         ))
     }
@@ -293,7 +293,7 @@ pub fn grep(workspace: &Workspace, args: GrepArgs) -> ToolResult {
         .filter_map(Result::ok)
     {
         if hits.len() >= limit {
-            hits.push("... truncated ...".to_string());
+            hits.push("... обрезано ...".to_string());
             break;
         }
         if !entry.file_type().is_file() {
@@ -317,7 +317,7 @@ pub fn grep(workspace: &Workspace, args: GrepArgs) -> ToolResult {
     }
 
     ToolResult::ok(if hits.is_empty() {
-        "none".to_string()
+        "нет".to_string()
     } else {
         hits.join("\n")
     })
@@ -326,7 +326,7 @@ pub fn grep(workspace: &Workspace, args: GrepArgs) -> ToolResult {
 fn preview_text(text: &str) -> String {
     let mut preview = text.chars().take(2_000).collect::<String>();
     if text.chars().count() > 2_000 {
-        preview.push_str("\n... truncated ...");
+        preview.push_str("\n... обрезано ...");
     }
     preview
 }
@@ -367,7 +367,7 @@ fn run_git_apply(workspace: &Workspace, patch: &str, check_only: bool) -> GitApp
         Ok(child) => child,
         Err(err) => {
             return GitApplyOutput {
-                status: "spawn failed".to_string(),
+                status: "spawn не выполнен".to_string(),
                 status_success: false,
                 stdout: String::new(),
                 stderr: err.to_string(),
@@ -378,7 +378,7 @@ fn run_git_apply(workspace: &Workspace, patch: &str, check_only: bool) -> GitApp
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(patch.as_bytes()) {
             return GitApplyOutput {
-                status: "stdin failed".to_string(),
+                status: "stdin не выполнен".to_string(),
                 status_success: false,
                 stdout: String::new(),
                 stderr: err.to_string(),
@@ -394,7 +394,7 @@ fn run_git_apply(workspace: &Workspace, patch: &str, check_only: bool) -> GitApp
             stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         },
         Err(err) => GitApplyOutput {
-            status: "wait failed".to_string(),
+            status: "wait не выполнен".to_string(),
             status_success: false,
             stdout: String::new(),
             stderr: err.to_string(),
@@ -412,16 +412,16 @@ fn git_diff_stat(workspace: &Workspace) -> String {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if stdout.trim().is_empty() {
-                "git diff --stat: no changes".to_string()
+                "git diff --stat: нет изменений".to_string()
             } else {
                 format!("git diff --stat:\n{stdout}")
             }
         }
         Ok(output) => format!(
-            "git diff --stat failed:\n{}",
+            "git diff --stat не выполнен:\n{}",
             String::from_utf8_lossy(&output.stderr)
         ),
-        Err(err) => format!("git diff --stat failed: {err}"),
+        Err(err) => format!("git diff --stat ошибка: {err}"),
     }
 }
 

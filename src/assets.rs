@@ -1,3 +1,5 @@
+use crate::config::AppConfig;
+use crate::http::build_http_client;
 use crate::workspace::Workspace;
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::multipart;
@@ -415,6 +417,7 @@ pub fn image_request_from_job(
 pub async fn run_image_job(
     workspace: Workspace,
     api_key: String,
+    config: AppConfig,
     mut request: ImageAssetRequest,
     mut job: AssetJob,
 ) -> AssetJob {
@@ -429,7 +432,7 @@ pub async fn run_image_job(
     job.updated_at = unix_timestamp();
     let _ = upsert_job(&workspace, &job);
 
-    match generate_image(&api_key, &request).await {
+    match generate_image(&api_key, &request, &config).await {
         Ok(generated) => match save_generated_image(&workspace, &request, &job, &generated) {
             Ok(output_file) => {
                 job.status = AssetStatus::Done;
@@ -468,6 +471,7 @@ pub async fn run_image_job(
 pub async fn run_spritesheet_job(
     workspace: Workspace,
     api_key: String,
+    config: AppConfig,
     request: SpritesheetAssetRequest,
     mut job: AssetJob,
 ) -> AssetJob {
@@ -488,7 +492,7 @@ pub async fn run_spritesheet_job(
     job.updated_at = unix_timestamp();
     let _ = upsert_job(&workspace, &job);
 
-    match generate_image(&api_key, &image_request).await {
+    match generate_image(&api_key, &image_request, &config).await {
         Ok(generated) => match save_generated_image(&workspace, &image_request, &job, &generated) {
             Ok(output_file) => {
                 job.status = AssetStatus::Done;
@@ -529,6 +533,7 @@ pub async fn run_spritesheet_job(
 pub async fn run_audio_job(
     workspace: Workspace,
     api_key: String,
+    config: AppConfig,
     mut request: AudioAssetRequest,
     mut job: AssetJob,
 ) -> AssetJob {
@@ -545,7 +550,7 @@ pub async fn run_audio_job(
     job.updated_at = unix_timestamp();
     let _ = upsert_job(&workspace, &job);
 
-    match generate_audio(&api_key, &request).await {
+    match generate_audio(&api_key, &request, &config).await {
         Ok(generated) => match save_generated_binary(
             &workspace,
             "assets/generated/audio",
@@ -590,6 +595,7 @@ pub async fn run_audio_job(
 pub async fn run_video_job(
     workspace: Workspace,
     api_key: String,
+    config: AppConfig,
     mut request: VideoAssetRequest,
     mut job: AssetJob,
 ) -> AssetJob {
@@ -606,7 +612,7 @@ pub async fn run_video_job(
     job.updated_at = unix_timestamp();
     let _ = upsert_job(&workspace, &job);
 
-    match generate_video(&api_key, &request).await {
+    match generate_video(&api_key, &request, &config).await {
         Ok(generated) => match save_generated_binary(
             &workspace,
             "assets/generated/video",
@@ -651,6 +657,7 @@ pub async fn run_video_job(
 async fn generate_image(
     api_key: &str,
     request: &ImageAssetRequest,
+    config: &AppConfig,
 ) -> anyhow::Result<GeneratedImage> {
     if api_key.trim().is_empty() {
         anyhow::bail!(
@@ -662,11 +669,12 @@ async fn generate_image(
         anyhow::bail!("Asset prompt is empty");
     }
 
+    let client = build_http_client(config)?;
     match request.provider.as_str() {
-        OPENAI_IMAGE_PROVIDER_ID => generate_openai_image(api_key, request).await,
-        GEMINI_IMAGE_PROVIDER_ID => generate_gemini_image(api_key, request).await,
-        STABILITY_IMAGE_PROVIDER_ID => generate_stability_image(api_key, request).await,
-        REPLICATE_IMAGE_PROVIDER_ID => generate_replicate_image(api_key, request).await,
+        OPENAI_IMAGE_PROVIDER_ID => generate_openai_image(&client, api_key, request).await,
+        GEMINI_IMAGE_PROVIDER_ID => generate_gemini_image(&client, api_key, request).await,
+        STABILITY_IMAGE_PROVIDER_ID => generate_stability_image(&client, api_key, request).await,
+        REPLICATE_IMAGE_PROVIDER_ID => generate_replicate_image(&client, api_key, request).await,
         _ => anyhow::bail!("Unsupported image provider: {}", request.provider),
     }
 }
@@ -674,6 +682,7 @@ async fn generate_image(
 async fn generate_audio(
     api_key: &str,
     request: &AudioAssetRequest,
+    config: &AppConfig,
 ) -> anyhow::Result<GeneratedBinary> {
     if api_key.trim().is_empty() {
         anyhow::bail!("OPENAI_API_KEY is empty. Save a key before generating audio assets.");
@@ -699,7 +708,8 @@ async fn generate_audio(
         }]
     });
 
-    let response = reqwest::Client::new()
+    let client = build_http_client(config)?;
+    let response = client
         .post("https://api.openai.com/v1/chat/completions")
         .bearer_auth(api_key)
         .json(&body)
@@ -731,6 +741,7 @@ async fn generate_audio(
 async fn generate_video(
     api_key: &str,
     request: &VideoAssetRequest,
+    config: &AppConfig,
 ) -> anyhow::Result<GeneratedBinary> {
     if api_key.trim().is_empty() {
         anyhow::bail!("OPENAI_API_KEY is empty. Save a key before generating video assets.");
@@ -742,7 +753,7 @@ async fn generate_video(
         anyhow::bail!("Unsupported video provider: {}", request.provider);
     }
 
-    let client = reqwest::Client::new();
+    let client = build_http_client(config)?;
     let form = multipart::Form::new()
         .text("model", request.model.clone())
         .text("prompt", request.prompt.clone())
@@ -817,6 +828,7 @@ async fn generate_video(
 }
 
 async fn generate_openai_image(
+    client: &reqwest::Client,
     api_key: &str,
     request: &ImageAssetRequest,
 ) -> anyhow::Result<GeneratedImage> {
@@ -828,7 +840,6 @@ async fn generate_openai_image(
         "n": 1
     });
 
-    let client = reqwest::Client::new();
     let response = client
         .post("https://api.openai.com/v1/images/generations")
         .bearer_auth(api_key)
@@ -853,7 +864,7 @@ async fn generate_openai_image(
     }
 
     if let Some(url) = value.pointer("/data/0/url").and_then(Value::as_str) {
-        let (bytes, mime_type) = download_generated_file(&client, url).await?;
+        let (bytes, mime_type) = download_generated_file(client, url).await?;
         return Ok(GeneratedImage {
             bytes,
             mime_type,
@@ -866,6 +877,7 @@ async fn generate_openai_image(
 }
 
 async fn generate_gemini_image(
+    client: &reqwest::Client,
     api_key: &str,
     request: &ImageAssetRequest,
 ) -> anyhow::Result<GeneratedImage> {
@@ -885,7 +897,7 @@ async fn generate_gemini_image(
         }
     });
 
-    let response = reqwest::Client::new()
+    let response = client
         .post("https://generativelanguage.googleapis.com/v1beta/interactions")
         .header("x-goog-api-key", api_key)
         .json(&body)
@@ -911,6 +923,7 @@ async fn generate_gemini_image(
 }
 
 async fn generate_stability_image(
+    client: &reqwest::Client,
     api_key: &str,
     request: &ImageAssetRequest,
 ) -> anyhow::Result<GeneratedImage> {
@@ -922,7 +935,7 @@ async fn generate_stability_image(
             stability_aspect_ratio(&request.aspect_ratio).to_string(),
         );
 
-    let response = reqwest::Client::new()
+    let response = client
         .post("https://api.stability.ai/v2beta/stable-image/generate/core")
         .bearer_auth(api_key)
         .header("accept", "image/*")
@@ -947,10 +960,10 @@ async fn generate_stability_image(
 }
 
 async fn generate_replicate_image(
+    client: &reqwest::Client,
     api_key: &str,
     request: &ImageAssetRequest,
 ) -> anyhow::Result<GeneratedImage> {
-    let client = reqwest::Client::new();
     let model_path = request.model.trim().trim_matches('/');
     let model_parts = model_path.split('/').collect::<Vec<_>>();
     if model_parts.len() != 2 || model_parts.iter().any(|part| part.trim().is_empty()) {
@@ -971,10 +984,10 @@ async fn generate_replicate_image(
         }
     });
 
-    let mut value = post_replicate_prediction(&client, api_key, &url, &body).await?;
+    let mut value = post_replicate_prediction(client, api_key, &url, &body).await?;
     for _ in 0..REPLICATE_POLL_LIMIT {
         if let Some(output_url) = first_url_in_value(value.get("output").unwrap_or(&Value::Null)) {
-            let (bytes, mime_type) = download_generated_file(&client, output_url).await?;
+            let (bytes, mime_type) = download_generated_file(client, output_url).await?;
             return Ok(GeneratedImage {
                 bytes,
                 mime_type,
@@ -1006,7 +1019,7 @@ async fn generate_replicate_image(
         };
 
         sleep(Duration::from_secs(2)).await;
-        value = get_replicate_prediction(&client, api_key, get_url).await?;
+        value = get_replicate_prediction(client, api_key, get_url).await?;
     }
 
     anyhow::bail!("Replicate prediction did not finish before timeout");

@@ -2,11 +2,17 @@
 
 mod agent;
 mod app;
+mod asset_library;
 mod assets;
 mod config;
+mod evals;
 mod game_workflows;
+mod governance;
+mod http;
+mod memory;
 mod orchestration;
 mod project;
+mod provider_health;
 mod terminal;
 mod tools;
 mod workspace;

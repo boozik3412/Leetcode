@@ -36,7 +36,7 @@ pub async fn run_subagent(
     let candidates = route_candidates(&config, route);
     if candidates.is_empty() {
         anyhow::bail!(
-            "No provider/model route is available for {} subagent.",
+            "Нет доступного маршрута провайдер/модель для субагента {}.",
             route_name(route)
         );
     }
@@ -50,21 +50,21 @@ pub async fn run_subagent(
     let orchestration_context = load_orchestration_state(&workspace).context;
     let workspace_root = workspace.root().display().to_string();
     let instructions = format!(
-        "You are a bounded Leetcode specialist subagent: {}. \
-You are called as a tool by the manager agent, not by the user directly. \
-Complete only the delegated task and return a concise result for the manager. \
-Allowed local actions: {allowed_actions_text}. If you need an action outside this list, explain the blocker instead of trying another route. \
-Never call run_subagent. Keep edits and shell commands minimal and relevant. \
-Workspace root: {workspace_root}. Shared workspace summary: {}",
+        "Ты ограниченный субагент-специалист Leetcode: {}. \
+Тебя вызывает менеджер-агент как инструмент, не пользователь напрямую. \
+Выполни только переданную задачу и верни менеджеру краткий результат. \
+Разрешённые локальные действия: {allowed_actions_text}. Если нужно действие вне списка, объясни блокер вместо обходного пути. \
+Никогда не вызывай run_subagent. Держи правки и shell-команды минимальными и релевантными. \
+Корень рабочей папки: {workspace_root}. Общий summary рабочей папки: {}",
         role_label(request.role),
         if orchestration_context.summary.trim().is_empty() {
-            "none"
+            "нет"
         } else {
             orchestration_context.summary.as_str()
         }
     );
     let mut input = ProviderInput::Text(format!(
-        "Task:\n{}\n\nContext:\n{}\n\nReturn format:\nSummary:\nActions taken:\nFiles/assets touched:\nRisks:\nRecommended next step:",
+        "Задача:\n{}\n\nКонтекст:\n{}\n\nФормат ответа:\nИтог:\nВыполненные действия:\nЗатронутые файлы/ассеты:\nРиски:\nРекомендуемый следующий шаг:",
         request.task, request.context
     ));
 
@@ -87,7 +87,7 @@ Workspace root: {workspace_root}. Shared workspace summary: {}",
     let _ = events.send(AppEvent::ToolOutput {
         id: subagent_event_id(request.role),
         chunk: format!(
-            "Subagent {} started.\nRoute: {}\n{}",
+            "Субагент {} запущен.\nМаршрут: {}\n{}",
             role_label(request.role),
             route_name(route),
             describe_route_plan(&candidates)
@@ -97,7 +97,7 @@ Workspace root: {workspace_root}. Shared workspace summary: {}",
     for round in 0..max_rounds {
         rounds_completed = round + 1;
         if cancel.load(Ordering::SeqCst) {
-            anyhow::bail!("Subagent run cancelled");
+            anyhow::bail!("Запуск субагента отменён");
         }
 
         let (model_events_tx, model_events_rx) = mpsc::channel();
@@ -151,12 +151,12 @@ Workspace root: {workspace_root}. Shared workspace summary: {}",
         let mut tool_outputs = Vec::new();
         for call in streamed.tool_calls {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("Subagent run cancelled");
+                anyhow::bail!("Запуск субагента отменён");
             }
 
-            let action = action_name(&call).unwrap_or_else(|| "unknown".to_string());
+            let action = action_name(&call).unwrap_or_else(|| "неизвестно".to_string());
             if !allowed_actions.contains(action.as_str()) {
-                let denied = format!("{} denied for {}", action, role_label(request.role));
+                let denied = format!("{} запрещён для {}", action, role_label(request.role));
                 denied_tools.push(action.clone());
                 let result = ToolResult::error(denied);
                 tool_outputs.push(tool_output(call.call_id, result));
@@ -179,7 +179,7 @@ Workspace root: {workspace_root}. Shared workspace summary: {}",
             context: request.context,
             status: "max_rounds_reached".to_string(),
             output: if final_text.trim().is_empty() {
-                "Subagent reached max rounds without a final answer.".to_string()
+                "Субагент достиг лимита раундов без финального ответа.".to_string()
             } else {
                 final_text.trim().to_string()
             },
@@ -279,12 +279,12 @@ fn route_for_role(role: AgentRole) -> TaskRoute {
 
 fn role_label(role: AgentRole) -> &'static str {
     match role {
-        AgentRole::CodeAgent => "Code Agent",
-        AgentRole::GameDesigner => "Game Designer",
-        AgentRole::ArtDirector => "Art Director",
-        AgentRole::AudioAgent => "Audio Agent",
-        AgentRole::QaAgent => "QA Agent",
-        AgentRole::BuildAgent => "Build Agent",
+        AgentRole::CodeAgent => "Код-агент",
+        AgentRole::GameDesigner => "Гейм-дизайнер",
+        AgentRole::ArtDirector => "Арт-директор",
+        AgentRole::AudioAgent => "Аудио-агент",
+        AgentRole::QaAgent => "QA-агент",
+        AgentRole::BuildAgent => "Build-агент",
     }
 }
 

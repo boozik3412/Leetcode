@@ -27,7 +27,7 @@ pub async fn run_project_command(
     let Some(command) = find_project_command(&profiles, &args.command, args.profile.as_deref())
     else {
         return ToolResult::error(format!(
-            "Project command '{}' was not found.\nAvailable commands:\n{}",
+            "Проектная команда '{}' не найдена.\nДоступные команды:\n{}",
             args.command,
             describe_project_commands(&profiles)
         ));

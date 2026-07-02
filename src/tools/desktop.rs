@@ -75,10 +75,10 @@ pub fn screenshot(
         policy.require_desktop_approval,
         events,
         approvals,
-        "Capture desktop screenshot",
-        "The agent wants to capture the current desktop and save it into the selected workspace.",
+        "Сделать скриншот рабочего стола",
+        "Агент хочет сделать скриншот текущего рабочего стола и сохранить его в выбранную рабочую папку.",
     ) {
-        return ToolResult::error("screenshot denied by user");
+        return ToolResult::error("screenshot отклонён пользователем");
     }
 
     match capture_screenshot_file(workspace, "screenshot") {
@@ -90,7 +90,7 @@ pub fn screenshot(
 pub fn active_window() -> ToolResult {
     match active_window_info() {
         Ok(info) => ToolResult::ok(
-            serde_json::to_string_pretty(&info).unwrap_or_else(|_| "active window".to_string()),
+            serde_json::to_string_pretty(&info).unwrap_or_else(|_| "активное окно".to_string()),
         ),
         Err(err) => ToolResult::error(err),
     }
@@ -105,27 +105,28 @@ pub fn focus_window(
     if args.title.as_deref().unwrap_or("").trim().is_empty()
         && args.process.as_deref().unwrap_or("").trim().is_empty()
     {
-        return ToolResult::error("focus_window requires title or process");
+        return ToolResult::error("focus_window требует title или process");
     }
 
     if !request_approval_if(
         policy.require_desktop_approval,
         events,
         approvals,
-        "Focus desktop window",
+        "Сфокусировать окно рабочего стола",
         format!(
-            "Title: {}\nProcess: {}\nExact: {}",
+            "Заголовок: {}\nПроцесс: {}\nТочное совпадение: {}",
             args.title.as_deref().unwrap_or(""),
             args.process.as_deref().unwrap_or(""),
             args.exact.unwrap_or(false)
         ),
     ) {
-        return ToolResult::error("focus_window denied by user");
+        return ToolResult::error("focus_window отклонён пользователем");
     }
 
     match focus_window_impl(&args) {
         Ok(info) => ToolResult::ok(
-            serde_json::to_string_pretty(&info).unwrap_or_else(|_| "window focused".to_string()),
+            serde_json::to_string_pretty(&info)
+                .unwrap_or_else(|_| "окно сфокусировано".to_string()),
         ),
         Err(err) => ToolResult::error(err),
     }
@@ -149,7 +150,7 @@ pub fn desktop_step(
         "observe" | "click" | "type_text" | "hotkey" | "focus_window"
     ) {
         return ToolResult::error(
-            "desktop_step action must be observe, click, type_text, hotkey, or focus_window",
+            "action для desktop_step должен быть observe, click, type_text, hotkey или focus_window",
         );
     }
 
@@ -161,10 +162,10 @@ pub fn desktop_step(
         policy.require_desktop_approval,
         events,
         approvals,
-        format!("Desktop step: {action}"),
+        format!("Шаг рабочего стола: {action}"),
         desktop_step_approval_detail(&action, &args),
     ) {
-        return ToolResult::error("desktop_step denied by user");
+        return ToolResult::error("desktop_step отклонён пользователем");
     }
 
     let before_screenshot = match capture_screenshot_file(workspace, "before") {
@@ -173,7 +174,7 @@ pub fn desktop_step(
     };
     let before_window = active_window_info().ok();
     let action_result = match action.as_str() {
-        "observe" => Ok("observed desktop".to_string()),
+        "observe" => Ok("рабочий стол осмотрен".to_string()),
         "click" => mouse_click_impl(&MouseClickArgs {
             x: args.x.unwrap_or_default(),
             y: args.y.unwrap_or_default(),
@@ -191,7 +192,7 @@ pub fn desktop_step(
             process: args.process.clone(),
             exact: args.exact,
         })
-        .map(|window| format!("focused {} ({})", window.title, window.process_name)),
+        .map(|window| format!("сфокусировано {} ({})", window.title, window.process_name)),
         _ => unreachable!(),
     };
 
@@ -215,7 +216,7 @@ pub fn desktop_step(
             "before_window": before_window,
             "after_window": after_window
         }))
-        .unwrap_or_else(|_| "desktop step completed".to_string()),
+        .unwrap_or_else(|_| "шаг рабочего стола завершён".to_string()),
     )
 }
 
@@ -227,7 +228,7 @@ pub fn mouse_click(
 ) -> ToolResult {
     let button = args.button.clone().unwrap_or_else(|| "left".to_string());
     if mouse_button_flags(&button).is_none() {
-        return ToolResult::error("mouse_click button must be left, right, or middle");
+        return ToolResult::error("кнопка mouse_click должна быть left, right или middle");
     }
     let clicks = args.clicks.unwrap_or(1).clamp(1, 3);
 
@@ -235,10 +236,10 @@ pub fn mouse_click(
         policy.require_desktop_approval,
         events,
         approvals,
-        format!("Mouse {button} click at {}, {}", args.x, args.y),
-        format!("Clicks: {clicks}\nCoordinates are absolute desktop pixels."),
+        format!("Клик мышью {button} по {}, {}", args.x, args.y),
+        format!("Клики: {clicks}\nКоординаты указаны в абсолютных пикселях рабочего стола."),
     ) {
-        return ToolResult::error("mouse_click denied by user");
+        return ToolResult::error("mouse_click отклонён пользователем");
     }
 
     mouse_click_impl(&args)
@@ -253,7 +254,7 @@ pub fn type_text(
     policy: &PolicyConfig,
 ) -> ToolResult {
     if args.text.is_empty() {
-        return ToolResult::error("type_text text is empty");
+        return ToolResult::error("text для type_text пустой");
     }
 
     let preview = preview_text(&args.text, 1_000);
@@ -261,10 +262,10 @@ pub fn type_text(
         policy.require_desktop_approval,
         events,
         approvals,
-        format!("Type {} characters", args.text.chars().count()),
+        format!("Ввести символов: {}", args.text.chars().count()),
         preview,
     ) {
-        return ToolResult::error("type_text denied by user");
+        return ToolResult::error("type_text отклонён пользователем");
     }
 
     type_text_impl(&args)
@@ -279,7 +280,7 @@ pub fn hotkey(
     policy: &PolicyConfig,
 ) -> ToolResult {
     if args.keys.is_empty() {
-        return ToolResult::error("hotkey keys is empty");
+        return ToolResult::error("keys для hotkey пустой");
     }
     if let Err(err) = validate_hotkey_keys(&args.keys) {
         return ToolResult::error(err);
@@ -290,10 +291,10 @@ pub fn hotkey(
         policy.require_desktop_approval,
         events,
         approvals,
-        format!("Press hotkey {rendered_keys}"),
-        "The agent wants to send a keyboard shortcut to the active desktop window.",
+        format!("Нажать hotkey {rendered_keys}"),
+        "Агент хочет отправить сочетание клавиш в активное окно рабочего стола.",
     ) {
-        return ToolResult::error("hotkey denied by user");
+        return ToolResult::error("hotkey отклонён пользователем");
     }
 
     hotkey_impl(&args)
@@ -344,7 +345,7 @@ $bitmap.Dispose()
 fn mouse_click_impl(args: &MouseClickArgs) -> Result<String, String> {
     let button = args.button.clone().unwrap_or_else(|| "left".to_string());
     let Some((down_flag, up_flag)) = mouse_button_flags(&button) else {
-        return Err("mouse_click button must be left, right, or middle".to_string());
+        return Err("кнопка mouse_click должна быть left, right или middle".to_string());
     };
     let clicks = args.clicks.unwrap_or(1).clamp(1, 3);
 
@@ -378,7 +379,7 @@ for ($i = 0; $i -lt {clicks}; $i++) {{
         );
 
         run_powershell_script(&script, "mouse_click")
-            .map(|_| format!("clicked {button} at {}, {}", args.x, args.y))
+            .map(|_| format!("клик {button} по {}, {}", args.x, args.y))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -391,7 +392,7 @@ for ($i = 0; $i -lt {clicks}; $i++) {{
 
 fn type_text_impl(args: &TypeTextArgs) -> Result<String, String> {
     if args.text.is_empty() {
-        return Err("type_text text is empty".to_string());
+        return Err("text для type_text пустой".to_string());
     }
 
     #[cfg(target_os = "windows")]
@@ -457,7 +458,7 @@ Add-Type -TypeDefinition $signature
         );
 
         run_powershell_script(&script, "type_text")
-            .map(|_| format!("typed {} characters", args.text.chars().count()))
+            .map(|_| format!("введено символов: {}", args.text.chars().count()))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -468,12 +469,14 @@ Add-Type -TypeDefinition $signature
 
 fn hotkey_impl(args: &HotkeyArgs) -> Result<String, String> {
     if args.keys.is_empty() {
-        return Err("hotkey keys is empty".to_string());
+        return Err("keys для hotkey пустой".to_string());
     }
     let codes = args
         .keys
         .iter()
-        .map(|key| virtual_key_code(key).ok_or_else(|| format!("Unsupported hotkey key: {key}")))
+        .map(|key| {
+            virtual_key_code(key).ok_or_else(|| format!("неподдерживаемая клавиша hotkey: {key}"))
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let rendered_keys = args.keys.join("+");
 
@@ -545,7 +548,7 @@ Add-Type -TypeDefinition $signature
 "#
         );
 
-        run_powershell_script(&script, "hotkey").map(|_| format!("pressed {rendered_keys}"))
+        run_powershell_script(&script, "hotkey").map(|_| format!("нажато {rendered_keys}"))
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -639,7 +642,7 @@ $matches = $windows | Where-Object {{
     $titleOk -and $processOk
 }}
 $match = $matches | Select-Object -First 1
-if ($null -eq $match) {{ throw "No matching visible window found" }}
+if ($null -eq $match) {{ throw "Подходящее видимое окно не найдено" }}
 [NativeWindow]::ShowWindow($match.Hwnd, 9) | Out-Null
 Start-Sleep -Milliseconds 60
 [NativeWindow]::SetForegroundWindow($match.Hwnd) | Out-Null
@@ -663,12 +666,12 @@ fn validate_desktop_step(action: &str, args: &DesktopStepArgs) -> Result<(), Str
         "observe" => Ok(()),
         "click" => {
             if args.x.is_none() || args.y.is_none() {
-                return Err("desktop_step click requires x and y".to_string());
+                return Err("desktop_step click требует x и y".to_string());
             }
             if let Some(button) = &args.button {
                 if mouse_button_flags(button).is_none() {
                     return Err(
-                        "desktop_step click button must be left, right, or middle".to_string()
+                        "кнопка desktop_step click должна быть left, right или middle".to_string(),
                     );
                 }
             }
@@ -676,7 +679,7 @@ fn validate_desktop_step(action: &str, args: &DesktopStepArgs) -> Result<(), Str
         }
         "type_text" => {
             if args.text.as_deref().unwrap_or("").is_empty() {
-                return Err("desktop_step type_text requires text".to_string());
+                return Err("desktop_step type_text требует text".to_string());
             }
             Ok(())
         }
@@ -685,17 +688,17 @@ fn validate_desktop_step(action: &str, args: &DesktopStepArgs) -> Result<(), Str
             if args.title.as_deref().unwrap_or("").trim().is_empty()
                 && args.process.as_deref().unwrap_or("").trim().is_empty()
             {
-                return Err("desktop_step focus_window requires title or process".to_string());
+                return Err("desktop_step focus_window требует title или process".to_string());
             }
             Ok(())
         }
-        _ => Err("unsupported desktop_step action".to_string()),
+        _ => Err("неподдерживаемое действие desktop_step".to_string()),
     }
 }
 
 fn desktop_step_approval_detail(action: &str, args: &DesktopStepArgs) -> String {
     format!(
-        "Action: {action}\nCoordinates: {}, {}\nButton: {}\nText: {}\nKeys: {}\nTitle: {}\nProcess: {}\nNote: {}\n\nThe app will capture a screenshot before and after the action.",
+        "Действие: {action}\nКоординаты: {}, {}\nКнопка: {}\nТекст: {}\nКлавиши: {}\nЗаголовок: {}\nПроцесс: {}\nЗаметка: {}\n\nПриложение сделает скриншот до и после действия.",
         args.x.map(|value| value.to_string()).unwrap_or_default(),
         args.y.map(|value| value.to_string()).unwrap_or_default(),
         args.button.as_deref().unwrap_or(""),
@@ -743,7 +746,7 @@ fn run_powershell_script_output(script: &str, action: &str) -> Result<String, St
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         Err(format!(
-            "{action} failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            "{action} завершился с ошибочным статусом {}\nstdout:\n{}\nstderr:\n{}",
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -840,11 +843,11 @@ if ($hasRect) {{
 
 fn validate_hotkey_keys(keys: &[String]) -> Result<(), String> {
     if keys.is_empty() {
-        return Err("hotkey keys is empty".to_string());
+        return Err("keys для hotkey пустой".to_string());
     }
     for key in keys {
         if virtual_key_code(key).is_none() {
-            return Err(format!("Unsupported hotkey key: {key}"));
+            return Err(format!("неподдерживаемая клавиша hotkey: {key}"));
         }
     }
     Ok(())
@@ -904,7 +907,7 @@ fn encoded_optional(value: &Option<String>) -> String {
 fn preview_text(text: &str, max_chars: usize) -> String {
     let mut preview = text.chars().take(max_chars).collect::<String>();
     if text.chars().count() > max_chars {
-        preview.push_str("\n... truncated ...");
+        preview.push_str("\n... обрезано ...");
     }
     preview
 }

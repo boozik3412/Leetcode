@@ -118,33 +118,34 @@ pub fn agent_role_specs() -> &'static [AgentRoleSpec] {
     &[
         AgentRoleSpec {
             id: "code_agent",
-            label: "Code Agent",
-            purpose: "Implements code, refactors, tests, and project commands.",
+            label: "Код-агент",
+            purpose: "Реализует код, рефакторинг, тесты и проектные команды.",
         },
         AgentRoleSpec {
             id: "game_designer",
-            label: "Game Designer",
-            purpose: "Turns mechanics, loops, levels, and player goals into buildable plans.",
+            label: "Гейм-дизайнер",
+            purpose: "Превращает механики, циклы, уровни и цели игрока в реализуемые планы.",
         },
         AgentRoleSpec {
             id: "art_director",
-            label: "Art Director",
-            purpose: "Guides visual style, sprites, icons, UI, and asset consistency.",
+            label: "Арт-директор",
+            purpose: "Ведёт визуальный стиль, спрайты, иконки, UI и целостность ассетов.",
         },
         AgentRoleSpec {
             id: "audio_agent",
-            label: "Audio Agent",
-            purpose: "Plans and generates UI/game sounds, music stingers, and voice prompts.",
+            label: "Аудио-агент",
+            purpose:
+                "Планирует и генерирует UI/game-звуки, музыкальные акценты и голосовые промпты.",
         },
         AgentRoleSpec {
             id: "qa_agent",
-            label: "QA Agent",
-            purpose: "Creates test plans, playtest checklists, bug reports, and validation passes.",
+            label: "QA-агент",
+            purpose: "Создаёт тест-планы, playtest-чеклисты, баг-репорты и проходы валидации.",
         },
         AgentRoleSpec {
             id: "build_agent",
-            label: "Build Agent",
-            purpose: "Runs builds, packaging, release checks, and preview/deployment steps.",
+            label: "Build-агент",
+            purpose: "Запускает сборки, упаковку, release-проверки, preview и deployment-шаги.",
         },
     ]
 }

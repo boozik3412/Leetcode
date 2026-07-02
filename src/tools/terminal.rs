@@ -44,7 +44,7 @@ pub fn terminal_start(
             format!("Working directory: {cwd_label}"),
         )
     {
-        return ToolResult::error("terminal_start denied by user");
+        return ToolResult::error("terminal_start отклонён пользователем");
     }
 
     match start_terminal_session(workspace, args.cwd.as_deref(), args.shell.as_deref()) {
@@ -60,14 +60,14 @@ pub fn terminal_write(
     policy: &PolicyConfig,
 ) -> ToolResult {
     if args.input.is_empty() {
-        return ToolResult::error("terminal_write input is empty");
+        return ToolResult::error("ввод terminal_write пуст");
     }
     let needs_approval = policy.require_shell_for(&args.input);
     if needs_approval
         && !request_approval(
             events,
             approvals,
-            "Write to persistent terminal",
+            "Запись в постоянный терминал",
             format!(
                 "Input:\n{}\n\nEnter: {}",
                 args.input,
@@ -75,7 +75,7 @@ pub fn terminal_write(
             ),
         )
     {
-        return ToolResult::error("terminal_write denied by user");
+        return ToolResult::error("terminal_write отклонён пользователем");
     }
 
     match write_terminal_input(&args.input, args.enter.unwrap_or(true)) {
@@ -104,7 +104,7 @@ pub fn terminal_stop(
             "The agent wants to terminate the current persistent terminal session.",
         )
     {
-        return ToolResult::error("terminal_stop denied by user");
+        return ToolResult::error("terminal_stop отклонён пользователем");
     }
 
     match stop_terminal_session() {

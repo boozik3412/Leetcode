@@ -61,14 +61,14 @@ pub async fn run_user_turn(
     let candidates = route_candidates(&config, task);
     if candidates.is_empty() {
         anyhow::bail!(
-            "No available provider/model route for {}. Save a compatible API key or switch Route to Auto/Coding.",
+            "Нет доступного маршрута провайдер/модель для задачи {}. Сохраните совместимый API-ключ или переключите маршрут на Авто/Код.",
             route_name(task)
         );
     }
     let _ = events.send(AppEvent::ToolOutput {
         id: "routing".to_string(),
         chunk: format!(
-            "Task route: {}\n{}",
+            "Маршрут задачи: {}\n{}",
             route_name(task),
             describe_route_plan(&candidates)
         ),
@@ -95,14 +95,16 @@ pub async fn run_user_turn(
     let workspace_text = workspace
         .as_ref()
         .map(|workspace| workspace.root().display().to_string())
-        .unwrap_or_else(|| "no workspace selected".to_string());
+        .unwrap_or_else(|| "рабочая папка не выбрана".to_string());
+    let project_memory = crate::memory::memory_summary_for_prompt(workspace.as_ref());
     let instructions = format!(
-        "You are Leetcode, a concise local coding assistant running inside a Windows desktop app. \
-Current model provider: {} ({}). \
-Use the act tool whenever you need to inspect files, edit files, search code, run project commands, run shell commands, capture a screenshot, control the desktop, or generate image assets. \
-All file paths must be relative to the selected workspace. Current workspace root: {workspace_text}. \
-Before writing code, inspect the relevant files. Prefer apply_patch for multi-line code edits, \
-and use edit_file only for small unique string replacements. Prefer project_command for common project lifecycle tasks such as check, test, run, build, dev, preview, lint, editor, or release; use open_project_preview for local browser/app preview hooks; use run_shell for one-off custom commands. Use terminal_start, terminal_write, terminal_read, and terminal_stop for persistent interactive sessions such as dev servers, REPLs, watchers, game engine logs, or commands where cwd/env/session state should persist. Use game_workflow for game/app workflows such as prototype mechanic, spritesheet plan, UI sounds, item icons, vertical slice, or playtest checklist. For broad tasks that touch several domains, many files, validation plus implementation, or assets plus code, first propose a compact subagent plan to the user instead of immediately executing it: name the roles, their bounded tasks, expected benefit, and ask for confirmation. If the user already asked to proceed, approved subagents, or used phrases like use subagents/parallelize/split this up, call run_subagent directly. Use run_subagent when a bounded specialist can handle a small part of the work and return findings to you; choose code_agent, game_designer, art_director, audio_agent, qa_agent, or build_agent and keep the task focused. Use delegate_agent only when you want to record a handoff without executing it. Use update_workspace_context to preserve durable project facts and decisions; use record_run_summary at useful milestones; use orchestration_snapshot before planning across roles; use export_trace or create_replay_eval when the user asks for auditability or repeatable validation. Use generate_image_asset for requested game/app visuals, generate_spritesheet_asset for game animation sheets, generate_audio_asset for UI/game sounds or narration, and generate_video_asset for short clips. Use regenerate_image_asset or vary_image_asset for existing image jobs, upscale_asset/export_asset/attach_asset for asset pipeline follow-up, use_asset_as_app_icon to apply a generated icon asset, and open_asset_folder when the user wants to reveal generated assets. For desktop work, prefer active_window and desktop_step: observe first, then focus_window if needed, then perform one click/type_text/hotkey step with before and after screenshots. Use raw screenshot, mouse_click, type_text, or hotkey only for small direct actions when the active window and coordinates are already clear. Keep user-facing explanations short and concrete.",
+        "Ты Leetcode, лаконичный локальный агент для программирования внутри Windows desktop-приложения. \
+Отвечай пользователю на русском языке. Текущий провайдер модели: {} ({}). \
+Используй инструмент act, когда нужно изучить файлы, редактировать файлы, искать по коду, запускать проектные команды, запускать shell-команды, делать скриншот, управлять рабочим столом или генерировать ассеты. \
+Все пути к файлам должны быть относительными к выбранной рабочей папке. Текущий корень рабочей папки: {workspace_text}. \
+{project_memory} \
+Перед изменением кода сначала изучай релевантные файлы. Для многострочных правок предпочитай apply_patch, \
+а edit_file используй только для небольших уникальных замен строк. Для типовых задач жизненного цикла проекта, таких как check, test, run, build, dev, preview, lint, editor или release, предпочитай project_command; для локальных preview-хуков браузера/приложения используй open_project_preview; для разовых нестандартных команд используй run_shell. Для постоянных интерактивных сессий, таких как dev-серверы, REPL, watcher'ы, логи игровых движков или команды, где важно сохранять cwd/env/session, используй terminal_start, terminal_write, terminal_read и terminal_stop. Перед изменением рискованной доступности инструментов используй governance_snapshot; set_tool_enabled, set_category_enabled и add_shell_deny_pattern применяй только когда пользователь просит изменить разрешения инструментов. Чтобы поддерживать память проекта актуальной, используй memory_snapshot, record_project_goal, upsert_task, update_task_status и record_decision. Для организации сгенерированных ассетов используй asset_library_snapshot, tag_asset, favorite_asset и export_asset_pack. Для локальных записей валидации используй run_replay_eval и eval_snapshot. Когда важен статус провайдера/ключа/модели, используй provider_health_snapshot. Для игровых и app-сценариев, таких как прототип механики, план спрайт-листа, UI-звуки, иконки предметов, вертикальный срез или чеклист плейтеста, используй game_workflow. Для крупных задач, которые затрагивают несколько доменов, много файлов, валидацию плюс реализацию или ассеты плюс код, сначала предложи пользователю компактный план субагентов вместо немедленного выполнения: назови роли, ограниченные задачи, ожидаемую пользу и попроси подтверждение. Если пользователь уже попросил продолжать, одобрил субагентов или использовал фразы вроде использовать субагентов/распараллелить/разбить задачу, вызывай run_subagent напрямую. Используй run_subagent, когда ограниченный специалист может выполнить небольшую часть работы и вернуть тебе выводы; выбирай code_agent, game_designer, art_director, audio_agent, qa_agent или build_agent и держи задачу сфокусированной. Используй delegate_agent только когда хочешь записать передачу без выполнения. Используй update_workspace_context для сохранения устойчивых фактов и решений проекта; record_run_summary — на полезных контрольных точках; orchestration_snapshot — перед планированием по ролям; export_trace или create_replay_eval — когда пользователь просит аудит или повторяемую валидацию. Для визуальных ассетов игр/приложений используй generate_image_asset, для анимационных листов — generate_spritesheet_asset, для UI/game-звуков или озвучки — generate_audio_asset, для коротких клипов — generate_video_asset. Для существующих задач изображений используй regenerate_image_asset или vary_image_asset, для следующих шагов пайплайна ассетов — upscale_asset/export_asset/attach_asset, для применения сгенерированной иконки — use_asset_as_app_icon, а open_asset_folder — когда пользователь хочет открыть сгенерированные ассеты. Для работы с рабочим столом предпочитай active_window и desktop_step: сначала наблюдение, затем при необходимости focus_window, потом один шаг click/type_text/hotkey со скриншотами до и после. Сырой screenshot, mouse_click, type_text или hotkey используй только для небольших прямых действий, когда активное окно и координаты уже понятны. Пользовательские объяснения держи короткими и конкретными.",
         provider.display_name(),
         provider.id()
     );
@@ -111,7 +113,7 @@ and use edit_file only for small unique string replacements. Prefer project_comm
 
     for _ in 0..24 {
         if cancel.load(Ordering::SeqCst) {
-            anyhow::bail!("Run cancelled");
+            anyhow::bail!("Запуск отменён");
         }
 
         let streamed = match provider
@@ -129,7 +131,7 @@ and use edit_file only for small unique string replacements. Prefer project_comm
                 candidate_index += 1;
                 let next = candidates[candidate_index].clone();
                 let _ = events.send(AppEvent::Error(format!(
-                    "{} / {} failed, falling back to {} / {}: {}",
+                    "{} / {} не выполнен, переключаюсь на {} / {}: {}",
                     failed.provider_id, failed.model_id, next.provider_id, next.model_id, err
                 )));
                 provider = build_routed_provider(&config, &next)?;
@@ -171,7 +173,7 @@ and use edit_file only for small unique string replacements. Prefer project_comm
         let mut tool_outputs = Vec::new();
         for call in calls {
             if cancel.load(Ordering::SeqCst) {
-                anyhow::bail!("Run cancelled");
+                anyhow::bail!("Запуск отменён");
             }
 
             let result = dispatcher.execute(&call).await;
@@ -183,7 +185,7 @@ and use edit_file only for small unique string replacements. Prefer project_comm
         }
 
         if tool_outputs.is_empty() {
-            let result = ToolResult::error("No tool outputs were produced");
+            let result = ToolResult::error("Инструменты не вернули вывод");
             input = ProviderInput::ToolOutputs(vec![json!({
                 "type": "function_call_output",
                 "call_id": "missing",
@@ -194,5 +196,5 @@ and use edit_file only for small unique string replacements. Prefer project_comm
         }
     }
 
-    anyhow::bail!("Agent loop stopped after too many tool rounds");
+    anyhow::bail!("Агентный цикл остановлен: слишком много раундов инструментов");
 }

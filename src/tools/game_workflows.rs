@@ -21,13 +21,13 @@ pub fn create_game_workflow(
     policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(workflow) = parse_workflow_kind(&args.workflow) else {
-        return ToolResult::error(format!("Unknown game workflow: {}", args.workflow));
+        return ToolResult::error(format!("Неизвестный игровой сценарий: {}", args.workflow));
     };
     let title = args
         .title
         .as_deref()
         .filter(|title| !title.trim().is_empty())
-        .unwrap_or("Game Workflow")
+        .unwrap_or("Игровой сценарий")
         .to_string();
     let brief = args.brief.unwrap_or_default();
 
@@ -35,10 +35,10 @@ pub fn create_game_workflow(
         policy.require_write_approval,
         events,
         approvals,
-        format!("Create game workflow: {title}"),
-        format!("Workflow: {}\n\nBrief:\n{}", args.workflow, brief),
+        format!("Создать игровой сценарий: {title}"),
+        format!("Сценарий: {}\n\nБриф:\n{}", args.workflow, brief),
     ) {
-        return ToolResult::error("game_workflow denied by user");
+        return ToolResult::error("game_workflow отклонён пользователем");
     }
 
     match run_game_workflow(
@@ -54,7 +54,7 @@ pub fn create_game_workflow(
                 "path": result.path,
                 "summary": result.summary
             }))
-            .unwrap_or_else(|_| "game workflow created".to_string()),
+            .unwrap_or_else(|_| "игровой сценарий создан".to_string()),
         ),
         Err(err) => ToolResult::error(err.to_string()),
     }

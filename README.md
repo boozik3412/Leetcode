@@ -58,12 +58,35 @@ Minimal desktop coding agent implemented as a Rust desktop app.
   - `upscale_asset`
   - `export_asset`
   - `attach_asset`
+  - `use_asset_as_app_icon`
+  - `open_asset_folder`
+  - `governance_snapshot`
+  - `set_tool_enabled`
+  - `set_category_enabled`
+  - `add_shell_deny_pattern`
+  - `memory_snapshot`
+  - `record_project_goal`
+  - `upsert_task`
+  - `update_task_status`
+  - `record_decision`
+  - `asset_library_snapshot`
+  - `tag_asset`
+  - `favorite_asset`
+  - `export_asset_pack`
+  - `run_replay_eval`
+  - `eval_snapshot`
+  - `provider_health_snapshot`
 - Approval prompts for shell and write/edit actions.
 - Patch dry-run validation with `git apply --check` before approval.
 - Git status/diff summary in the tool panel.
 - Runtime panel with agent/project/assets/terminal state, active model state, permission summary, and pending approval status.
 - Durable action journal under the user data directory with a right-side Journal viewer.
 - Saved permission modes in the prompt bar: Ask, Auto, Work, Full, plus backward-compatible Custom configs.
+- Governance panel for disabling tools/categories and adding shell deny patterns.
+- Project Memory panel with persistent goals, tasks, and decisions.
+- Asset Library panel with generated asset indexing, tags, favorites, and pack export support.
+- Evals panel for local static replay eval checks.
+- Providers panel for offline model/API key health reporting.
 - Basic cancellation flag for active agent runs.
 
 ## Setup
@@ -128,6 +151,16 @@ The `Project` panel also exposes game workflow templates. They create markdown p
 The `Agents` panel exposes the Rust-owned orchestration layer. It can record specialist handoffs from the current prompt, show a workspace orchestration snapshot in the tool log, and export a trace JSON file. The agent can call the same orchestration tools itself. `run_subagent` lets the manager agent execute a bounded specialist mini-loop for a focused task; subagents have role-specific tool allowlists, max-round limits, and their runs are saved in the orchestration trace. For broad tasks, the manager is instructed to propose a compact subagent plan first unless the user has already approved splitting the work. The current architecture keeps orchestration inside the Rust desktop app for a self-contained MVP; an OpenAI Agents SDK sidecar remains the planned upgrade path when independent specialist execution, hosted tracing, or richer session management becomes necessary.
 
 The `Runtime` panel shows whether the main agent, project command, asset job, or terminal is running, plus the effective permission mode and current provider/model state. The `Journal` panel shows the latest durable audit entries and can refresh or clear the local journal file.
+
+The `Governance` panel stores workspace-level tool rules under `assets/generated/leetcode/governance.json`. It can disable individual tools, disable whole categories, and add shell deny patterns that block matching `run_shell`, `terminal_write`, or `project_command` calls before execution.
+
+The `Memory` panel stores project goals, tasks, and decisions in `assets/generated/leetcode/memory.json`. The agent receives a compact memory summary at the start of each turn and can update memory through `memory_snapshot`, `record_project_goal`, `upsert_task`, `update_task_status`, and `record_decision`.
+
+The `Asset Library` panel indexes completed generated asset jobs into `assets/generated/leetcode/asset_library.json`. It supports filtering, favorites, tags through the agent, and exporting selected/favorite/tagged assets into an asset pack folder.
+
+The `Evals` panel runs local static checks for replay eval cases created by `create_replay_eval` and stores results in `assets/generated/leetcode/eval_results.json`. These checks validate prompt presence, expected tool names, and success criteria without calling external APIs.
+
+The `Providers` panel reports offline health for configured chat and asset providers: API key presence, selected model, registry coverage, capabilities, and issues. The agent can request the same report with `provider_health_snapshot`.
 
 ## Launch
 

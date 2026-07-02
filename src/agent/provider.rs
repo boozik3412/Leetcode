@@ -9,6 +9,7 @@ use crate::agent::openai::OpenAiClient;
 use crate::agent::routing::{friendly_provider_error, RouteCandidate};
 use crate::agent::types::{AppEvent, ToolCall};
 use crate::config::AppConfig;
+use crate::http::build_http_client;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::mpsc::Sender;
@@ -81,56 +82,60 @@ pub fn build_provider_for(
             let api_key = config.api_key_for_provider(OPENAI_PROVIDER_ID);
             if api_key.trim().is_empty() {
                 anyhow::bail!(
-                    "OpenAI API key is empty. Paste a key in the top bar, click Save, or set OPENAI_API_KEY."
+                    "API-ключ OpenAI пуст. Вставьте ключ в верхней панели, нажмите «Сохранить» или задайте OPENAI_API_KEY."
                 );
             }
 
             Ok(Box::new(OpenAiClient::new(
                 api_key,
                 model.trim().to_string(),
+                build_http_client(config)?,
             )))
         }
         ANTHROPIC_PROVIDER_ID => {
             let api_key = config.api_key_for_provider(ANTHROPIC_PROVIDER_ID);
             if api_key.trim().is_empty() {
                 anyhow::bail!(
-                    "Anthropic API key is empty. Select Claude, paste a key, click Save, or set ANTHROPIC_API_KEY."
+                    "API-ключ Anthropic пуст. Выберите Claude, вставьте ключ, нажмите «Сохранить» или задайте ANTHROPIC_API_KEY."
                 );
             }
 
             Ok(Box::new(AnthropicClient::new(
                 api_key,
                 model.trim().to_string(),
+                build_http_client(config)?,
             )))
         }
         DEEPSEEK_PROVIDER_ID => {
             let api_key = config.api_key_for_provider(DEEPSEEK_PROVIDER_ID);
             if api_key.trim().is_empty() {
                 anyhow::bail!(
-                    "DeepSeek API key is empty. Select DeepSeek, paste a key, click Save, or set DEEPSEEK_API_KEY."
+                    "API-ключ DeepSeek пуст. Выберите DeepSeek, вставьте ключ, нажмите «Сохранить» или задайте DEEPSEEK_API_KEY."
                 );
             }
 
             Ok(Box::new(DeepSeekClient::new(
                 api_key,
                 model.trim().to_string(),
+                build_http_client(config)?,
             )))
         }
         GEMINI_PROVIDER_ID => {
             let api_key = config.api_key_for_provider(GEMINI_PROVIDER_ID);
             if api_key.trim().is_empty() {
                 anyhow::bail!(
-                    "Gemini API key is empty. Select Gemini, paste a key, click Save, or set GEMINI_API_KEY."
+                    "API-ключ Gemini пуст. Выберите Gemini, вставьте ключ, нажмите «Сохранить» или задайте GEMINI_API_KEY."
                 );
             }
 
             Ok(Box::new(GeminiClient::new(
                 api_key,
                 model.trim().to_string(),
+                build_http_client(config)?,
             )))
         }
         unsupported => anyhow::bail!(
-            "Provider '{}' is not implemented yet. Current implemented provider: {}.",
+            "Провайдер '{}' пока не реализован. Текущий реализованный провайдер: {}.",
             unsupported,
             provider_name(OPENAI_PROVIDER_ID)
         ),

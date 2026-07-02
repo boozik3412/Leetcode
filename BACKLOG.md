@@ -73,6 +73,39 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Preserve backward compatibility for previous Safe/Normal/Strict/Custom saved configs.
 - Done: Show the effective permission matrix in the Runtime panel.
 
+## Stage 8 - Tool Governance Center
+
+- Done: Add a tool registry with category, risk, and description metadata.
+- Done: Add workspace-level governance config for disabled tools, disabled categories, and shell deny patterns.
+- Done: Enforce governance before every agent tool execution.
+- Done: Add a Governance UI panel and agent-callable governance tools.
+
+## Stage 9 - Project Memory / Task Board
+
+- Done: Add persistent project memory under `assets/generated/leetcode/memory.json`.
+- Done: Add goals, tasks, decisions, and prompt-time memory summaries.
+- Done: Add a Memory UI panel for quick goal/task/decision capture.
+- Done: Expose memory snapshot and update tools to the agent.
+
+## Stage 10 - Asset Library Manager
+
+- Done: Add an asset library index over generated asset jobs.
+- Done: Support tags, favorites, notes, source job metadata, and export packs.
+- Done: Add an Asset Library UI panel with filtering and favorite toggles.
+- Done: Expose asset library snapshot/tag/favorite/export tools to the agent.
+
+## Stage 11 - Validation & Evals
+
+- Done: Add static replay eval runner over existing orchestration eval cases.
+- Done: Persist eval run results under `assets/generated/leetcode/eval_results.json`.
+- Done: Add an Evals UI panel and agent-callable eval snapshot/run tools.
+
+## Stage 12 - Model/Provider Health Panel
+
+- Done: Add offline provider health reporting for chat and asset providers.
+- Done: Check configured keys, selected models, registry coverage, and provider issues.
+- Done: Add a Providers UI panel and agent-callable provider health snapshot.
+
 ## Ongoing Quality Bar
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

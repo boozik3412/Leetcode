@@ -125,6 +125,22 @@ pub enum ToolAction {
     MouseClick,
     TypeText,
     Hotkey,
+    GovernanceSnapshot,
+    SetToolEnabled,
+    SetCategoryEnabled,
+    AddShellDenyPattern,
+    MemorySnapshot,
+    UpsertTask,
+    UpdateTaskStatus,
+    RecordDecision,
+    RecordProjectGoal,
+    AssetLibrarySnapshot,
+    TagAsset,
+    FavoriteAsset,
+    ExportAssetPack,
+    RunReplayEval,
+    EvalSnapshot,
+    ProviderHealthSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -150,7 +166,8 @@ impl ToolResult {
 
     pub fn as_model_output(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
-            "{\"ok\":false,\"output\":\"failed to serialize tool result\"}".to_string()
+            "{\"ok\":false,\"output\":\"не удалось сериализовать результат инструмента\"}"
+                .to_string()
         })
     }
 }
@@ -362,5 +379,48 @@ mod tests {
         assert!(matches!(upscale.action, ToolAction::UpscaleAsset));
         assert!(matches!(export.action, ToolAction::ExportAsset));
         assert!(matches!(attach.action, ToolAction::AttachAsset));
+    }
+
+    #[test]
+    fn parses_governance_memory_eval_and_health_actions() {
+        for (json, expected) in [
+            (
+                r#"{"action":"governance_snapshot","args":{}}"#,
+                "governance",
+            ),
+            (
+                r#"{"action":"set_tool_enabled","args":{"tool":"run_shell","enabled":false}}"#,
+                "governance",
+            ),
+            (r#"{"action":"memory_snapshot","args":{}}"#, "memory"),
+            (
+                r#"{"action":"upsert_task","args":{"title":"Ship MVP"}}"#,
+                "memory",
+            ),
+            (r#"{"action":"asset_library_snapshot","args":{}}"#, "assets"),
+            (r#"{"action":"run_replay_eval","args":{}}"#, "evals"),
+            (
+                r#"{"action":"provider_health_snapshot","args":{}}"#,
+                "providers",
+            ),
+        ] {
+            let request = serde_json::from_str::<ActRequest>(json).expect(expected);
+            match expected {
+                "governance" => assert!(matches!(
+                    request.action,
+                    ToolAction::GovernanceSnapshot | ToolAction::SetToolEnabled
+                )),
+                "memory" => assert!(matches!(
+                    request.action,
+                    ToolAction::MemorySnapshot | ToolAction::UpsertTask
+                )),
+                "assets" => assert!(matches!(request.action, ToolAction::AssetLibrarySnapshot)),
+                "evals" => assert!(matches!(request.action, ToolAction::RunReplayEval)),
+                "providers" => {
+                    assert!(matches!(request.action, ToolAction::ProviderHealthSnapshot))
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }

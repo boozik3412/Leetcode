@@ -34,7 +34,7 @@ pub async fn run_shell(
         Err(err) => return ToolResult::error(err.to_string()),
     };
     if !cwd.is_dir() {
-        return ToolResult::error("run_shell cwd must be a directory");
+        return ToolResult::error("cwd для run_shell должен быть папкой");
     }
 
     let needs_approval = policy.require_shell_for(&args.cmd);
@@ -42,11 +42,11 @@ pub async fn run_shell(
         && !request_approval(
             &events,
             &approvals,
-            format!("Run shell command in {}", cwd.display()),
+            format!("Запустить shell-команду в {}", cwd.display()),
             args.cmd.clone(),
         )
     {
-        return ToolResult::error("run_shell denied by user");
+        return ToolResult::error("run_shell отклонён пользователем");
     }
 
     let (mut command, cleanup_path) = match shell_command(&args.cmd, args.shell.as_deref()) {
@@ -91,13 +91,13 @@ pub async fn run_shell(
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill().await;
             cleanup_temp_script(&cleanup_path);
-            return ToolResult::error("command cancelled");
+            return ToolResult::error("команда отменена");
         }
         if started.elapsed() > timeout {
             let _ = child.kill().await;
             cleanup_temp_script(&cleanup_path);
             return ToolResult::error(format!(
-                "command timed out after {} seconds",
+                "команда превысила таймаут {} сек.",
                 timeout.as_secs()
             ));
         }
@@ -122,13 +122,13 @@ pub async fn run_shell(
     let code = status
         .code()
         .map(|code| code.to_string())
-        .unwrap_or_else(|| "terminated".to_string());
+        .unwrap_or_else(|| "завершён сигналом".to_string());
     if output.trim().is_empty() {
-        output = "(empty)".to_string();
+        output = "(пусто)".to_string();
     }
 
     cleanup_temp_script(&cleanup_path);
-    ToolResult::ok(format!("exit code: {code}\n{output}"))
+    ToolResult::ok(format!("код выхода: {code}\n{output}"))
 }
 
 async fn read_stream<R>(

@@ -54,7 +54,7 @@ pub fn start_terminal_session(
 ) -> anyhow::Result<TerminalSnapshot> {
     let cwd = workspace.resolve_existing(cwd.unwrap_or("."))?;
     if !cwd.is_dir() {
-        anyhow::bail!("terminal_start cwd must be a directory");
+        anyhow::bail!("cwd для terminal_start должен быть папкой");
     }
     let shell = shell.unwrap_or(default_shell()).to_ascii_lowercase();
     let mut manager = terminal_manager()
@@ -104,7 +104,7 @@ impl TerminalManager {
         if let Some(session) = &mut self.session {
             session.refresh_exit();
             if session.is_running() {
-                anyhow::bail!("terminal session is already running");
+                anyhow::bail!("терминальная сессия уже запущена");
             }
         }
 
@@ -112,7 +112,7 @@ impl TerminalManager {
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| anyhow::anyhow!("terminal stdin was not captured"))?;
+            .ok_or_else(|| anyhow::anyhow!("stdin терминала не был захвачен"))?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let output = Arc::new(Mutex::new(VecDeque::new()));
@@ -139,7 +139,7 @@ impl TerminalManager {
         session.push_line(
             "system",
             format!(
-                "terminal started: {} in {}",
+                "терминал запущен: {} в {}",
                 session.shell,
                 session.cwd.display()
             ),
@@ -150,11 +150,11 @@ impl TerminalManager {
 
     fn write_input(&mut self, input: &str, enter: bool) -> anyhow::Result<()> {
         let Some(session) = &mut self.session else {
-            anyhow::bail!("terminal session is not running");
+            anyhow::bail!("терминальная сессия не запущена");
         };
         session.refresh_exit();
         if !session.is_running() {
-            anyhow::bail!("terminal session has exited");
+            anyhow::bail!("терминальная сессия уже завершилась");
         }
         session.stdin.write_all(input.as_bytes())?;
         if enter {
@@ -174,13 +174,13 @@ impl TerminalManager {
 
     fn stop(&mut self) -> anyhow::Result<()> {
         let Some(session) = &mut self.session else {
-            anyhow::bail!("terminal session is not running");
+            anyhow::bail!("терминальная сессия не запущена");
         };
         session.refresh_exit();
         if session.is_running() {
             session.child.kill()?;
-            session.exit_status = Some("killed".to_string());
-            session.push_line("system", "terminal killed");
+            session.exit_status = Some("остановлен принудительно".to_string());
+            session.push_line("system", "терминал остановлен принудительно");
         }
         Ok(())
     }
@@ -190,7 +190,7 @@ impl TerminalManager {
             if let Ok(mut output) = session.output.lock() {
                 output.clear();
             }
-            session.push_line("system", "terminal output cleared");
+            session.push_line("system", "вывод терминала очищен");
         }
     }
 
@@ -201,7 +201,7 @@ impl TerminalManager {
                 session_id: None,
                 shell: None,
                 cwd: None,
-                status: "not started".to_string(),
+                status: "не запущен".to_string(),
                 next_seq: 1,
                 lines: Vec::new(),
             };
@@ -253,7 +253,7 @@ impl TerminalSession {
             }
             Ok(None) => {}
             Err(err) => {
-                let status = format!("status check failed: {err}");
+                let status = format!("status check ошибка: {err}");
                 self.exit_status = Some(status.clone());
                 self.push_line("system", status);
             }
@@ -286,7 +286,7 @@ fn spawn_shell(shell: &str, cwd: &Path) -> anyhow::Result<Child> {
                 .arg("Bypass");
             command
         }
-        unsupported => anyhow::bail!("unsupported terminal shell: {unsupported}"),
+        unsupported => anyhow::bail!("неподдерживаемая оболочка терминала: {unsupported}"),
     };
 
     command
@@ -319,7 +319,7 @@ fn spawn_output_reader<R>(
                     }
                 }
                 Err(err) => {
-                    push_line(&output, &next_seq, label, format!("reader error: {err}"));
+                    push_line(&output, &next_seq, label, format!("ошибка чтения: {err}"));
                     break;
                 }
             }
@@ -386,7 +386,7 @@ mod tests {
         let snapshot = manager.snapshot(Some(10), None);
 
         assert!(!snapshot.running);
-        assert_eq!(snapshot.status, "not started");
+        assert_eq!(snapshot.status, "не запущен");
         assert!(snapshot.lines.is_empty());
     }
 }

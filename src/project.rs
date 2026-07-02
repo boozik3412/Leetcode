@@ -86,20 +86,20 @@ pub fn detect_project_profiles(workspace: &Workspace) -> Vec<ProjectProfile> {
             name: workspace.display_name(),
             markers: vec!["project.godot".to_string()],
             commands: vec![
-                ProjectCommand::new("run", "Run", "godot --path .", "Run the Godot project"),
+                ProjectCommand::new("run", "Запуск", "godot --path .", "Запустить Godot-проект"),
                 ProjectCommand::new(
                     "editor",
-                    "Editor",
+                    "Редактор",
                     "godot --path . --editor",
-                    "Open the Godot editor",
+                    "Открыть редактор Godot",
                 ),
             ],
             previews: vec![ProjectPreviewHook::new(
                 "godot-editor",
-                "Godot Editor",
+                "Редактор Godot",
                 None,
                 Some("editor".to_string()),
-                "Open the Godot editor for local preview/playtesting",
+                "Открыть редактор Godot для локального предпросмотра/плейтеста",
             )],
         });
     }
@@ -132,16 +132,16 @@ pub fn detect_project_profiles(workspace: &Workspace) -> Vec<ProjectProfile> {
             markers: vec![uproject_name.clone()],
             commands: vec![ProjectCommand::new(
                 "editor",
-                "Editor",
+                "Редактор",
                 format!("UnrealEditor \"{uproject_name}\""),
-                "Open the Unreal project in the editor",
+                "Открыть Unreal-проект в редакторе",
             )],
             previews: vec![ProjectPreviewHook::new(
                 "unreal-editor",
-                "Unreal Editor",
+                "Редактор Unreal",
                 None,
                 Some("editor".to_string()),
-                "Open the Unreal editor for local preview/playtesting",
+                "Открыть редактор Unreal для локального предпросмотра/плейтеста",
             )],
         });
     }
@@ -203,14 +203,14 @@ pub fn find_project_preview(
 
 pub fn describe_project_commands(profiles: &[ProjectProfile]) -> String {
     if profiles.is_empty() {
-        return "No project profiles detected".to_string();
+        return "Профили проекта не обнаружены".to_string();
     }
 
     let mut lines = Vec::new();
     for profile in profiles {
         if profile.commands.is_empty() {
             lines.push(format!(
-                "{} {}: no quick commands registered",
+                "{} {}: быстрые команды не зарегистрированы",
                 profile.kind, profile.name
             ));
             continue;
@@ -230,25 +230,30 @@ fn detect_rust_profile(root: &Path) -> ProjectProfile {
     let name = fs::read_to_string(root.join("Cargo.toml"))
         .ok()
         .and_then(|toml| package_name_from_cargo_toml(&toml))
-        .unwrap_or_else(|| "Rust project".to_string());
+        .unwrap_or_else(|| "Rust-проект".to_string());
     let mut commands = vec![
-        ProjectCommand::new("check", "Check", "cargo check", "Check Rust compilation"),
-        ProjectCommand::new("test", "Test", "cargo test", "Run Rust tests"),
-        ProjectCommand::new("run", "Run", "cargo run", "Run the Rust app"),
-        ProjectCommand::new("build", "Build", "cargo build", "Build debug binary"),
+        ProjectCommand::new(
+            "check",
+            "Проверка",
+            "cargo check",
+            "Проверить компиляцию Rust",
+        ),
+        ProjectCommand::new("test", "Тесты", "cargo test", "Запустить Rust-тесты"),
+        ProjectCommand::new("run", "Запуск", "cargo run", "Запустить Rust-приложение"),
+        ProjectCommand::new("build", "Сборка", "cargo build", "Собрать debug-бинарник"),
         ProjectCommand::new(
             "release",
-            "Release",
+            "Релиз",
             "cargo build --release",
-            "Build release binary",
+            "Собрать release-бинарник",
         ),
     ];
     if root.join("Trunk.toml").is_file() || root.join("index.html").is_file() {
         commands.push(ProjectCommand::new(
             "serve",
-            "Serve",
+            "Сервер",
             "trunk serve",
-            "Serve a Rust/WASM app with Trunk",
+            "Запустить Rust/WASM-приложение через Trunk",
         ));
     }
 
@@ -296,7 +301,7 @@ fn detect_node_profile(root: &Path) -> ProjectProfile {
         .as_ref()
         .and_then(|value| value.get("name"))
         .and_then(Value::as_str)
-        .unwrap_or("Node project")
+        .unwrap_or("Node-проект")
         .to_string();
     let scripts = package
         .as_ref()
@@ -321,9 +326,9 @@ fn detect_node_profile(root: &Path) -> ProjectProfile {
                     &mut commands,
                     ProjectCommand::new(
                         id,
-                        title_case(id),
+                        script_label(id),
                         format!("{runner} run {id}"),
-                        format!("Run package.json script '{id}'"),
+                        format!("Запустить script из package.json: '{id}'"),
                     ),
                 );
             }
@@ -335,9 +340,9 @@ fn detect_node_profile(root: &Path) -> ProjectProfile {
                     &mut commands,
                     ProjectCommand::new(
                         id,
-                        title_case(id),
+                        script_label(id),
                         format!("{runner} run {id}"),
-                        format!("Run package.json script '{id}'"),
+                        format!("Запустить script из package.json: '{id}'"),
                     ),
                 );
             }
@@ -372,30 +377,30 @@ fn detect_python_profile(root: &Path) -> ProjectProfile {
 
     let mut commands = vec![ProjectCommand::new(
         "test",
-        "Test",
+        "Тесты",
         "python -m pytest",
-        "Run Python tests with pytest",
+        "Запустить Python-тесты через pytest",
     )];
     if root.join("main.py").is_file() {
         commands.push(ProjectCommand::new(
             "run",
-            "Run",
+            "Запуск",
             "python main.py",
-            "Run main.py",
+            "Запустить main.py",
         ));
     }
     if root.join("requirements.txt").is_file() {
         commands.push(ProjectCommand::new(
             "install",
-            "Install",
+            "Установить",
             "python -m pip install -r requirements.txt",
-            "Install Python dependencies",
+            "Установить Python-зависимости",
         ));
     }
 
     ProjectProfile {
         kind: "Python".to_string(),
-        name: package_name_from_pyproject(root).unwrap_or_else(|| "Python project".to_string()),
+        name: package_name_from_pyproject(root).unwrap_or_else(|| "Python-проект".to_string()),
         markers,
         commands,
         previews: Vec::new(),
@@ -474,7 +479,7 @@ fn rust_preview_hooks(root: &Path) -> Vec<ProjectPreviewHook> {
             "Trunk 8080",
             Some("http://localhost:8080".to_string()),
             Some("serve".to_string()),
-            "Open a Trunk-served Rust/WASM app preview",
+            "Открыть предпросмотр Rust/WASM-приложения через Trunk",
         )]
     } else {
         Vec::new()
@@ -498,28 +503,28 @@ fn node_preview_hooks(
         };
         hooks.push(ProjectPreviewHook::new(
             "dev-server",
-            "Dev URL",
+            "URL разработки",
             Some(url.to_string()),
             command_id_if_present(commands, "dev"),
-            "Open the local development server URL",
+            "Открыть URL локального сервера разработки",
         ));
     }
     if has_script(scripts, "preview") {
         hooks.push(ProjectPreviewHook::new(
             "preview-server",
-            "Preview URL",
+            "URL предпросмотра",
             Some("http://localhost:4173".to_string()),
             command_id_if_present(commands, "preview"),
-            "Open the local production preview URL",
+            "Открыть URL локального предпросмотра production-сборки",
         ));
     }
     if has_script(scripts, "start") && !hooks.iter().any(|hook| hook.id == "dev-server") {
         hooks.push(ProjectPreviewHook::new(
             "start-server",
-            "Start URL",
+            "URL запуска",
             Some("http://localhost:3000".to_string()),
             command_id_if_present(commands, "start"),
-            "Open the common local app server URL",
+            "Открыть стандартный URL локального сервера приложения",
         ));
     }
     hooks
@@ -573,11 +578,25 @@ fn push_unique_command(commands: &mut Vec<ProjectCommand>, command: ProjectComma
     }
 }
 
+fn script_label(id: &str) -> String {
+    match id {
+        "dev" => "Dev".to_string(),
+        "start" => "Старт".to_string(),
+        "build" => "Сборка".to_string(),
+        "test" => "Тесты".to_string(),
+        "lint" => "Линт".to_string(),
+        "preview" => "Предпросмотр".to_string(),
+        "format" => "Формат".to_string(),
+        "typecheck" => "Типы".to_string(),
+        _ => title_case(id),
+    }
+}
+
 fn title_case(id: &str) -> String {
     let mut chars = id.chars();
     match chars.next() {
         Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-        None => "Run".to_string(),
+        None => "Запуск".to_string(),
     }
 }
 

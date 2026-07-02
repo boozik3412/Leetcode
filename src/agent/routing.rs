@@ -30,14 +30,14 @@ pub struct RouteCandidate {
 
 pub fn route_labels() -> &'static [(&'static str, &'static str)] {
     &[
-        (ROUTE_AUTO, "Auto"),
-        ("coding", "Coding"),
-        ("planning", "Planning"),
-        ("cheap_fast", "Fast"),
-        ("vision", "Vision"),
-        ("image", "Image"),
-        ("audio", "Audio"),
-        ("video", "Video"),
+        (ROUTE_AUTO, "Авто"),
+        ("coding", "Код"),
+        ("planning", "План"),
+        ("cheap_fast", "Быстро"),
+        ("vision", "Зрение"),
+        ("image", "Изображения"),
+        ("audio", "Аудио"),
+        ("video", "Видео"),
         ("realtime", "Realtime"),
     ]
 }
@@ -72,13 +72,13 @@ pub fn route_id(task: TaskRoute) -> &'static str {
 
 pub fn route_name(task: TaskRoute) -> &'static str {
     match task {
-        TaskRoute::Coding => "Coding",
-        TaskRoute::Planning => "Planning",
-        TaskRoute::CheapFast => "Fast",
-        TaskRoute::Vision => "Vision",
-        TaskRoute::Image => "Image",
-        TaskRoute::Audio => "Audio",
-        TaskRoute::Video => "Video",
+        TaskRoute::Coding => "Код",
+        TaskRoute::Planning => "План",
+        TaskRoute::CheapFast => "Быстро",
+        TaskRoute::Vision => "Зрение",
+        TaskRoute::Image => "Изображения",
+        TaskRoute::Audio => "Аудио",
+        TaskRoute::Video => "Видео",
         TaskRoute::Realtime => "Realtime",
     }
 }
@@ -134,7 +134,7 @@ pub fn route_candidates(config: &AppConfig, task: TaskRoute) -> Vec<RouteCandida
             provider_id: active_provider.to_string(),
             model_id: active_model,
             task,
-            reason: format!("selected {} model", provider_name(active_provider)),
+            reason: format!("выбранная модель {}", provider_name(active_provider)),
         });
     }
 
@@ -152,9 +152,9 @@ pub fn route_candidates(config: &AppConfig, task: TaskRoute) -> Vec<RouteCandida
             model_id: model.id.to_string(),
             task,
             reason: format!(
-                "{} fallback with {:?}",
+                "запасной маршрут {} для {}",
                 provider_name(model.provider_id),
-                task
+                route_name(task)
             ),
         });
     }
@@ -164,7 +164,7 @@ pub fn route_candidates(config: &AppConfig, task: TaskRoute) -> Vec<RouteCandida
 
 pub fn describe_route_plan(candidates: &[RouteCandidate]) -> String {
     if candidates.is_empty() {
-        return "No provider/model route is available for this task.".to_string();
+        return "Для этой задачи нет доступного маршрута провайдер/модель.".to_string();
     }
 
     candidates
@@ -218,34 +218,37 @@ pub fn provider_env_hint(provider_id: &str) -> &'static str {
 pub fn friendly_provider_error(provider_id: &str, model_id: &str, error: &anyhow::Error) -> String {
     let raw = error.to_string();
     let lower = raw.to_ascii_lowercase();
-    let hint =
-        if lower.contains("401") || lower.contains("unauthorized") || lower.contains("api key") {
-            format!(
-                "Check the saved {} key or set {}.",
-                provider_name(provider_id),
-                provider_env_hint(provider_id)
-            )
-        } else if lower.contains("404") || lower.contains("model") {
-            format!(
-                "The model '{}' may be unavailable for {}. Pick another model or use Auto routing.",
+    let hint = if lower.contains("401")
+        || lower.contains("unauthorized")
+        || lower.contains("api key")
+    {
+        format!(
+            "Проверьте сохранённый ключ {} или задайте {}.",
+            provider_name(provider_id),
+            provider_env_hint(provider_id)
+        )
+    } else if lower.contains("404") || lower.contains("model") {
+        format!(
+                "Модель '{}' может быть недоступна для {}. Выберите другую модель или используйте автомаршрутизацию.",
                 model_id,
                 provider_name(provider_id)
             )
-        } else if lower.contains("429") || lower.contains("rate") || lower.contains("quota") {
-            "Rate limit or quota was hit. Try a fallback provider/model or wait before retrying."
-                .to_string()
-        } else if lower.contains("tool") || lower.contains("function") {
-            format!(
-                "{} / {} may not support the required tool-calling pattern.",
-                provider_name(provider_id),
-                model_id
-            )
-        } else {
-            "Provider request failed. The raw API message is included for debugging.".to_string()
-        };
+    } else if lower.contains("429") || lower.contains("rate") || lower.contains("quota") {
+        "Сработал rate limit или квота. Попробуйте запасного провайдера/модель или повторите позже."
+            .to_string()
+    } else if lower.contains("tool") || lower.contains("function") {
+        format!(
+            "{} / {} может не поддерживать нужный формат вызова инструментов.",
+            provider_name(provider_id),
+            model_id
+        )
+    } else {
+        "Запрос к провайдеру не выполнен. Ниже оставлено сырое API-сообщение для диагностики."
+            .to_string()
+    };
 
     format!(
-        "{} / {} failed: {}\n{}",
+        "{} / {} не выполнен: {}\n{}",
         provider_name(provider_id),
         model_id,
         raw,
@@ -376,6 +379,15 @@ mod tests {
             require_orchestration_approval: true,
             allow_destructive_shell: false,
             task_route: ROUTE_AUTO.to_string(),
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: "http".to_string(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         let candidates = route_candidates(&config, TaskRoute::Coding);

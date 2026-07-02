@@ -37,7 +37,7 @@ pub fn open_project_preview(
             Some(hook) => Some(hook),
             None => {
                 return ToolResult::error(
-                    "No project preview hook found. Start a known dev server with project_command or provide a url.",
+                    "Preview hook проекта не найден. Запустите известный dev-сервер через project_command или передайте url.",
                 )
             }
         }
@@ -56,15 +56,15 @@ pub fn open_project_preview(
             policy.require_external_approval,
             events,
             approvals,
-            "Open project preview",
-            format!("Open URL:\n{url}"),
+            "Открыть предпросмотр проекта",
+            format!("Открыть URL:\n{url}"),
         ) {
-            return ToolResult::error("open_project_preview denied by user");
+            return ToolResult::error("open_project_preview отклонён пользователем");
         }
         return match open_url(&url) {
             Ok(()) => ToolResult::ok(
                 serde_json::to_string_pretty(&json!({ "opened_url": url }))
-                    .unwrap_or_else(|_| format!("opened {url}")),
+                    .unwrap_or_else(|_| format!("открыто {url}")),
             ),
             Err(err) => ToolResult::error(err.to_string()),
         };
@@ -77,13 +77,13 @@ pub fn open_project_preview(
                 "label": hook.label,
                 "command_id": hook.command_id,
                 "description": hook.description,
-                "next_step": "Call project_command with command_id to open this app/editor preview."
+                "next_step": "Вызовите project_command с command_id, чтобы открыть предпросмотр приложения/редактора."
             }))
-            .unwrap_or_else(|_| "preview hook found".to_string()),
+            .unwrap_or_else(|_| "preview hook найден".to_string()),
         );
     }
 
-    ToolResult::error("No preview URL or command hook found")
+    ToolResult::error("URL предпросмотра или command hook не найден")
 }
 
 #[cfg(target_os = "windows")]

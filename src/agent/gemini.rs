@@ -16,9 +16,9 @@ pub struct GeminiClient {
 }
 
 impl GeminiClient {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, client: reqwest::Client) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key,
             model,
             contents: Mutex::new(Vec::new()),
@@ -120,7 +120,7 @@ impl ModelProvider for GeminiClient {
             .json(&body)
             .send()
             .await
-            .context("Gemini request failed")?;
+            .context("запрос Gemini не выполнен")?;
 
         let status = response.status();
         let text = response.text().await.unwrap_or_default();

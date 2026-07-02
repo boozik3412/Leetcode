@@ -105,7 +105,7 @@ pub async fn generate_image_asset(
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
-        return ToolResult::error("generate_image_asset prompt is empty");
+        return ToolResult::error("prompt для generate_image_asset пустой");
     }
 
     let provider = args
@@ -134,7 +134,7 @@ pub async fn generate_image_asset(
         events,
         approvals,
         policy,
-        "Generate image asset",
+        "Сгенерировать изображение",
     )
     .await
 }
@@ -149,7 +149,7 @@ pub async fn generate_spritesheet_asset(
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
-        return ToolResult::error("generate_spritesheet_asset prompt is empty");
+        return ToolResult::error("prompt для generate_spritesheet_asset пустой");
     }
     let provider = args
         .provider
@@ -172,7 +172,7 @@ pub async fn generate_spritesheet_asset(
     let api_key = image_api_key_from_config(config, &request.provider);
     if api_key.trim().is_empty() {
         return ToolResult::error(format!(
-            "{} key is empty. Save it in the Assets panel or set {}.",
+            "{} ключ пуст. Сохраните его в панели ассетов или задайте {}.",
             image_provider_name(&request.provider),
             image_provider_env_var(&request.provider)
         ));
@@ -182,11 +182,11 @@ pub async fn generate_spritesheet_asset(
         events,
         approvals,
         format!(
-            "Generate spritesheet with {}",
+            "Сгенерировать спрайт-лист через {}",
             image_provider_name(&request.provider)
         ),
         format!(
-            "Provider: {}\nModel: {}\nGrid: {}x{}\nPrompt:\n{}",
+            "Провайдер: {}\nМодель: {}\nСетка: {}x{}\nПромпт:\n{}",
             image_provider_name(&request.provider),
             request.model,
             request.columns,
@@ -194,11 +194,13 @@ pub async fn generate_spritesheet_asset(
             request.prompt
         ),
     ) {
-        return ToolResult::error("generate_spritesheet_asset denied by user");
+        return ToolResult::error("generate_spritesheet_asset отклонён пользователем");
     }
 
     let job = AssetJob::new_spritesheet(&request);
-    finish_asset_job(run_spritesheet_job(workspace.clone(), api_key, request, job).await)
+    finish_asset_job(
+        run_spritesheet_job(workspace.clone(), api_key, config.clone(), request, job).await,
+    )
 }
 
 pub async fn generate_audio_asset(
@@ -211,7 +213,7 @@ pub async fn generate_audio_asset(
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
-        return ToolResult::error("generate_audio_asset prompt is empty");
+        return ToolResult::error("prompt для generate_audio_asset пустой");
     }
     let request = AudioAssetRequest {
         provider: OPENAI_AUDIO_PROVIDER_ID.to_string(),
@@ -226,7 +228,7 @@ pub async fn generate_audio_asset(
     let api_key = media_api_key_from_config(config, &request.provider);
     if api_key.trim().is_empty() {
         return ToolResult::error(format!(
-            "{} key is empty. Save it or set {}.",
+            "{} ключ пуст. Сохраните его или задайте {}.",
             audio_provider_name(&request.provider),
             asset_provider_env_var(&request.provider)
         ));
@@ -236,11 +238,11 @@ pub async fn generate_audio_asset(
         events,
         approvals,
         format!(
-            "Generate audio asset with {}",
+            "Сгенерировать аудио через {}",
             audio_provider_name(&request.provider)
         ),
         format!(
-            "Provider: {}\nModel: {}\nVoice: {}\nFormat: {}\n\nPrompt:\n{}",
+            "Провайдер: {}\nМодель: {}\nГолос: {}\nФормат: {}\n\nПромпт:\n{}",
             audio_provider_name(&request.provider),
             request.model,
             request.voice,
@@ -248,11 +250,11 @@ pub async fn generate_audio_asset(
             request.prompt
         ),
     ) {
-        return ToolResult::error("generate_audio_asset denied by user");
+        return ToolResult::error("generate_audio_asset отклонён пользователем");
     }
 
     let job = AssetJob::new_audio(&request);
-    finish_asset_job(run_audio_job(workspace.clone(), api_key, request, job).await)
+    finish_asset_job(run_audio_job(workspace.clone(), api_key, config.clone(), request, job).await)
 }
 
 pub async fn generate_video_asset(
@@ -265,7 +267,7 @@ pub async fn generate_video_asset(
 ) -> ToolResult {
     let prompt = args.prompt.trim().to_string();
     if prompt.is_empty() {
-        return ToolResult::error("generate_video_asset prompt is empty");
+        return ToolResult::error("prompt для generate_video_asset пустой");
     }
     let request = VideoAssetRequest {
         provider: OPENAI_VIDEO_PROVIDER_ID.to_string(),
@@ -280,7 +282,7 @@ pub async fn generate_video_asset(
     let api_key = media_api_key_from_config(config, &request.provider);
     if api_key.trim().is_empty() {
         return ToolResult::error(format!(
-            "{} key is empty. Save it or set {}.",
+            "{} ключ пуст. Сохраните его или задайте {}.",
             video_provider_name(&request.provider),
             asset_provider_env_var(&request.provider)
         ));
@@ -290,11 +292,11 @@ pub async fn generate_video_asset(
         events,
         approvals,
         format!(
-            "Generate video asset with {}",
+            "Сгенерировать видео через {}",
             video_provider_name(&request.provider)
         ),
         format!(
-            "Provider: {}\nModel: {}\nSize: {}\nSeconds: {}\n\nPrompt:\n{}",
+            "Провайдер: {}\nМодель: {}\nРазмер: {}\nСекунд: {}\n\nПромпт:\n{}",
             video_provider_name(&request.provider),
             request.model,
             request.size,
@@ -302,11 +304,11 @@ pub async fn generate_video_asset(
             request.prompt
         ),
     ) {
-        return ToolResult::error("generate_video_asset denied by user");
+        return ToolResult::error("generate_video_asset отклонён пользователем");
     }
 
     let job = AssetJob::new_video(&request);
-    finish_asset_job(run_video_job(workspace.clone(), api_key, request, job).await)
+    finish_asset_job(run_video_job(workspace.clone(), api_key, config.clone(), request, job).await)
 }
 
 pub async fn regenerate_image_asset(
@@ -318,7 +320,7 @@ pub async fn regenerate_image_asset(
     policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(job) = find_asset_job(workspace, &args.job_id) else {
-        return ToolResult::error(format!("asset job not found: {}", args.job_id));
+        return ToolResult::error(format!("задача ассета не найдена: {}", args.job_id));
     };
     let request = image_request_from_job(&job, None);
 
@@ -343,7 +345,7 @@ pub async fn vary_image_asset(
     policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(job) = find_asset_job(workspace, &args.job_id) else {
-        return ToolResult::error(format!("asset job not found: {}", args.job_id));
+        return ToolResult::error(format!("задача ассета не найдена: {}", args.job_id));
     };
     let prompt = args.prompt.unwrap_or_else(|| {
         format!(
@@ -377,7 +379,7 @@ async fn run_approved_image_request(
     let api_key = image_api_key_from_config(config, &request.provider);
     if api_key.trim().is_empty() {
         return ToolResult::error(format!(
-            "{} key is empty. Save it in the Assets panel or set {}.",
+            "{} ключ пуст. Сохраните его в панели ассетов или задайте {}.",
             image_provider_name(&request.provider),
             image_provider_env_var(&request.provider)
         ));
@@ -393,7 +395,7 @@ async fn run_approved_image_request(
             request.model
         ),
         format!(
-            "Provider: {}\nModel: {}\nAspect ratio: {}\nImage size: {}\n\nPrompt:\n{}",
+            "Провайдер: {}\nМодель: {}\nСоотношение сторон: {}\nРазмер изображения: {}\n\nПромпт:\n{}",
             image_provider_name(&request.provider),
             request.model,
             request.aspect_ratio,
@@ -402,25 +404,25 @@ async fn run_approved_image_request(
         ),
     ) {
         return ToolResult::error(format!(
-            "{} denied by user",
+            "{} отклонён пользователем",
             action_name.to_ascii_lowercase()
         ));
     }
 
     let job = AssetJob::new_image(&request);
-    let final_job = run_image_job(workspace.clone(), api_key, request, job).await;
+    let final_job = run_image_job(workspace.clone(), api_key, config.clone(), request, job).await;
 
     match final_job.status {
         AssetStatus::Done => finish_asset_job(final_job),
         AssetStatus::Failed => ToolResult::error(format!(
-            "{} failed: {}",
+            "{} ошибка: {}",
             action_name.to_ascii_lowercase(),
             final_job
                 .error
-                .unwrap_or_else(|| "unknown error".to_string())
+                .unwrap_or_else(|| "неизвестная ошибка".to_string())
         )),
         AssetStatus::Pending | AssetStatus::Running => ToolResult::error(format!(
-            "{} ended before the image job reached a final state",
+            "{} завершился до того, как задача изображения достигла финального состояния",
             action_name.to_ascii_lowercase()
         )),
     }
@@ -435,7 +437,7 @@ pub fn upscale_existing_asset(
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
-        return ToolResult::error("upscale_asset source_path is empty");
+        return ToolResult::error("source_path для upscale_asset пустой");
     }
     let scale = args.scale.unwrap_or(2).clamp(2, 4);
     if !request_approval_if(
@@ -443,9 +445,9 @@ pub fn upscale_existing_asset(
         events,
         approvals,
         format!("Upscale asset {scale}x"),
-        format!("Source:\n{source_path}\n\nScale: {scale}x"),
+        format!("Источник:\n{source_path}\n\nМасштаб: {scale}x"),
     ) {
-        return ToolResult::error("upscale_asset denied by user");
+        return ToolResult::error("upscale_asset отклонён пользователем");
     }
     match upscale_asset(workspace, source_path, scale) {
         Ok(job) => finish_asset_job(job),
@@ -462,7 +464,7 @@ pub fn export_existing_asset(
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
-        return ToolResult::error("export_asset source_path is empty");
+        return ToolResult::error("source_path для export_asset пустой");
     }
     if !request_approval_if(
         policy.require_write_approval,
@@ -470,12 +472,12 @@ pub fn export_existing_asset(
         approvals,
         "Export asset",
         format!(
-            "Source:\n{}\n\nTarget name: {}",
+            "Источник:\n{}\n\nИмя результата: {}",
             source_path,
             args.target_name.as_deref().unwrap_or("(auto)")
         ),
     ) {
-        return ToolResult::error("export_asset denied by user");
+        return ToolResult::error("export_asset отклонён пользователем");
     }
     match export_asset(workspace, source_path, args.target_name.as_deref()) {
         Ok(job) => finish_asset_job(job),
@@ -492,16 +494,16 @@ pub fn attach_asset(
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
-        return ToolResult::error("attach_asset source_path is empty");
+        return ToolResult::error("source_path для attach_asset пустой");
     }
     if !request_approval_if(
         policy.require_write_approval,
         events,
         approvals,
-        "Attach asset context",
-        format!("Attach metadata for:\n{source_path}"),
+        "Прикрепить контекст ассета",
+        format!("Прикрепить метаданные для:\n{source_path}"),
     ) {
-        return ToolResult::error("attach_asset denied by user");
+        return ToolResult::error("attach_asset отклонён пользователем");
     }
     match attach_asset_context(workspace, source_path) {
         Ok(context) => ToolResult::ok(
@@ -522,16 +524,16 @@ fn finish_asset_job(final_job: AssetJob) -> ToolResult {
                 "output_files": final_job.output_files,
                 "metadata": final_job.metadata
             }))
-            .unwrap_or_else(|_| "asset job finished".to_string()),
+            .unwrap_or_else(|_| "задача ассета завершена".to_string()),
         ),
         AssetStatus::Failed => ToolResult::error(format!(
-            "asset job failed: {}",
+            "задача ассета завершилась ошибкой: {}",
             final_job
                 .error
-                .unwrap_or_else(|| "unknown error".to_string())
+                .unwrap_or_else(|| "неизвестная ошибка".to_string())
         )),
         AssetStatus::Pending | AssetStatus::Running => {
-            ToolResult::error("asset job ended before reaching a final state")
+            ToolResult::error("задача ассета завершилась без финального состояния")
         }
     }
 }
@@ -545,7 +547,7 @@ pub fn use_asset_as_app_icon(
 ) -> ToolResult {
     let source_path = args.source_path.trim();
     if source_path.is_empty() {
-        return ToolResult::error("use_asset_as_app_icon source_path is empty");
+        return ToolResult::error("source_path для use_asset_as_app_icon пустой");
     }
     let target_path = args
         .target_path
@@ -558,11 +560,11 @@ pub fn use_asset_as_app_icon(
         Err(err) => return ToolResult::error(err.to_string()),
     };
     if !source.is_file() {
-        return ToolResult::error("use_asset_as_app_icon source_path must point to a file");
+        return ToolResult::error("source_path для use_asset_as_app_icon должен указывать на файл");
     }
     if !is_supported_image_path(&source) {
         return ToolResult::error(
-            "use_asset_as_app_icon source_path must be png, jpg, jpeg, or webp",
+            "source_path для use_asset_as_app_icon должен быть png, jpg, jpeg или webp",
         );
     }
 
@@ -570,10 +572,10 @@ pub fn use_asset_as_app_icon(
         policy.require_write_approval,
         events,
         approvals,
-        format!("Use asset as app icon: {target_path}"),
-        format!("Source:\n{source_path}\n\nTarget:\n{target_path}"),
+        format!("Использовать ассет как иконку приложения: {target_path}"),
+        format!("Источник:\n{source_path}\n\nЦель:\n{target_path}"),
     ) {
-        return ToolResult::error("use_asset_as_app_icon denied by user");
+        return ToolResult::error("use_asset_as_app_icon отклонён пользователем");
     }
 
     let target = match workspace.resolve_for_write(target_path) {
@@ -604,7 +606,7 @@ pub fn use_asset_as_app_icon(
             "target_path": target_path,
             "format": "png"
         }))
-        .unwrap_or_else(|_| format!("saved {target_path}")),
+        .unwrap_or_else(|_| format!("сохранено {target_path}")),
     )
 }
 
@@ -643,10 +645,10 @@ pub fn open_asset_folder(
         policy.require_external_approval,
         events,
         approvals,
-        "Open asset folder",
-        format!("Open or reveal:\n{}", path.display()),
+        "Открыть папку ассета",
+        format!("Открыть или показать:\n{}", path.display()),
     ) {
-        return ToolResult::error("open_asset_folder denied by user");
+        return ToolResult::error("open_asset_folder отклонён пользователем");
     }
 
     #[cfg(target_os = "windows")]
@@ -670,7 +672,7 @@ pub fn open_asset_folder(
         .map(|_| ());
 
     match result {
-        Ok(()) => ToolResult::ok(format!("opened {}", path.display())),
+        Ok(()) => ToolResult::ok(format!("открыто {}", path.display())),
         Err(err) => ToolResult::error(err.to_string()),
     }
 }
@@ -812,6 +814,15 @@ mod tests {
             require_orchestration_approval: true,
             allow_destructive_shell: false,
             task_route: "auto".to_string(),
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: "http".to_string(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         assert_eq!(
@@ -837,6 +848,15 @@ mod tests {
             require_orchestration_approval: true,
             allow_destructive_shell: false,
             task_route: "auto".to_string(),
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: "http".to_string(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         assert_eq!(

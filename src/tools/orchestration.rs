@@ -73,23 +73,23 @@ pub fn delegate_agent(
     policy: &PolicyConfig,
 ) -> ToolResult {
     let Some(role) = parse_agent_role(&args.role) else {
-        return ToolResult::error(format!("Unknown agent role: {}", args.role));
+        return ToolResult::error(format!("Неизвестная роль агента: {}", args.role));
     };
     if args.task.trim().is_empty() {
-        return ToolResult::error("delegate_agent task is empty");
+        return ToolResult::error("задача delegate_agent пустая");
     }
     if !request_approval_if(
         policy.require_orchestration_approval,
         events,
         approvals,
-        format!("Record handoff to {}", args.role),
+        format!("Записать передачу агенту {}", args.role),
         format!(
-            "Task:\n{}\n\nContext:\n{}",
+            "Задача:\n{}\n\nКонтекст:\n{}",
             args.task,
             args.context.as_deref().unwrap_or("")
         ),
     ) {
-        return ToolResult::error("delegate_agent denied by user");
+        return ToolResult::error("delegate_agent отклонён пользователем");
     }
 
     match record_handoff(
@@ -99,11 +99,11 @@ pub fn delegate_agent(
         args.task,
         args.context.unwrap_or_default(),
         args.expected_output
-            .unwrap_or_else(|| "Specialist recommendation and next actions".to_string()),
+            .unwrap_or_else(|| "Рекомендация специалиста и следующие действия".to_string()),
     ) {
         Ok(record) => ToolResult::ok(
             serde_json::to_string_pretty(&record)
-                .unwrap_or_else(|_| "handoff recorded".to_string()),
+                .unwrap_or_else(|_| "передача записана".to_string()),
         ),
         Err(err) => ToolResult::error(err.to_string()),
     }
@@ -119,10 +119,10 @@ pub async fn run_subagent(
     policy: PolicyConfig,
 ) -> ToolResult {
     let Some(role) = parse_agent_role(&args.role) else {
-        return ToolResult::error(format!("Unknown subagent role: {}", args.role));
+        return ToolResult::error(format!("Неизвестная роль субагента: {}", args.role));
     };
     if args.task.trim().is_empty() {
-        return ToolResult::error("run_subagent task is empty");
+        return ToolResult::error("задача run_subagent пустая");
     }
 
     let max_rounds = args.max_rounds.unwrap_or(4).clamp(1, 8);
@@ -130,15 +130,15 @@ pub async fn run_subagent(
         policy.require_orchestration_approval,
         &events,
         &approvals,
-        format!("Run {} subagent", args.role),
+        format!("Запустить {} субагента", args.role),
         format!(
-            "Task:\n{}\n\nContext:\n{}\n\nMax rounds: {}",
+            "Задача:\n{}\n\nКонтекст:\n{}\n\nМакс. раундов: {}",
             args.task,
             args.context.as_deref().unwrap_or(""),
             max_rounds
         ),
     ) {
-        return ToolResult::error("run_subagent denied by user");
+        return ToolResult::error("run_subagent отклонён пользователем");
     }
 
     match run_subagent_loop(
@@ -159,7 +159,7 @@ pub async fn run_subagent(
     {
         Ok(run) => ToolResult::ok(
             serde_json::to_string_pretty(&run)
-                .unwrap_or_else(|_| "subagent run finished".to_string()),
+                .unwrap_or_else(|_| "запуск субагента завершён".to_string()),
         ),
         Err(err) => ToolResult::error(err.to_string()),
     }
@@ -176,7 +176,7 @@ pub fn update_context(
         policy.require_orchestration_approval,
         events,
         approvals,
-        "Update shared workspace context",
+        "Обновить общий контекст рабочей папки",
         serde_json::to_string_pretty(&json!({
             "summary": args.summary,
             "decisions": args.decisions,
@@ -184,9 +184,9 @@ pub fn update_context(
             "important_files": args.important_files,
             "important_assets": args.important_assets
         }))
-        .unwrap_or_else(|_| "Update shared context".to_string()),
+        .unwrap_or_else(|_| "обновить общий контекст".to_string()),
     ) {
-        return ToolResult::error("update_workspace_context denied by user");
+        return ToolResult::error("update_workspace_context отклонён пользователем");
     }
 
     match update_shared_context(
@@ -202,7 +202,7 @@ pub fn update_context(
     ) {
         Ok(context) => ToolResult::ok(
             serde_json::to_string_pretty(&context)
-                .unwrap_or_else(|_| "workspace context updated".to_string()),
+                .unwrap_or_else(|_| "контекст рабочей папки обновлён".to_string()),
         ),
         Err(err) => ToolResult::error(err.to_string()),
     }
@@ -216,21 +216,21 @@ pub fn record_summary(
     policy: &PolicyConfig,
 ) -> ToolResult {
     if args.summary.trim().is_empty() {
-        return ToolResult::error("record_run_summary summary is empty");
+        return ToolResult::error("summary для record_run_summary пустой");
     }
     if !request_approval_if(
         policy.require_orchestration_approval,
         events,
         approvals,
-        "Record run summary",
+        "Записать итог запуска",
         args.summary.clone(),
     ) {
-        return ToolResult::error("record_run_summary denied by user");
+        return ToolResult::error("record_run_summary отклонён пользователем");
     }
 
     match record_run_summary(
         workspace,
-        args.title.unwrap_or_else(|| "Agent run".to_string()),
+        args.title.unwrap_or_else(|| "Запуск агента".to_string()),
         args.summary,
         args.completed,
         args.next_steps,
@@ -238,7 +238,7 @@ pub fn record_summary(
     ) {
         Ok(summary) => ToolResult::ok(
             serde_json::to_string_pretty(&summary)
-                .unwrap_or_else(|_| "run summary recorded".to_string()),
+                .unwrap_or_else(|_| "итог запуска записан".to_string()),
         ),
         Err(err) => ToolResult::error(err.to_string()),
     }
@@ -248,7 +248,7 @@ pub fn export_orchestration_trace(workspace: &Workspace) -> ToolResult {
     match export_trace(workspace) {
         Ok(path) => ToolResult::ok(
             serde_json::to_string_pretty(&json!({ "trace_path": path }))
-                .unwrap_or_else(|_| "trace exported".to_string()),
+                .unwrap_or_else(|_| "трасса экспортирована".to_string()),
         ),
         Err(err) => ToolResult::error(err.to_string()),
     }
@@ -262,16 +262,16 @@ pub fn create_eval(
     policy: &PolicyConfig,
 ) -> ToolResult {
     if args.prompt.trim().is_empty() {
-        return ToolResult::error("create_replay_eval prompt is empty");
+        return ToolResult::error("prompt для create_replay_eval пустой");
     }
     if !request_approval_if(
         policy.require_orchestration_approval,
         events,
         approvals,
-        format!("Create replay eval: {}", args.name),
+        format!("Создать replay-проверку: {}", args.name),
         args.prompt.clone(),
     ) {
-        return ToolResult::error("create_replay_eval denied by user");
+        return ToolResult::error("create_replay_eval отклонён пользователем");
     }
 
     match create_replay_eval(
@@ -283,7 +283,7 @@ pub fn create_eval(
     ) {
         Ok(eval) => ToolResult::ok(
             serde_json::to_string_pretty(&eval)
-                .unwrap_or_else(|_| "replay eval created".to_string()),
+                .unwrap_or_else(|_| "replay-проверка создана".to_string()),
         ),
         Err(err) => ToolResult::error(err.to_string()),
     }
@@ -292,6 +292,6 @@ pub fn create_eval(
 pub fn snapshot(workspace: &Workspace) -> ToolResult {
     ToolResult::ok(
         serde_json::to_string_pretty(&orchestration_snapshot(workspace))
-            .unwrap_or_else(|_| "orchestration snapshot".to_string()),
+            .unwrap_or_else(|_| "снимок оркестрации".to_string()),
     )
 }

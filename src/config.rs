@@ -30,6 +30,15 @@ pub struct AppConfig {
     pub require_orchestration_approval: bool,
     pub allow_destructive_shell: bool,
     pub task_route: String,
+    pub proxy_enabled: bool,
+    pub proxy_url: String,
+    pub proxy_use_system: bool,
+    pub proxy_scheme: String,
+    pub proxy_host: String,
+    pub proxy_port: String,
+    pub proxy_username: String,
+    pub proxy_password: String,
+    pub proxy_no_proxy: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -69,6 +78,24 @@ struct PersistedConfig {
     require_orchestration_approval: bool,
     #[serde(default)]
     allow_destructive_shell: bool,
+    #[serde(default)]
+    proxy_enabled: bool,
+    #[serde(default)]
+    proxy_url: String,
+    #[serde(default = "default_true")]
+    proxy_use_system: bool,
+    #[serde(default = "default_proxy_scheme")]
+    proxy_scheme: String,
+    #[serde(default)]
+    proxy_host: String,
+    #[serde(default)]
+    proxy_port: String,
+    #[serde(default)]
+    proxy_username: String,
+    #[serde(default)]
+    proxy_password: String,
+    #[serde(default)]
+    proxy_no_proxy: String,
 }
 
 impl Default for PersistedConfig {
@@ -88,6 +115,15 @@ impl Default for PersistedConfig {
             require_external_approval: true,
             require_orchestration_approval: true,
             allow_destructive_shell: false,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: default_proxy_scheme(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         }
     }
 }
@@ -100,6 +136,8 @@ impl AppConfig {
             .unwrap_or_default();
 
         let provider = normalize_provider(&persisted.provider);
+        let (proxy_scheme, proxy_host, proxy_port, proxy_username, proxy_password) =
+            normalized_proxy_parts(&persisted);
         let mut providers = persisted.providers;
 
         {
@@ -132,7 +170,6 @@ impl AppConfig {
 
         providers.entry(provider.clone()).or_default();
         let active_settings = providers.get(&provider).cloned().unwrap_or_default();
-
         Self {
             provider: provider.clone(),
             api_key: if active_settings.api_key.trim().is_empty() {
@@ -156,6 +193,15 @@ impl AppConfig {
             require_orchestration_approval: persisted.require_orchestration_approval,
             allow_destructive_shell: persisted.allow_destructive_shell,
             task_route: normalize_task_route(&persisted.task_route),
+            proxy_enabled: persisted.proxy_enabled,
+            proxy_url: persisted.proxy_url.trim().to_string(),
+            proxy_use_system: persisted.proxy_use_system,
+            proxy_scheme,
+            proxy_host,
+            proxy_port,
+            proxy_username,
+            proxy_password,
+            proxy_no_proxy: persisted.proxy_no_proxy.trim().to_string(),
         }
     }
 
@@ -191,6 +237,15 @@ impl AppConfig {
             require_external_approval: self.require_external_approval,
             require_orchestration_approval: self.require_orchestration_approval,
             allow_destructive_shell: self.allow_destructive_shell,
+            proxy_enabled: self.proxy_enabled,
+            proxy_url: self.manual_proxy_url().unwrap_or_default(),
+            proxy_use_system: self.proxy_use_system,
+            proxy_scheme: normalize_proxy_scheme(&self.proxy_scheme),
+            proxy_host: self.proxy_host.trim().to_string(),
+            proxy_port: self.proxy_port.trim().to_string(),
+            proxy_username: self.proxy_username.trim().to_string(),
+            proxy_password: self.proxy_password.clone(),
+            proxy_no_proxy: self.proxy_no_proxy.trim().to_string(),
         };
 
         fs::write(path, serde_json::to_string_pretty(&persisted)?)?;
@@ -388,6 +443,36 @@ impl AppConfig {
             _ => unreachable!("policy profile is normalized"),
         }
     }
+
+    pub fn normalize_proxy_settings(&mut self) {
+        self.proxy_scheme = normalize_proxy_scheme(&self.proxy_scheme);
+        self.proxy_host = self.proxy_host.trim().to_string();
+        self.proxy_port = self.proxy_port.trim().to_string();
+        self.proxy_username = self.proxy_username.trim().to_string();
+        self.proxy_no_proxy = self.proxy_no_proxy.trim().to_string();
+        self.proxy_url = self.manual_proxy_url().unwrap_or_default();
+    }
+
+    pub fn manual_proxy_url(&self) -> Option<String> {
+        if !self.proxy_host.trim().is_empty() {
+            let scheme = normalize_proxy_scheme(&self.proxy_scheme);
+            let host = self.proxy_host.trim();
+            let port = self.proxy_port.trim();
+            let authority = if port.is_empty() {
+                host.to_string()
+            } else {
+                format!("{host}:{port}")
+            };
+            return Some(format!("{scheme}://{authority}"));
+        }
+
+        let proxy_url = self.proxy_url.trim();
+        if proxy_url.is_empty() {
+            None
+        } else {
+            Some(proxy_url.to_string())
+        }
+    }
 }
 
 pub const PERMISSION_ASK: &str = "ask";
@@ -409,9 +494,9 @@ pub fn policy_profile_labels() -> &'static [(&'static str, &'static str)] {
 pub fn permission_mode_description(mode: &str) -> &'static str {
     match normalize_policy_profile(mode).as_str() {
         PERMISSION_ASK => "Запрашивать подтверждение для всех действий с эффектами.",
-        PERMISSION_AUTO => "Автоматически работать в проекте; спрашивать для платных API, desktop и внешних открытий.",
-        PERMISSION_WORK => "Автоматически менять проект и вызывать asset API; спрашивать для desktop и внешних открытий.",
-        PERMISSION_FULL => "Полный доступ: выполнять действия без подтверждений, сохраняя проверки путей workspace.",
+        PERMISSION_AUTO => "Автоматически работать в проекте; спрашивать для платных API, рабочего стола и внешних открытий.",
+        PERMISSION_WORK => "Автоматически менять проект и вызывать API ассетов; спрашивать для рабочего стола и внешних открытий.",
+        PERMISSION_FULL => "Полный доступ: выполнять действия без подтверждений, сохраняя проверки путей рабочей папки.",
         POLICY_CUSTOM => "Особая ручная комбинация разрешений.",
         _ => "Режим разрешений.",
     }
@@ -427,6 +512,10 @@ fn default_model() -> String {
 
 fn default_task_route() -> String {
     ROUTE_AUTO.to_string()
+}
+
+fn default_proxy_scheme() -> String {
+    "http".to_string()
 }
 
 fn default_policy_profile() -> String {
@@ -457,6 +546,39 @@ fn normalize_task_route(task_route: &str) -> String {
     } else {
         task_route
     }
+}
+
+pub fn normalize_proxy_scheme(proxy_scheme: &str) -> String {
+    match proxy_scheme.trim().to_ascii_lowercase().as_str() {
+        "https" => "https".to_string(),
+        "socks5" => "socks5".to_string(),
+        "socks5h" => "socks5h".to_string(),
+        _ => "http".to_string(),
+    }
+}
+
+fn normalized_proxy_parts(persisted: &PersistedConfig) -> (String, String, String, String, String) {
+    let mut scheme = normalize_proxy_scheme(&persisted.proxy_scheme);
+    let mut host = persisted.proxy_host.trim().to_string();
+    let mut port = persisted.proxy_port.trim().to_string();
+    let mut username = persisted.proxy_username.trim().to_string();
+    let mut password = persisted.proxy_password.clone();
+
+    if host.is_empty() {
+        if let Ok(url) = reqwest::Url::parse(persisted.proxy_url.trim()) {
+            scheme = normalize_proxy_scheme(url.scheme());
+            host = url.host_str().unwrap_or_default().to_string();
+            port = url.port().map(|port| port.to_string()).unwrap_or_default();
+            if !url.username().is_empty() {
+                username = url.username().to_string();
+            }
+            if let Some(url_password) = url.password() {
+                password = url_password.to_string();
+            }
+        }
+    }
+
+    (scheme, host, port, username, password)
 }
 
 fn normalize_provider(provider_id: &str) -> String {
@@ -596,6 +718,15 @@ mod tests {
             require_external_approval: true,
             require_orchestration_approval: true,
             allow_destructive_shell: false,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: default_proxy_scheme(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -628,6 +759,15 @@ mod tests {
             require_external_approval: true,
             require_orchestration_approval: true,
             allow_destructive_shell: false,
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: default_proxy_scheme(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -635,6 +775,23 @@ mod tests {
         assert!(json.contains("\"providers\""));
         assert!(json.contains("\"openai\""));
         assert!(json.contains("\"model\":\"gpt-5.4\""));
+    }
+
+    #[test]
+    fn migrates_legacy_proxy_url_into_structured_fields() {
+        let persisted = PersistedConfig {
+            proxy_enabled: true,
+            proxy_url: "socks5h://user:pass@127.0.0.1:1080".to_string(),
+            ..PersistedConfig::default()
+        };
+
+        let (scheme, host, port, username, password) = normalized_proxy_parts(&persisted);
+
+        assert_eq!(scheme, "socks5h");
+        assert_eq!(host, "127.0.0.1");
+        assert_eq!(port, "1080");
+        assert_eq!(username, "user");
+        assert_eq!(password, "pass");
     }
 
     #[test]
@@ -654,6 +811,15 @@ mod tests {
             require_orchestration_approval: true,
             allow_destructive_shell: false,
             task_route: "auto".to_string(),
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: default_proxy_scheme(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         config.select_provider(GEMINI_PROVIDER_ID);
@@ -679,6 +845,15 @@ mod tests {
             require_orchestration_approval: true,
             allow_destructive_shell: false,
             task_route: "auto".to_string(),
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: default_proxy_scheme(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         config.set_policy_profile(PERMISSION_AUTO);
@@ -707,6 +882,15 @@ mod tests {
             require_orchestration_approval: true,
             allow_destructive_shell: false,
             task_route: "auto".to_string(),
+            proxy_enabled: false,
+            proxy_url: String::new(),
+            proxy_use_system: true,
+            proxy_scheme: default_proxy_scheme(),
+            proxy_host: String::new(),
+            proxy_port: String::new(),
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_no_proxy: String::new(),
         };
 
         config.set_policy_profile(PERMISSION_FULL);

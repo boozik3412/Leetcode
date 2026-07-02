@@ -10,7 +10,14 @@ pub mod shell;
 pub mod terminal;
 
 use crate::agent::types::{ActRequest, AppEvent, ToolAction, ToolCall, ToolResult};
+use crate::asset_library::{ExportAssetPackArgs, FavoriteAssetArgs, TagAssetArgs};
 use crate::config::AppConfig;
+use crate::evals::RunReplayEvalArgs;
+use crate::governance::{AddShellDenyPatternArgs, SetCategoryEnabledArgs, SetToolEnabledArgs};
+use crate::memory::{
+    RecordDecisionArgs, RecordProjectGoalArgs, UpdateTaskStatusArgs, UpsertTaskArgs,
+};
+use crate::provider_health;
 use crate::tools::asset_generation::{
     AttachAssetArgs, ExportAssetArgs, GenerateAudioAssetArgs, GenerateImageAssetArgs,
     GenerateSpritesheetAssetArgs, GenerateVideoAssetArgs, OpenAssetFolderArgs,
@@ -27,7 +34,7 @@ use crate::tools::orchestration::{
     CreateReplayEvalArgs, DelegateAgentArgs, RunSubagentArgs, RunSummaryArgs,
     UpdateWorkspaceContextArgs,
 };
-use crate::tools::policy::{ApprovalMap, PolicyConfig};
+use crate::tools::policy::{request_approval_if, ApprovalMap, PolicyConfig};
 use crate::tools::project_commands::ProjectCommandArgs;
 use crate::tools::project_preview::OpenProjectPreviewArgs;
 use crate::tools::shell::RunShellArgs;
@@ -86,18 +93,32 @@ impl ToolDispatcher {
 
     async fn execute_inner(&self, call: &ToolCall, tool_id: &str) -> ToolResult {
         if call.name != "act" {
-            return ToolResult::error(format!("Unknown tool: {}", call.name));
+            return ToolResult::error(format!("Неизвестный инструмент: {}", call.name));
         }
 
         let request = match serde_json::from_str::<ActRequest>(&call.arguments) {
             Ok(request) => request,
-            Err(err) => return ToolResult::error(format!("Invalid act arguments: {err}")),
+            Err(err) => return ToolResult::error(format!("Некорректные аргументы act: {err}")),
         };
+        let governance_decision = crate::governance::evaluate_action(
+            self.workspace.as_ref(),
+            &request.action,
+            &request.args,
+        );
+        if !governance_decision.allowed {
+            let rendered = serde_json::to_string_pretty(&governance_decision)
+                .unwrap_or_else(|_| governance_decision.reason.clone());
+            let _ = self.events.send(AppEvent::ToolOutput {
+                id: tool_id.to_string(),
+                chunk: rendered.clone(),
+            });
+            return ToolResult::error(format!("Заблокировано правилами доступа: {rendered}"));
+        }
 
         match request.action {
             ToolAction::Screenshot => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 desktop::screenshot(workspace, &self.events, &self.approvals, &self.policy)
             }
@@ -112,7 +133,7 @@ impl ToolDispatcher {
             }
             ToolAction::DesktopStep => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<DesktopStepArgs>(request.args) {
                     Ok(args) => desktop::desktop_step(
@@ -143,7 +164,7 @@ impl ToolDispatcher {
             },
             ToolAction::ListFiles => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<ListFilesArgs>(request.args) {
                     Ok(args) => filesystem::list_files(workspace, args),
@@ -152,7 +173,7 @@ impl ToolDispatcher {
             }
             ToolAction::ReadFile => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<ReadFileArgs>(request.args) {
                     Ok(args) => filesystem::read_file(workspace, args),
@@ -161,7 +182,7 @@ impl ToolDispatcher {
             }
             ToolAction::WriteFile => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<WriteFileArgs>(request.args) {
                     Ok(args) => filesystem::write_file(
@@ -176,7 +197,7 @@ impl ToolDispatcher {
             }
             ToolAction::EditFile => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<EditFileArgs>(request.args) {
                     Ok(args) => filesystem::edit_file(
@@ -191,7 +212,7 @@ impl ToolDispatcher {
             }
             ToolAction::ApplyPatch => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<ApplyPatchArgs>(request.args) {
                     Ok(args) => filesystem::apply_patch(
@@ -206,7 +227,7 @@ impl ToolDispatcher {
             }
             ToolAction::Grep => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<GrepArgs>(request.args) {
                     Ok(args) => filesystem::grep(workspace, args),
@@ -215,7 +236,7 @@ impl ToolDispatcher {
             }
             ToolAction::ProjectCommand => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<ProjectCommandArgs>(request.args) {
                     Ok(args) => {
@@ -235,7 +256,7 @@ impl ToolDispatcher {
             }
             ToolAction::GameWorkflow => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<GameWorkflowArgs>(request.args) {
                     Ok(args) => game_workflows::create_game_workflow(
@@ -250,7 +271,7 @@ impl ToolDispatcher {
             }
             ToolAction::OpenProjectPreview => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<OpenProjectPreviewArgs>(request.args) {
                     Ok(args) => project_preview::open_project_preview(
@@ -265,7 +286,7 @@ impl ToolDispatcher {
             }
             ToolAction::RunSubagent => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<RunSubagentArgs>(request.args) {
                     Ok(args) => {
@@ -285,7 +306,7 @@ impl ToolDispatcher {
             }
             ToolAction::DelegateAgent => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<DelegateAgentArgs>(request.args) {
                     Ok(args) => orchestration::delegate_agent(
@@ -300,7 +321,7 @@ impl ToolDispatcher {
             }
             ToolAction::UpdateWorkspaceContext => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<UpdateWorkspaceContextArgs>(request.args) {
                     Ok(args) => orchestration::update_context(
@@ -315,7 +336,7 @@ impl ToolDispatcher {
             }
             ToolAction::RecordRunSummary => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<RunSummaryArgs>(request.args) {
                     Ok(args) => orchestration::record_summary(
@@ -330,13 +351,13 @@ impl ToolDispatcher {
             }
             ToolAction::ExportTrace => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 orchestration::export_orchestration_trace(workspace)
             }
             ToolAction::CreateReplayEval => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<CreateReplayEvalArgs>(request.args) {
                     Ok(args) => orchestration::create_eval(
@@ -351,13 +372,13 @@ impl ToolDispatcher {
             }
             ToolAction::OrchestrationSnapshot => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 orchestration::snapshot(workspace)
             }
             ToolAction::GenerateImageAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<GenerateImageAssetArgs>(request.args) {
                     Ok(args) => {
@@ -376,7 +397,7 @@ impl ToolDispatcher {
             }
             ToolAction::GenerateSpritesheetAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<GenerateSpritesheetAssetArgs>(request.args) {
                     Ok(args) => {
@@ -395,7 +416,7 @@ impl ToolDispatcher {
             }
             ToolAction::GenerateAudioAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<GenerateAudioAssetArgs>(request.args) {
                     Ok(args) => {
@@ -414,7 +435,7 @@ impl ToolDispatcher {
             }
             ToolAction::GenerateVideoAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<GenerateVideoAssetArgs>(request.args) {
                     Ok(args) => {
@@ -433,7 +454,7 @@ impl ToolDispatcher {
             }
             ToolAction::RegenerateImageAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<RegenerateImageAssetArgs>(request.args) {
                     Ok(args) => {
@@ -452,7 +473,7 @@ impl ToolDispatcher {
             }
             ToolAction::VaryImageAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<VaryImageAssetArgs>(request.args) {
                     Ok(args) => {
@@ -471,7 +492,7 @@ impl ToolDispatcher {
             }
             ToolAction::UpscaleAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<UpscaleAssetArgs>(request.args) {
                     Ok(args) => asset_generation::upscale_existing_asset(
@@ -486,7 +507,7 @@ impl ToolDispatcher {
             }
             ToolAction::ExportAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<ExportAssetArgs>(request.args) {
                     Ok(args) => asset_generation::export_existing_asset(
@@ -501,7 +522,7 @@ impl ToolDispatcher {
             }
             ToolAction::AttachAsset => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<AttachAssetArgs>(request.args) {
                     Ok(args) => asset_generation::attach_asset(
@@ -516,7 +537,7 @@ impl ToolDispatcher {
             }
             ToolAction::UseAssetAsAppIcon => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<UseAssetAsAppIconArgs>(request.args) {
                     Ok(args) => asset_generation::use_asset_as_app_icon(
@@ -531,7 +552,7 @@ impl ToolDispatcher {
             }
             ToolAction::OpenAssetFolder => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<OpenAssetFolderArgs>(request.args) {
                     Ok(args) => asset_generation::open_asset_folder(
@@ -546,7 +567,7 @@ impl ToolDispatcher {
             }
             ToolAction::RunShell => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<RunShellArgs>(request.args) {
                     Ok(args) => {
@@ -566,7 +587,7 @@ impl ToolDispatcher {
             }
             ToolAction::TerminalStart => {
                 let Some(workspace) = &self.workspace else {
-                    return ToolResult::error("No workspace selected");
+                    return ToolResult::error("Рабочая папка не выбрана");
                 };
                 match serde_json::from_value::<TerminalStartArgs>(request.args) {
                     Ok(args) => terminal::terminal_start(
@@ -597,7 +618,213 @@ impl ToolDispatcher {
                 terminal::terminal_stop(&self.events, &self.approvals, &self.policy)
             }
             ToolAction::TerminalClear => terminal::terminal_clear(),
+            ToolAction::GovernanceSnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                crate::governance::governance_snapshot(workspace)
+            }
+            ToolAction::SetToolEnabled => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<SetToolEnabledArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Изменить настройку инструмента", &args.tool)
+                        {
+                            return ToolResult::error("set_tool_enabled отклонён пользователем");
+                        }
+                        crate::governance::set_tool_enabled(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::SetCategoryEnabled => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<SetCategoryEnabledArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Изменить настройку категории", &args.category)
+                        {
+                            return ToolResult::error(
+                                "set_category_enabled отклонён пользователем",
+                            );
+                        }
+                        crate::governance::set_category_enabled(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::AddShellDenyPattern => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<AddShellDenyPatternArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Добавить shell-запрет", &args.pattern)
+                        {
+                            return ToolResult::error(
+                                "add_shell_deny_pattern отклонён пользователем",
+                            );
+                        }
+                        crate::governance::add_shell_deny_pattern(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::MemorySnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                crate::memory::memory_snapshot(workspace)
+            }
+            ToolAction::UpsertTask => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<UpsertTaskArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Upsert project memory task", &args.title) {
+                            return ToolResult::error("upsert_task отклонён пользователем");
+                        }
+                        crate::memory::upsert_task(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::UpdateTaskStatus => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<UpdateTaskStatusArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Update project memory task", &args.id) {
+                            return ToolResult::error("update_task_status отклонён пользователем");
+                        }
+                        crate::memory::update_task_status(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RecordDecision => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<RecordDecisionArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Record project decision", &args.title) {
+                            return ToolResult::error("record_decision отклонён пользователем");
+                        }
+                        crate::memory::record_decision(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RecordProjectGoal => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<RecordProjectGoalArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Record project goal", &args.title) {
+                            return ToolResult::error("record_project_goal отклонён пользователем");
+                        }
+                        crate::memory::record_project_goal(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::AssetLibrarySnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                crate::asset_library::asset_library_snapshot(workspace)
+            }
+            ToolAction::TagAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<TagAssetArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Добавить теги ассета", &args.path)
+                        {
+                            return ToolResult::error("tag_asset отклонён пользователем");
+                        }
+                        crate::asset_library::tag_asset(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::FavoriteAsset => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<FavoriteAssetArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Обновить избранное ассета", &args.path)
+                        {
+                            return ToolResult::error("favorite_asset отклонён пользователем");
+                        }
+                        crate::asset_library::favorite_asset(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::ExportAssetPack => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<ExportAssetPackArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write(
+                            "Экспортировать пак ассетов",
+                            "Скопировать выбранные ассеты библиотеки",
+                        ) {
+                            return ToolResult::error("export_asset_pack отклонён пользователем");
+                        }
+                        crate::asset_library::export_asset_pack(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RunReplayEval => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<RunReplayEvalArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write(
+                            "Запустить replay-проверку",
+                            "Записать результат проверки",
+                        ) {
+                            return ToolResult::error("run_replay_eval отклонён пользователем");
+                        }
+                        crate::evals::run_replay_eval(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::EvalSnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                crate::evals::eval_snapshot(workspace)
+            }
+            ToolAction::ProviderHealthSnapshot => {
+                provider_health::provider_health_snapshot(&self.config)
+            }
         }
+    }
+
+    fn approve_write(&self, summary: impl Into<String>, detail: impl Into<String>) -> bool {
+        request_approval_if(
+            self.policy.require_write_approval,
+            &self.events,
+            &self.approvals,
+            summary,
+            detail,
+        )
     }
 }
 

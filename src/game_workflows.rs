@@ -35,33 +35,33 @@ pub fn workflow_specs() -> &'static [GameWorkflowSpec] {
     &[
         GameWorkflowSpec {
             id: "prototype_mechanic",
-            label: "Prototype",
-            description: "Turn a mechanic idea into a small buildable prototype plan.",
+            label: "Прототип",
+            description: "Превратить идею механики в небольшой реализуемый план прототипа.",
         },
         GameWorkflowSpec {
             id: "generate_spritesheet",
-            label: "Spritesheet",
-            description: "Plan a character/object spritesheet with frames and prompts.",
+            label: "Спрайт-лист",
+            description: "Спланировать спрайт-лист персонажа/объекта с кадрами и промптами.",
         },
         GameWorkflowSpec {
             id: "generate_ui_sounds",
-            label: "UI Sounds",
-            description: "Plan a small UI/game sound pack.",
+            label: "UI-звуки",
+            description: "Спланировать небольшой набор UI/game-звуков.",
         },
         GameWorkflowSpec {
             id: "create_item_icons",
-            label: "Item Icons",
-            description: "Plan a cohesive item icon set.",
+            label: "Иконки",
+            description: "Спланировать целостный набор иконок предметов.",
         },
         GameWorkflowSpec {
             id: "build_vertical_slice",
-            label: "Vertical Slice",
-            description: "Plan a playable slice with systems, assets, QA, and build steps.",
+            label: "Вертикальный срез",
+            description: "Спланировать играбельный срез с системами, ассетами, QA и шагами сборки.",
         },
         GameWorkflowSpec {
             id: "run_playtest_checklist",
-            label: "Playtest",
-            description: "Create a practical playtest checklist and issue capture sheet.",
+            label: "Плейтест",
+            description: "Создать практичный playtest-чеклист и таблицу фиксации проблем.",
         },
     ]
 }
@@ -104,7 +104,7 @@ pub fn workflow_label(kind: GameWorkflowKind) -> &'static str {
         .iter()
         .find(|spec| spec.id == workflow_id(kind))
         .map(|spec| spec.label)
-        .unwrap_or("Workflow")
+        .unwrap_or("Сценарий")
 }
 
 pub fn run_game_workflow(
@@ -117,7 +117,7 @@ pub fn run_game_workflow(
         request.title.trim().to_string()
     };
     let brief = if request.brief.trim().is_empty() {
-        "No brief supplied yet. Replace this section with the gameplay or app idea.".to_string()
+        "Бриф пока не указан. Замените этот раздел идеей геймплея или приложения.".to_string()
     } else {
         request.brief.trim().to_string()
     };
@@ -142,22 +142,22 @@ pub fn run_game_workflow(
 fn render_workflow(kind: GameWorkflowKind, title: &str, brief: &str) -> String {
     match kind {
         GameWorkflowKind::PrototypeMechanic => format!(
-            "# Prototype Mechanic: {title}\n\n## Brief\n{brief}\n\n## Player Promise\n- What should the player feel in the first 30 seconds?\n\n## Core Loop\n1. Observe\n2. Decide\n3. Act\n4. Feedback\n5. Reward or reset\n\n## Minimal Prototype Scope\n- One scene or screen.\n- One controllable action.\n- One fail/success condition.\n- Placeholder art is acceptable.\n\n## Implementation Tasks\n- Define input and state model.\n- Build the smallest playable interaction.\n- Add debug UI or logs for tuning.\n- Run project check/test/build.\n\n## Acceptance Criteria\n- The mechanic can be played end to end in under two minutes.\n- Feedback is visible or audible.\n- The prototype has one obvious tuning variable.\n\n## Recommended Agent Tools\n- `project_command` with `check`, `test`, or `run`.\n- `generate_image_asset` for placeholder visuals.\n- `generate_audio_asset` for feedback sounds.\n"
+            "# Прототип механики: {title}\n\n## Бриф\n{brief}\n\n## Обещание игроку\n- Что игрок должен почувствовать за первые 30 секунд?\n\n## Основной цикл\n1. Наблюдение\n2. Решение\n3. Действие\n4. Обратная связь\n5. Награда или сброс\n\n## Минимальный scope прототипа\n- Одна сцена или экран.\n- Одно управляемое действие.\n- Одно условие провала/успеха.\n- Placeholder-арт допустим.\n\n## Задачи реализации\n- Определить модель ввода и состояния.\n- Собрать минимальное playable-взаимодействие.\n- Добавить debug UI или логи для настройки.\n- Запустить project check/test/build.\n\n## Критерии приёмки\n- Механику можно пройти end-to-end меньше чем за две минуты.\n- Обратная связь видима или слышна.\n- У прототипа есть одна очевидная переменная для настройки.\n\n## Рекомендуемые инструменты агента\n- `project_command` с `check`, `test` или `run`.\n- `generate_image_asset` для placeholder-визуалов.\n- `generate_audio_asset` для звуков обратной связи.\n"
         ),
         GameWorkflowKind::GenerateSpritesheet => format!(
-            "# Spritesheet Plan: {title}\n\n## Brief\n{brief}\n\n## Sheet Definition\n- Entity:\n- Style:\n- Grid: 4 columns x 4 rows\n- Frame size target:\n- Transparent background: yes\n\n## Animation Rows\n1. Idle\n2. Walk or move\n3. Action\n4. Hit/death/alternate\n\n## Prompt Seed\nCreate a clean game spritesheet for {title}. Keep a consistent character/object, isolated poses, readable silhouette, and a strict grid.\n\n## Recommended Agent Tools\n- `generate_spritesheet_asset` with columns/rows.\n- `export_asset` after approval.\n- `attach_asset` before follow-up variations.\n"
+            "# План спрайт-листа: {title}\n\n## Бриф\n{brief}\n\n## Определение листа\n- Сущность:\n- Стиль:\n- Сетка: 4 колонки x 4 ряда\n- Целевой размер кадра:\n- Прозрачный фон: да\n\n## Ряды анимации\n1. Idle\n2. Ходьба или движение\n3. Действие\n4. Удар/смерть/альтернатива\n\n## Стартовый промпт\nСоздай чистый игровой спрайт-лист для {title}. Сохрани консистентного персонажа/объект, изолированные позы, читаемый силуэт и строгую сетку.\n\n## Рекомендуемые инструменты агента\n- `generate_spritesheet_asset` с columns/rows.\n- `export_asset` после подтверждения.\n- `attach_asset` перед последующими вариациями.\n"
         ),
         GameWorkflowKind::GenerateUiSounds => format!(
-            "# UI Sound Pack: {title}\n\n## Brief\n{brief}\n\n## Sound List\n- Confirm/select\n- Back/cancel\n- Hover/focus\n- Error/blocked\n- Reward/success\n\n## Style Guide\n- Duration target: 0.1s to 1.0s.\n- Keep transients clean and game-readable.\n- Avoid melody unless the product needs a motif.\n\n## Naming\n- `ui_confirm.wav`\n- `ui_back.wav`\n- `ui_hover.wav`\n- `ui_error.wav`\n- `ui_success.wav`\n\n## Recommended Agent Tools\n- `generate_audio_asset` for each sound.\n- `export_asset` into the game/app asset folder.\n"
+            "# Набор UI-звуков: {title}\n\n## Бриф\n{brief}\n\n## Список звуков\n- Подтверждение/выбор\n- Назад/отмена\n- Hover/focus\n- Ошибка/блокировка\n- Награда/успех\n\n## Гайд по стилю\n- Целевая длительность: 0.1s-1.0s.\n- Держать транзиенты чистыми и читаемыми для игры.\n- Избегать мелодии, если продукту не нужен мотив.\n\n## Именование\n- `ui_confirm.wav`\n- `ui_back.wav`\n- `ui_hover.wav`\n- `ui_error.wav`\n- `ui_success.wav`\n\n## Рекомендуемые инструменты агента\n- `generate_audio_asset` для каждого звука.\n- `export_asset` в папку ассетов игры/приложения.\n"
         ),
         GameWorkflowKind::CreateItemIcons => format!(
-            "# Item Icon Set: {title}\n\n## Brief\n{brief}\n\n## Icon Set\n- Common item:\n- Rare item:\n- Consumable:\n- Key item:\n- Upgrade:\n\n## Visual Rules\n- Same camera angle and lighting.\n- Strong silhouette at 32px and 64px.\n- Background should be transparent or simple.\n- Use a consistent rarity accent system.\n\n## Prompt Seed\nCreate a cohesive set of game item icons for {title}; readable at small sizes, consistent style, centered object, no text.\n\n## Recommended Agent Tools\n- `generate_image_asset` for individual icons.\n- `vary_image_asset` for set consistency.\n- `upscale_asset` for final export.\n"
+            "# Набор иконок предметов: {title}\n\n## Бриф\n{brief}\n\n## Набор иконок\n- Обычный предмет:\n- Редкий предмет:\n- Расходник:\n- Ключевой предмет:\n- Улучшение:\n\n## Визуальные правила\n- Одинаковый угол камеры и свет.\n- Сильный силуэт на 32px и 64px.\n- Фон прозрачный или простой.\n- Единая система акцентов редкости.\n\n## Стартовый промпт\nСоздай целостный набор игровых иконок предметов для {title}; читаемые в малом размере, единый стиль, объект по центру, без текста.\n\n## Рекомендуемые инструменты агента\n- `generate_image_asset` для отдельных иконок.\n- `vary_image_asset` для консистентности набора.\n- `upscale_asset` для финального экспорта.\n"
         ),
         GameWorkflowKind::BuildVerticalSlice => format!(
-            "# Vertical Slice Plan: {title}\n\n## Brief\n{brief}\n\n## Slice Goal\n- What complete experience should this prove?\n\n## Must-Have Systems\n- Input/control\n- Core interaction\n- Progression or scoring\n- UI feedback\n- Save/reset or replay\n\n## Asset Pack\n- One hero/key object\n- One environment or screen\n- UI icons\n- 3-5 sounds\n- Optional short trailer/preview clip\n\n## Build Checklist\n- Project runs locally.\n- Main loop playable.\n- Assets integrated.\n- Basic QA pass complete.\n- Known issues captured.\n\n## Recommended Agent Tools\n- `project_command` run/build/test.\n- `generate_image_asset`, `generate_spritesheet_asset`, `generate_audio_asset`.\n- `run_game_workflow` with `run_playtest_checklist`.\n"
+            "# Вертикальный срез: {title}\n\n## Бриф\n{brief}\n\n## Цель среза\n- Какой законченный игровой опыт он должен доказать?\n\n## Обязательные системы\n- Ввод/управление\n- Основное взаимодействие\n- Прогрессия или счёт\n- UI-обратная связь\n- Сохранение, сброс или повтор\n\n## Набор ассетов\n- Один ключевой объект\n- Одно окружение или экран\n- UI-иконки\n- 3-5 звуков\n- Опциональный короткий трейлер или preview-клип\n\n## Чеклист сборки\n- Проект запускается локально.\n- Основной игровой цикл играбелен.\n- Ассеты интегрированы.\n- Базовая QA-проверка завершена.\n- Известные проблемы зафиксированы.\n\n## Рекомендуемые инструменты агента\n- `project_command` для run/build/test.\n- `generate_image_asset`, `generate_spritesheet_asset`, `generate_audio_asset`.\n- `run_game_workflow` с `run_playtest_checklist`.\n"
         ),
         GameWorkflowKind::RunPlaytestChecklist => format!(
-            "# Playtest Checklist: {title}\n\n## Brief\n{brief}\n\n## Session Setup\n- Build/version:\n- Test device:\n- Tester profile:\n- Session length:\n\n## Observe\n- First action without instruction:\n- First confusion point:\n- First moment of delight:\n- Completion/fail state:\n\n## Checklist\n- Launches cleanly.\n- Controls are discoverable.\n- Feedback is understandable.\n- No blocking bugs in core loop.\n- Performance feels acceptable.\n- Player knows what to do next.\n\n## Issue Capture\n| Severity | Area | What happened | Expected | Repro steps |\n| --- | --- | --- | --- | --- |\n|  |  |  |  |  |\n\n## Follow-Up\n- Top fix:\n- Fast polish win:\n- Next test question:\n"
+            "# Playtest-чеклист: {title}\n\n## Бриф\n{brief}\n\n## Настройка сессии\n- Build/version:\n- Тестовое устройство:\n- Профиль тестера:\n- Длительность сессии:\n\n## Наблюдение\n- Первое действие без инструкции:\n- Первая точка непонимания:\n- Первый момент удовольствия:\n- Состояние completion/fail:\n\n## Чеклист\n- Запускается чисто.\n- Управление можно обнаружить.\n- Обратная связь понятна.\n- Нет блокирующих багов в core loop.\n- Производительность ощущается приемлемой.\n- Игрок понимает, что делать дальше.\n\n## Фиксация проблем\n| Серьёзность | Область | Что произошло | Ожидалось | Шаги воспроизведения |\n| --- | --- | --- | --- | --- |\n|  |  |  |  |  |\n\n## Follow-up\n- Главный фикс:\n- Быстрый polish-win:\n- Следующий вопрос теста:\n"
         ),
     }
 }
@@ -247,6 +247,6 @@ mod tests {
         assert!(workspace
             .read_text(&result.path, 20_000)
             .unwrap()
-            .contains("Vertical Slice"));
+            .contains("Вертикальный срез"));
     }
 }

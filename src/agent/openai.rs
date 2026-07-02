@@ -30,9 +30,9 @@ impl From<ProviderInput> for ResponseInput {
 }
 
 impl OpenAiClient {
-    pub fn new(api_key: String, model: String) -> Self {
+    pub fn new(api_key: String, model: String, client: reqwest::Client) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client,
             api_key,
             model,
         }
@@ -69,7 +69,7 @@ impl OpenAiClient {
             .json(&body)
             .send()
             .await
-            .context("OpenAI request failed")?;
+            .context("запрос OpenAI не выполнен")?;
 
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
@@ -117,7 +117,7 @@ impl OpenAiClient {
             .json(&body)
             .send()
             .await
-            .context("OpenAI streaming request failed")?;
+            .context("streaming-запрос OpenAI не выполнен")?;
 
         let status = response.status();
         if !status.is_success() {
@@ -131,7 +131,7 @@ impl OpenAiClient {
         let mut emitted_text = false;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.context("OpenAI streaming chunk failed")?;
+            let chunk = chunk.context("streaming-чанк OpenAI не получен")?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(split_at) = find_sse_event_boundary(&buffer) {
@@ -803,7 +803,7 @@ pub fn act_tool_schema() -> Value {
                             "properties": {
                                 "job_id": {
                                     "type": "string",
-                                    "description": "Asset job id to regenerate."
+                                    "description": "ID задачи ассета для повторной генерации."
                                 }
                             },
                             "required": ["job_id"],
@@ -872,7 +872,7 @@ pub fn act_tool_schema() -> Value {
                             "properties": {
                                 "job_id": {
                                     "type": "string",
-                                    "description": "Asset job id to use as the base for a variation."
+                                    "description": "ID задачи ассета, которую нужно взять за основу вариации."
                                 },
                                 "prompt": {
                                     "type": "string",
@@ -899,7 +899,7 @@ pub fn act_tool_schema() -> Value {
                                 },
                                 "target_path": {
                                     "type": "string",
-                                    "description": "Optional relative target path. Defaults to assets/app-icon.png."
+                                    "description": "Необязательный относительный путь назначения. По умолчанию assets/app-icon.png."
                                 }
                             },
                             "required": ["source_path"],
@@ -922,6 +922,39 @@ pub fn act_tool_schema() -> Value {
                                 }
                             },
                             "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "governance_snapshot",
+                                "set_tool_enabled",
+                                "set_category_enabled",
+                                "add_shell_deny_pattern",
+                                "memory_snapshot",
+                                "upsert_task",
+                                "update_task_status",
+                                "record_decision",
+                                "record_project_goal",
+                                "asset_library_snapshot",
+                                "tag_asset",
+                                "favorite_asset",
+                                "export_asset_pack",
+                                "run_replay_eval",
+                                "eval_snapshot",
+                                "provider_health_snapshot"
+                            ]
+                        },
+                        "args": {
+                            "type": "object",
+                            "description": "Аргументы для действий доступа, памяти, библиотеки ассетов, проверок и статуса провайдеров.",
+                            "additionalProperties": true
                         }
                     },
                     "required": ["action", "args"],
@@ -1184,6 +1217,22 @@ pub fn gemini_act_function_declaration() -> Value {
                         "attach_asset",
                         "use_asset_as_app_icon",
                         "open_asset_folder",
+                        "governance_snapshot",
+                        "set_tool_enabled",
+                        "set_category_enabled",
+                        "add_shell_deny_pattern",
+                        "memory_snapshot",
+                        "upsert_task",
+                        "update_task_status",
+                        "record_decision",
+                        "record_project_goal",
+                        "asset_library_snapshot",
+                        "tag_asset",
+                        "favorite_asset",
+                        "export_asset_pack",
+                        "run_replay_eval",
+                        "eval_snapshot",
+                        "provider_health_snapshot",
                         "screenshot",
                         "active_window",
                         "focus_window",
@@ -1243,6 +1292,22 @@ fn act_compatible_parameters_schema() -> Value {
                     "attach_asset",
                     "use_asset_as_app_icon",
                     "open_asset_folder",
+                    "governance_snapshot",
+                    "set_tool_enabled",
+                    "set_category_enabled",
+                    "add_shell_deny_pattern",
+                    "memory_snapshot",
+                    "upsert_task",
+                    "update_task_status",
+                    "record_decision",
+                    "record_project_goal",
+                    "asset_library_snapshot",
+                    "tag_asset",
+                    "favorite_asset",
+                    "export_asset_pack",
+                    "run_replay_eval",
+                    "eval_snapshot",
+                    "provider_health_snapshot",
                     "screenshot",
                     "active_window",
                     "focus_window",
@@ -1491,6 +1556,22 @@ mod tests {
             assert!(schema.contains("vary_image_asset"));
             assert!(schema.contains("use_asset_as_app_icon"));
             assert!(schema.contains("open_asset_folder"));
+            assert!(schema.contains("governance_snapshot"));
+            assert!(schema.contains("set_tool_enabled"));
+            assert!(schema.contains("set_category_enabled"));
+            assert!(schema.contains("add_shell_deny_pattern"));
+            assert!(schema.contains("memory_snapshot"));
+            assert!(schema.contains("upsert_task"));
+            assert!(schema.contains("update_task_status"));
+            assert!(schema.contains("record_decision"));
+            assert!(schema.contains("record_project_goal"));
+            assert!(schema.contains("asset_library_snapshot"));
+            assert!(schema.contains("tag_asset"));
+            assert!(schema.contains("favorite_asset"));
+            assert!(schema.contains("export_asset_pack"));
+            assert!(schema.contains("run_replay_eval"));
+            assert!(schema.contains("eval_snapshot"));
+            assert!(schema.contains("provider_health_snapshot"));
             assert!(schema.contains("screenshot"));
             assert!(schema.contains("active_window"));
             assert!(schema.contains("focus_window"));
