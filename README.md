@@ -14,6 +14,9 @@ Minimal desktop coding agent implemented as a Rust desktop app.
 - Agent-callable asset follow-up tools: `regenerate_image_asset`, `vary_image_asset`, `use_asset_as_app_icon`, and `open_asset_folder`.
 - Agent-callable `screenshot` tool for approved desktop screenshots saved into the selected workspace.
 - Approval-gated desktop control tools: `mouse_click`, `type_text`, and `hotkey`.
+- Project profile detection for Rust, Node/package.json, React/Vite, Python, Godot, Unity, and Unreal workspaces.
+- Project panel quick commands for detected run/check/test/build/dev/lint/editor workflows.
+- Agent-callable `project_command` tool for common project lifecycle commands.
 - Project-local generated image outputs under `assets/generated/images`.
 - Streaming model text updates from OpenAI Responses API server-sent events.
 - Single exposed model tool: `act`.
@@ -24,6 +27,7 @@ Minimal desktop coding agent implemented as a Rust desktop app.
   - `edit_file`
   - `apply_patch`
   - `grep`
+  - `project_command`
   - `run_shell`
 - Approval prompts for shell and write/edit actions.
 - Patch dry-run validation with `git apply --check` before approval.
@@ -73,6 +77,8 @@ OpenAI and Gemini image generation can reuse the saved chat provider keys. Stabi
 The coding agent can also call `generate_image_asset` itself when a user asks for a visual asset. Because this can call paid external APIs, the app asks for approval before the request is sent. Existing asset jobs can be regenerated or varied from the UI and through agent tools. Generated assets can also be applied as `assets/app-icon.png` or revealed in the file explorer. Screenshots are approval-gated and are saved under `assets/generated/screenshots`.
 
 Desktop control currently supports approval-gated screenshots, mouse clicks, typed text, and keyboard shortcuts. For desktop work, the intended loop is screenshot first, then act on visible coordinates or the active window.
+
+Project profiles are detected from common root markers such as `Cargo.toml`, `package.json`, `pyproject.toml`, `project.godot`, Unity `ProjectSettings`, and `.uproject` files. The right-side `Project` panel exposes safe quick commands from those profiles, and the agent is instructed to prefer `project_command` for common check/test/run/build/dev/lint tasks before falling back to raw `run_shell`.
 
 ## Launch
 

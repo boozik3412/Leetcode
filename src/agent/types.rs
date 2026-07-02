@@ -91,6 +91,7 @@ pub enum ToolAction {
     EditFile,
     ApplyPatch,
     Grep,
+    ProjectCommand,
     RunShell,
     GenerateImageAsset,
     RegenerateImageAsset,
@@ -200,5 +201,15 @@ mod tests {
         assert!(matches!(click.action, ToolAction::MouseClick));
         assert!(matches!(typing.action, ToolAction::TypeText));
         assert!(matches!(hotkey.action, ToolAction::Hotkey));
+    }
+
+    #[test]
+    fn parses_project_command_action() {
+        let request = serde_json::from_str::<ActRequest>(
+            r#"{"action":"project_command","args":{"command":"check","profile":"rust"}}"#,
+        )
+        .expect("valid project command request");
+
+        assert!(matches!(request.action, ToolAction::ProjectCommand));
     }
 }

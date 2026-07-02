@@ -37,8 +37,10 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 
 ## Stage 4 - Game/App Project Profiles
 
-- Detect common project types: Rust, web, React/Vite, Godot, Unity, Unreal, Python, and mixed repos.
-- Add project commands for run, test, build, lint, package, and preview.
+- Done: Detect common project types: Rust, Node/package.json, React/Vite, Python, Godot, Unity, Unreal, and mixed repos.
+- Done: Add project commands for run, test, build, lint, package script, editor, preview, and release where the project exposes them.
+- Done: Add a Project panel with quick commands and streamed output through the existing tool log.
+- Done: Expose quick commands as the agent-callable `project_command` action.
 - Add game-specific flows: prototype mechanic, generate spritesheet, generate UI sounds, create item icons, build vertical slice, run playtest checklist.
 - Add browser/app preview hooks for web and game tooling where available.
 

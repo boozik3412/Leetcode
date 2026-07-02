@@ -2,6 +2,7 @@ pub mod asset_generation;
 pub mod desktop;
 pub mod filesystem;
 pub mod policy;
+pub mod project_commands;
 pub mod shell;
 
 use crate::agent::types::{ActRequest, AppEvent, ToolAction, ToolCall, ToolResult};
@@ -15,6 +16,7 @@ use crate::tools::filesystem::{
     ApplyPatchArgs, EditFileArgs, GrepArgs, ListFilesArgs, ReadFileArgs, WriteFileArgs,
 };
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
+use crate::tools::project_commands::ProjectCommandArgs;
 use crate::tools::shell::RunShellArgs;
 use crate::workspace::Workspace;
 use std::sync::atomic::AtomicBool;
@@ -168,6 +170,26 @@ impl ToolDispatcher {
                 };
                 match serde_json::from_value::<GrepArgs>(request.args) {
                     Ok(args) => filesystem::grep(workspace, args),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::ProjectCommand => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("No workspace selected");
+                };
+                match serde_json::from_value::<ProjectCommandArgs>(request.args) {
+                    Ok(args) => {
+                        project_commands::run_project_command(
+                            workspace,
+                            args,
+                            self.events.clone(),
+                            self.approvals.clone(),
+                            self.cancel.clone(),
+                            self.policy.clone(),
+                            tool_id.to_string(),
+                        )
+                        .await
+                    }
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }

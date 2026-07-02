@@ -207,7 +207,7 @@ pub fn act_tool_schema() -> Value {
     json!({
         "type": "function",
         "name": "act",
-        "description": "Execute one local workspace, terminal, or desktop action. Paths must be relative to the selected workspace. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
+        "description": "Execute one local workspace, project, terminal, or desktop action. Paths must be relative to the selected workspace. Prefer project_command for check/test/run/build when a project profile is detected. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
         "parameters": {
             "type": "object",
             "oneOf": [
@@ -313,6 +313,29 @@ pub fn act_tool_schema() -> Value {
                                 "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
                             },
                             "required": ["pattern"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["project_command"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "Project command id or label, such as check, test, run, build, dev, preview, lint, editor, release."
+                                },
+                                "profile": {
+                                    "type": "string",
+                                    "description": "Optional project kind/name filter such as rust, node, python, godot, unity, unreal."
+                                }
+                            },
+                            "required": ["command"],
                             "additionalProperties": false
                         }
                     },
@@ -557,7 +580,7 @@ pub fn act_tool_schema() -> Value {
 pub fn act_function_schema() -> Value {
     json!({
         "name": "act",
-        "description": "Execute one local workspace, terminal, or desktop action. Paths must be relative to the selected workspace. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
+        "description": "Execute one local workspace, project, terminal, or desktop action. Paths must be relative to the selected workspace. Prefer project_command for check/test/run/build when a project profile is detected. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
         "parameters": act_compatible_parameters_schema()
     })
 }
@@ -572,7 +595,7 @@ pub fn chat_completion_act_tool_schema() -> Value {
 pub fn anthropic_act_tool_schema() -> Value {
     json!({
         "name": "act",
-        "description": "Execute one local workspace, terminal, or desktop action. Paths must be relative to the selected workspace. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
+        "description": "Execute one local workspace, project, terminal, or desktop action. Paths must be relative to the selected workspace. Prefer project_command for check/test/run/build when a project profile is detected. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
         "input_schema": act_compatible_parameters_schema()
     })
 }
@@ -580,7 +603,7 @@ pub fn anthropic_act_tool_schema() -> Value {
 pub fn gemini_act_function_declaration() -> Value {
     json!({
         "name": "act",
-        "description": "Execute one local workspace, terminal, or desktop action. Paths must be relative to the selected workspace. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
+        "description": "Execute one local workspace, project, terminal, or desktop action. Paths must be relative to the selected workspace. Prefer project_command for check/test/run/build when a project profile is detected. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
         "parameters": {
             "type": "OBJECT",
             "properties": {
@@ -593,6 +616,7 @@ pub fn gemini_act_function_declaration() -> Value {
                         "edit_file",
                         "apply_patch",
                         "grep",
+                        "project_command",
                         "run_shell",
                         "generate_image_asset",
                         "regenerate_image_asset",
@@ -628,6 +652,7 @@ fn act_compatible_parameters_schema() -> Value {
                     "edit_file",
                     "apply_patch",
                     "grep",
+                    "project_command",
                     "run_shell",
                     "generate_image_asset",
                     "regenerate_image_asset",
@@ -854,6 +879,7 @@ mod tests {
 
         for schema in [openai_schema, compatible_schema, gemini_schema] {
             assert!(schema.contains("generate_image_asset"));
+            assert!(schema.contains("project_command"));
             assert!(schema.contains("regenerate_image_asset"));
             assert!(schema.contains("vary_image_asset"));
             assert!(schema.contains("use_asset_as_app_icon"));

@@ -10,7 +10,9 @@ use crate::assets::{
     OPENAI_IMAGE_PROVIDER_ID,
 };
 use crate::config::{append_journal, AppConfig};
-use crate::tools::policy::ApprovalMap;
+use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
+use crate::tools::policy::{ApprovalMap, PolicyConfig};
+use crate::tools::shell::{run_shell, RunShellArgs};
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use std::collections::HashMap;
@@ -37,6 +39,11 @@ pub struct LeetcodeApp {
     chat: Vec<ChatLine>,
     tool_log: Vec<ToolLogLine>,
     git_summary: String,
+    project_profiles: Vec<ProjectProfile>,
+    project_events_rx: Option<Receiver<AppEvent>>,
+    project_is_running: bool,
+    project_cancel: Option<Arc<AtomicBool>>,
+    project_status: String,
     asset_provider_input: String,
     asset_api_key_input: String,
     asset_model_input: String,
@@ -75,6 +82,10 @@ impl LeetcodeApp {
             .map(|workspace| workspace.ui_file_rows(600))
             .unwrap_or_default();
         let asset_jobs = workspace.as_ref().map(load_jobs).unwrap_or_default();
+        let project_profiles = workspace
+            .as_ref()
+            .map(detect_project_profiles)
+            .unwrap_or_default();
 
         let api_key_input = config.api_key.clone();
         let model_input = config.model.clone();
@@ -102,6 +113,11 @@ impl LeetcodeApp {
             )],
             tool_log: Vec::new(),
             git_summary: String::new(),
+            project_profiles,
+            project_events_rx: None,
+            project_is_running: false,
+            project_cancel: None,
+            project_status: String::new(),
             asset_provider_input,
             asset_api_key_input,
             asset_model_input,
@@ -134,6 +150,7 @@ impl LeetcodeApp {
                 self.config.last_workspace = Some(path);
                 self.workspace = Some(workspace);
                 self.refresh_file_rows();
+                self.refresh_project_profiles();
                 self.asset_jobs = self.workspace.as_ref().map(load_jobs).unwrap_or_default();
                 self.asset_previews.clear();
                 self.selected_file = None;
@@ -159,6 +176,14 @@ impl LeetcodeApp {
             .workspace
             .as_ref()
             .map(|workspace| workspace.ui_file_rows(600))
+            .unwrap_or_default();
+    }
+
+    fn refresh_project_profiles(&mut self) {
+        self.project_profiles = self
+            .workspace
+            .as_ref()
+            .map(detect_project_profiles)
             .unwrap_or_default();
     }
 
@@ -258,6 +283,83 @@ impl LeetcodeApp {
         };
 
         self.git_summary = format!("{status_text}\n\n{diff_text}");
+    }
+
+    fn start_project_command(&mut self, command: ProjectCommand) {
+        if self.project_is_running {
+            return;
+        }
+
+        let Some(workspace) = self.workspace.clone() else {
+            self.project_status = "workspace is not selected".to_string();
+            return;
+        };
+
+        self.sync_config_from_inputs();
+        self.sync_asset_provider_settings();
+        let _ = self.config.save();
+
+        let (tx, rx) = mpsc::channel();
+        let approvals = self.approvals.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let policy = PolicyConfig {
+            require_shell_approval: self.config.require_shell_approval,
+            require_write_approval: self.config.require_write_approval,
+        };
+        let tool_id = format!("project-{}", command.id);
+        let label = command.label.clone();
+        let summary = format!("{}: {}", command.label, command.command);
+        let args = RunShellArgs {
+            cmd: command.command,
+            cwd: Some(command.cwd),
+            shell: None,
+            timeout_secs: Some(command.timeout_secs),
+        };
+
+        self.project_events_rx = Some(rx);
+        self.project_is_running = true;
+        self.project_cancel = Some(cancel);
+        self.project_status = format!("running {label}");
+
+        thread::spawn(move || {
+            let _ = tx.send(AppEvent::ToolStarted {
+                id: tool_id.clone(),
+                name: "project_command".to_string(),
+                summary,
+            });
+            let result = tokio::runtime::Runtime::new()
+                .expect("failed to start tokio runtime")
+                .block_on(run_shell(
+                    &workspace,
+                    args,
+                    tx.clone(),
+                    approvals,
+                    worker_cancel,
+                    policy,
+                    tool_id.clone(),
+                ));
+            let ok = result.ok;
+            let output = result.output;
+            let _ = tx.send(AppEvent::ToolFinished {
+                id: tool_id,
+                output: output.clone(),
+            });
+            if !ok {
+                let _ = tx.send(AppEvent::Error(output));
+            }
+            let _ = tx.send(AppEvent::Done);
+        });
+    }
+
+    fn stop_project_command(&mut self) {
+        if let Some(cancel) = &self.project_cancel {
+            cancel.store(true, Ordering::SeqCst);
+        }
+        if self.pending_approval.is_some() {
+            self.answer_approval(false);
+        }
+        self.project_status = "stop requested".to_string();
     }
 
     fn start_image_asset_job(&mut self) {
@@ -714,6 +816,7 @@ impl LeetcodeApp {
                         self.asset_jobs = load_jobs(workspace);
                     }
                     self.refresh_file_rows();
+                    self.refresh_project_profiles();
                 }
                 AppEvent::ApprovalRequested {
                     id,
@@ -733,6 +836,7 @@ impl LeetcodeApp {
                     self.is_running = false;
                     self.cancel = None;
                     self.refresh_file_rows();
+                    self.refresh_project_profiles();
                     self.refresh_git_summary();
                     if self.selected_file.is_some()
                         && self.selected_file_editable
@@ -745,6 +849,72 @@ impl LeetcodeApp {
                         content: "Agent run finished".to_string(),
                     });
                 }
+            }
+        }
+    }
+
+    fn drain_project_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(rx) = &self.project_events_rx {
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            append_journal(format!(
+                "project_event\t{}",
+                compact(&format!("{event:?}"), 2_000)
+            ));
+            match event {
+                AppEvent::ToolStarted { id, name, summary } => {
+                    self.tool_log.push(ToolLogLine {
+                        title: format!("{name} {id}"),
+                        content: summary,
+                    });
+                }
+                AppEvent::ToolOutput { id, chunk } => {
+                    self.tool_log.push(ToolLogLine {
+                        title: format!("output {id}"),
+                        content: chunk,
+                    });
+                }
+                AppEvent::ToolFinished { id, output } => {
+                    self.tool_log.push(ToolLogLine {
+                        title: format!("done {id}"),
+                        content: compact(&output, 2_000),
+                    });
+                    self.project_status = "command finished".to_string();
+                    self.refresh_file_rows();
+                    self.refresh_project_profiles();
+                    self.refresh_git_summary();
+                }
+                AppEvent::ApprovalRequested {
+                    id,
+                    summary,
+                    detail,
+                } => {
+                    self.pending_approval = Some(PendingApproval {
+                        id,
+                        summary,
+                        detail,
+                    });
+                }
+                AppEvent::Error(err) => {
+                    self.project_status = format!("error: {err}");
+                    self.tool_log.push(ToolLogLine {
+                        title: "project error".to_string(),
+                        content: err,
+                    });
+                }
+                AppEvent::Done => {
+                    self.project_is_running = false;
+                    self.project_cancel = None;
+                    self.refresh_file_rows();
+                    self.refresh_project_profiles();
+                    self.refresh_git_summary();
+                }
+                AppEvent::AssistantText(_) | AppEvent::AssistantDelta(_) => {}
             }
         }
     }
@@ -955,6 +1125,8 @@ impl LeetcodeApp {
             .resizable(true)
             .default_width(380.0)
             .show(ctx, |ui| {
+                self.show_project_panel(ui);
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.heading("Git");
                     if ui.button("Обновить").clicked() {
@@ -992,6 +1164,80 @@ impl LeetcodeApp {
                         }
                     });
             });
+    }
+
+    fn show_project_panel(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Project");
+            if self.project_is_running {
+                ui.spinner();
+            }
+            if ui
+                .add_enabled(self.workspace.is_some(), egui::Button::new("Refresh"))
+                .clicked()
+            {
+                self.refresh_project_profiles();
+            }
+            if ui
+                .add_enabled(self.project_is_running, egui::Button::new("Stop"))
+                .clicked()
+            {
+                self.stop_project_command();
+            }
+        });
+
+        if !self.project_status.is_empty() {
+            ui.label(RichText::new(&self.project_status).weak());
+        }
+
+        if self.workspace.is_none() {
+            ui.label(RichText::new("No workspace selected").weak());
+            return;
+        }
+
+        if self.project_profiles.is_empty() {
+            ui.label(RichText::new("No project profile detected").weak());
+            return;
+        }
+
+        let profiles = self.project_profiles.clone();
+        for profile in profiles {
+            ui.group(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&profile.kind).strong());
+                    ui.label(RichText::new(&profile.name).weak());
+                });
+                if !profile.markers.is_empty() {
+                    ui.label(
+                        RichText::new(format!("markers: {}", profile.markers.join(", ")))
+                            .text_style(egui::TextStyle::Monospace)
+                            .weak(),
+                    );
+                }
+
+                if profile.commands.is_empty() {
+                    ui.label(RichText::new("No quick commands for this profile yet").weak());
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        for command in profile.commands {
+                            let response = ui
+                                .add_enabled(
+                                    !self.project_is_running,
+                                    egui::Button::new(&command.label),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\n{}",
+                                    command.description, command.command
+                                ));
+                            if response.clicked() {
+                                self.start_project_command(command);
+                            }
+                        }
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
     }
 
     fn show_asset_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1285,6 +1531,7 @@ impl LeetcodeApp {
 impl eframe::App for LeetcodeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        self.drain_project_events();
         self.drain_asset_events();
         self.show_top_bar(ctx);
         self.show_input_bar(ctx);
@@ -1293,7 +1540,7 @@ impl eframe::App for LeetcodeApp {
         self.show_chat_panel(ctx);
         self.show_approval_window(ctx);
 
-        if self.is_running || self.asset_is_running {
+        if self.is_running || self.project_is_running || self.asset_is_running {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }

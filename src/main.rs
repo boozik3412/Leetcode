@@ -2,6 +2,7 @@ mod agent;
 mod app;
 mod assets;
 mod config;
+mod project;
 mod tools;
 mod workspace;
 
