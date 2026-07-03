@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug)]
@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub model: String,
     pub providers: BTreeMap<String, ProviderSettings>,
     pub last_workspace: Option<PathBuf>,
+    pub projects: Vec<ProjectUiState>,
     pub policy_profile: String,
     pub require_shell_approval: bool,
     pub require_write_approval: bool,
@@ -49,6 +50,15 @@ pub struct ProviderSettings {
     pub model: String,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProjectUiState {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub expanded: bool,
+    #[serde(default)]
+    pub expanded_dirs: Vec<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedConfig {
     #[serde(default = "default_provider")]
@@ -61,6 +71,8 @@ struct PersistedConfig {
     model: String,
     #[serde(default = "default_task_route")]
     task_route: String,
+    #[serde(default)]
+    projects: Vec<ProjectUiState>,
     last_workspace: Option<PathBuf>,
     #[serde(default = "default_policy_profile")]
     policy_profile: String,
@@ -106,6 +118,7 @@ impl Default for PersistedConfig {
             providers: BTreeMap::new(),
             model: default_model(),
             task_route: default_task_route(),
+            projects: Vec::new(),
             last_workspace: None,
             policy_profile: default_policy_profile(),
             require_shell_approval: true,
@@ -170,6 +183,10 @@ impl AppConfig {
 
         providers.entry(provider.clone()).or_default();
         let active_settings = providers.get(&provider).cloned().unwrap_or_default();
+        let mut projects = normalize_project_states(persisted.projects);
+        if let Some(path) = persisted.last_workspace.clone() {
+            remember_project_state(&mut projects, path);
+        }
         Self {
             provider: provider.clone(),
             api_key: if active_settings.api_key.trim().is_empty() {
@@ -184,6 +201,7 @@ impl AppConfig {
             },
             providers,
             last_workspace: persisted.last_workspace,
+            projects,
             policy_profile: normalize_policy_profile(&persisted.policy_profile),
             require_shell_approval: persisted.require_shell_approval,
             require_write_approval: persisted.require_write_approval,
@@ -228,6 +246,7 @@ impl AppConfig {
             providers,
             model: self.model.clone(),
             task_route: normalize_task_route(&self.task_route),
+            projects: normalize_project_states(self.projects.clone()),
             last_workspace: self.last_workspace.clone(),
             policy_profile: normalize_policy_profile(&self.policy_profile),
             require_shell_approval: self.require_shell_approval,
@@ -258,6 +277,24 @@ impl AppConfig {
         } else {
             self.provider.trim()
         }
+    }
+
+    pub fn remember_project(&mut self, path: PathBuf) {
+        remember_project_state(&mut self.projects, path);
+    }
+
+    pub fn project_state(&self, path: &Path) -> Option<&ProjectUiState> {
+        let key = project_path_key(path);
+        self.projects
+            .iter()
+            .find(|project| project_path_key(&project.path) == key)
+    }
+
+    pub fn project_state_mut(&mut self, path: &Path) -> Option<&mut ProjectUiState> {
+        let key = project_path_key(path);
+        self.projects
+            .iter_mut()
+            .find(|project| project_path_key(&project.path) == key)
     }
 
     pub fn api_key_for_provider(&self, provider_id: &str) -> String {
@@ -548,6 +585,109 @@ fn normalize_task_route(task_route: &str) -> String {
     }
 }
 
+fn normalize_project_states(projects: Vec<ProjectUiState>) -> Vec<ProjectUiState> {
+    let mut normalized = Vec::new();
+    for project in projects {
+        remember_project_state_with_state(&mut normalized, project);
+    }
+    normalized
+}
+
+fn remember_project_state(projects: &mut Vec<ProjectUiState>, path: PathBuf) {
+    remember_project_state_with_state(
+        projects,
+        ProjectUiState {
+            path,
+            expanded: false,
+            expanded_dirs: Vec::new(),
+        },
+    );
+}
+
+fn remember_project_state_with_state(
+    projects: &mut Vec<ProjectUiState>,
+    mut state: ProjectUiState,
+) {
+    state.path = readable_project_path(state.path);
+    let key = project_path_key(&state.path);
+    if key.is_empty() {
+        return;
+    }
+    state.expanded_dirs = normalize_expanded_dirs(state.expanded_dirs);
+
+    if let Some(existing) = projects
+        .iter_mut()
+        .find(|project| project_path_key(&project.path) == key)
+    {
+        if project_path_string(&existing.path).starts_with("//?/")
+            || project_path_string(&existing.path).starts_with("\\\\?\\")
+        {
+            existing.path = state.path;
+        }
+        existing.expanded |= state.expanded;
+        for dir in state.expanded_dirs {
+            if !existing
+                .expanded_dirs
+                .iter()
+                .any(|existing| existing == &dir)
+            {
+                existing.expanded_dirs.push(dir);
+            }
+        }
+        return;
+    }
+
+    projects.push(state);
+}
+
+fn normalize_expanded_dirs(dirs: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for dir in dirs {
+        let dir = normalize_project_dir(&dir);
+        if dir.is_empty() || normalized.iter().any(|existing| existing == &dir) {
+            continue;
+        }
+        normalized.push(dir);
+    }
+    normalized
+}
+
+fn normalize_project_dir(dir: &str) -> String {
+    let dir = dir.trim().replace('\\', "/");
+    let dir = dir.trim_matches('/').trim();
+    if dir.is_empty() || dir == "." || dir.contains("..") {
+        String::new()
+    } else {
+        format!("{dir}/")
+    }
+}
+
+fn project_path_key(path: &Path) -> String {
+    strip_windows_extended_prefix(&path.to_string_lossy().replace('\\', "/"))
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn readable_project_path(path: PathBuf) -> PathBuf {
+    let stripped = strip_windows_extended_prefix(&path.to_string_lossy().replace('\\', "/"));
+    if stripped.len() > 3 {
+        PathBuf::from(stripped.trim_end_matches('/'))
+    } else {
+        PathBuf::from(stripped)
+    }
+}
+
+fn project_path_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn strip_windows_extended_prefix(path: &str) -> String {
+    path.strip_prefix("//?/")
+        .or_else(|| path.strip_prefix("\\\\?\\"))
+        .unwrap_or(path)
+        .to_string()
+}
+
 pub fn normalize_proxy_scheme(proxy_scheme: &str) -> String {
     match proxy_scheme.trim().to_ascii_lowercase().as_str() {
         "https" => "https".to_string(),
@@ -709,6 +849,7 @@ mod tests {
             providers: BTreeMap::new(),
             model: "gpt-5.5".to_string(),
             task_route: "auto".to_string(),
+            projects: Vec::new(),
             last_workspace: None,
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
@@ -750,6 +891,7 @@ mod tests {
             providers,
             model: "gpt-5.4".to_string(),
             task_route: "coding".to_string(),
+            projects: Vec::new(),
             last_workspace: None,
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
@@ -795,6 +937,31 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_project_navigation_state() {
+        let projects = normalize_project_states(vec![
+            ProjectUiState {
+                path: PathBuf::from("C:/Projects/Game"),
+                expanded: true,
+                expanded_dirs: vec![
+                    "src".to_string(),
+                    "src/".to_string(),
+                    "../escape".to_string(),
+                ],
+            },
+            ProjectUiState {
+                path: PathBuf::from("//?/C:/Projects/Game/"),
+                expanded: false,
+                expanded_dirs: vec!["assets/generated".to_string()],
+            },
+        ]);
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].path, PathBuf::from("C:/Projects/Game"));
+        assert!(projects[0].expanded);
+        assert_eq!(projects[0].expanded_dirs, vec!["src/", "assets/generated/"]);
+    }
+
+    #[test]
     fn selects_default_model_for_new_provider() {
         let mut config = AppConfig {
             provider: OPENAI_PROVIDER_ID.to_string(),
@@ -802,6 +969,7 @@ mod tests {
             model: "gpt-5.5".to_string(),
             providers: BTreeMap::new(),
             last_workspace: None,
+            projects: Vec::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
@@ -836,6 +1004,7 @@ mod tests {
             model: default_model_for_provider(OPENAI_PROVIDER_ID).to_string(),
             providers: BTreeMap::new(),
             last_workspace: None,
+            projects: Vec::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
@@ -873,6 +1042,7 @@ mod tests {
             model: default_model_for_provider(OPENAI_PROVIDER_ID).to_string(),
             providers: BTreeMap::new(),
             last_workspace: None,
+            projects: Vec::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,

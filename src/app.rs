@@ -17,7 +17,7 @@ use crate::assets::{
 };
 use crate::config::{
     append_journal, clear_journal, permission_mode_description, policy_profile_labels,
-    read_journal_tail, AppConfig,
+    read_journal_tail, AppConfig, ProjectUiState,
 };
 use crate::diagnostics::environment_diagnostics;
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
@@ -49,6 +49,7 @@ use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -170,6 +171,43 @@ enum RenameRowAction {
     Cancel,
 }
 
+struct ProjectNavRowResponse {
+    row: egui::Response,
+    disclosure: egui::Response,
+}
+
+impl ProjectNavRowResponse {
+    fn on_hover_text(self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            row: self.row.on_hover_text(text),
+            disclosure: self.disclosure,
+        }
+    }
+}
+
+struct FileTreeNavRowResponse {
+    row: egui::Response,
+    disclosure: Option<egui::Response>,
+}
+
+impl FileTreeNavRowResponse {
+    fn disclosure_clicked(&self) -> bool {
+        self.disclosure
+            .as_ref()
+            .map(|response| response.clicked())
+            .unwrap_or(false)
+    }
+
+    fn on_hover_text(self, text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            row: self.row.on_hover_text(text),
+            disclosure: self.disclosure,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FilePreviewTab {
     path: String,
@@ -285,11 +323,14 @@ impl LeetcodeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_app_theme(&cc.egui_ctx);
 
-        let config = AppConfig::load();
+        let mut config = AppConfig::load();
         let workspace = config
             .last_workspace
             .clone()
             .and_then(|path| Workspace::new(path).ok());
+        if let Some(workspace) = &workspace {
+            config.remember_project(workspace.root().to_path_buf());
+        }
         let file_rows = workspace
             .as_ref()
             .map(|workspace| workspace.ui_file_rows(600))
@@ -399,11 +440,17 @@ impl LeetcodeApp {
             return;
         };
 
+        let _ = self.open_workspace_path(path);
+    }
+
+    fn open_workspace_path(&mut self, path: PathBuf) -> bool {
         match Workspace::new(path.clone()) {
             Ok(workspace) => {
                 self.sync_config_from_inputs();
                 self.sync_asset_provider_settings();
-                self.config.last_workspace = Some(path);
+                let canonical_path = workspace.root().to_path_buf();
+                self.config.last_workspace = Some(canonical_path.clone());
+                self.config.remember_project(canonical_path);
                 self.provider_validation_results =
                     load_provider_validation_history(&workspace).runs;
                 self.workspace = Some(workspace);
@@ -431,10 +478,14 @@ impl LeetcodeApp {
                     .expect("agent state poisoned")
                     .reset();
                 let _ = self.config.save();
+                true
             }
-            Err(err) => self.chat.push(ChatLine::system(format!(
-                "Не удалось открыть рабочую папку: {err}"
-            ))),
+            Err(err) => {
+                self.chat.push(ChatLine::system(format!(
+                    "Не удалось открыть рабочую папку: {err}"
+                )));
+                false
+            }
         }
     }
 
@@ -460,6 +511,92 @@ impl LeetcodeApp {
             .unwrap_or_else(|| "Новый проект".to_string())
     }
 
+    fn active_project_path(&self) -> Option<PathBuf> {
+        self.workspace
+            .as_ref()
+            .map(|workspace| workspace.root().to_path_buf())
+    }
+
+    fn active_project_state(&self) -> Option<&ProjectUiState> {
+        let path = self.active_project_path()?;
+        self.config.project_state(&path)
+    }
+
+    fn active_project_state_mut(&mut self) -> Option<&mut ProjectUiState> {
+        let path = self.active_project_path()?;
+        self.config.remember_project(path.clone());
+        self.config.project_state_mut(&path)
+    }
+
+    fn project_is_active(&self, path: &Path) -> bool {
+        self.active_project_path()
+            .as_deref()
+            .is_some_and(|active| project_paths_match(active, path))
+    }
+
+    fn active_project_is_expanded(&self) -> bool {
+        self.active_project_state()
+            .map(|state| state.expanded)
+            .unwrap_or(false)
+    }
+
+    fn toggle_project_expanded(&mut self, path: &Path) {
+        self.config.remember_project(path.to_path_buf());
+        if let Some(state) = self.config.project_state_mut(path) {
+            state.expanded = !state.expanded;
+        }
+        let _ = self.config.save();
+    }
+
+    fn active_dir_is_expanded(&self, path: &str) -> bool {
+        let dir = normalize_tree_dir(path);
+        if dir.is_empty() {
+            return true;
+        }
+        self.active_project_state()
+            .map(|state| state.expanded_dirs.iter().any(|expanded| expanded == &dir))
+            .unwrap_or(false)
+    }
+
+    fn toggle_active_dir_expanded(&mut self, path: &str) {
+        let dir = normalize_tree_dir(path);
+        if dir.is_empty() {
+            return;
+        }
+        if let Some(state) = self.active_project_state_mut() {
+            if let Some(index) = state
+                .expanded_dirs
+                .iter()
+                .position(|expanded| expanded == &dir)
+            {
+                state.expanded_dirs.remove(index);
+            } else {
+                state.expanded_dirs.push(dir);
+            }
+        }
+        let _ = self.config.save();
+    }
+
+    fn visible_file_rows(&self) -> Vec<String> {
+        if !self.active_project_is_expanded() {
+            return Vec::new();
+        }
+        self.file_rows
+            .iter()
+            .filter(|row| self.file_tree_row_is_visible(row))
+            .cloned()
+            .collect()
+    }
+
+    fn file_tree_row_is_visible(&self, row: &str) -> bool {
+        if row == "..." {
+            return true;
+        }
+        file_tree_parent_dirs(row)
+            .iter()
+            .all(|parent| self.active_dir_is_expanded(parent))
+    }
+
     fn handle_file_tree_click(
         &mut self,
         path: &str,
@@ -475,7 +612,9 @@ impl LeetcodeApp {
         if double_clicked {
             self.last_file_click_path = None;
             self.last_file_click_time = 0.0;
-            if !is_dir {
+            if is_dir {
+                self.toggle_active_dir_expanded(path);
+            } else {
                 self.load_file_preview(path);
             }
             return;
@@ -632,6 +771,13 @@ impl LeetcodeApp {
                 self.selected_tree_path = Some(updated);
             }
         }
+        if let Some(state) = self.active_project_state_mut() {
+            for dir in &mut state.expanded_dirs {
+                if let Some(updated) = remap_tree_path_after_base_move(dir, old_base, new_base) {
+                    *dir = updated;
+                }
+            }
+        }
     }
 
     fn close_deleted_file_tabs(&mut self, deleted_path: &str) {
@@ -664,6 +810,11 @@ impl LeetcodeApp {
             .is_some_and(|path| path_is_same_or_child(path, deleted_base))
         {
             self.selected_file = None;
+        }
+        if let Some(state) = self.active_project_state_mut() {
+            state
+                .expanded_dirs
+                .retain(|dir| !path_is_same_or_child(file_tree_base_path(dir), deleted_base));
         }
     }
 
@@ -2506,6 +2657,338 @@ impl LeetcodeApp {
     }
 
     fn show_file_panel(&mut self, ctx: &egui::Context) {
+        let keyboard_shortcuts_enabled =
+            self.file_rename_target.is_none() && !ctx.wants_keyboard_input();
+        if keyboard_shortcuts_enabled && ctx.input(|input| input.key_pressed(egui::Key::F2)) {
+            if let Some(path) = self.selected_tree_path.clone() {
+                self.start_tree_rename(&path);
+            }
+        }
+        if keyboard_shortcuts_enabled && ctx.input(|input| input.key_pressed(egui::Key::Delete)) {
+            if let Some(path) = self.selected_tree_path.clone() {
+                self.delete_tree_path(&path);
+            }
+        }
+
+        egui::SidePanel::left("files")
+            .resizable(true)
+            .default_width(300.0)
+            .width_range(220.0..=560.0)
+            .frame(side_panel_frame())
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Проекты").strong().size(18.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Обновить").clicked() {
+                            self.refresh_file_rows();
+                        }
+                        if ui.button("Открыть").clicked() {
+                            self.choose_workspace();
+                        }
+                    });
+                });
+
+                let project_count = self
+                    .config
+                    .projects
+                    .len()
+                    .max(usize::from(self.workspace.is_some()));
+                ui.label(RichText::new(project_count_label(project_count)).weak().small());
+                ui.add_space(6.0);
+
+                let mut select_project_path: Option<PathBuf> = None;
+                let mut toggle_project_path: Option<PathBuf> = None;
+                let mut clicked_row: Option<(String, bool, bool, f64)> = None;
+                let mut toggle_dir_path: Option<String> = None;
+                let mut start_rename_path: Option<String> = None;
+                let mut duplicate_path: Option<String> = None;
+                let mut delete_path: Option<String> = None;
+                let mut move_request: Option<(String, String)> = None;
+                let mut rename_action: Option<RenameRowAction> = None;
+                let pointer_released = ui.input(|input| input.pointer.any_released());
+                let projects = self.config.projects.clone();
+                let visible_rows = self.visible_file_rows();
+                let tree_width = file_tree_content_width(&visible_rows)
+                    .max(projects.iter().map(|project| project_display_name(&project.path).chars().count() as f32 * 9.2 + 62.0).fold(190.0, f32::max));
+
+                if projects.is_empty() {
+                    let row = project_nav_row(ui, "Новый проект", "new-project", true, false, false);
+                    if row.row.clicked() {
+                        self.selected_tree_path = None;
+                    }
+                    empty_state(
+                        ui,
+                        "Проект не выбран",
+                        "Нажмите «Открыть» или кнопку «Проект» сверху, чтобы добавить рабочую папку.",
+                    );
+                } else {
+                    egui::ScrollArea::both()
+                        .id_salt("project_tree_scroll")
+                        .scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
+                        )
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_min_width(tree_width.max(ui.available_width()));
+                            for project in projects {
+                                let is_active = self.project_is_active(&project.path);
+                                let project_id = path_key(&project.path);
+                                let row = project_nav_row(
+                                    ui,
+                                    &project_display_name(&project.path),
+                                    &project_id,
+                                    is_active,
+                                    project.expanded,
+                                    self.dragged_tree_path.is_some() && is_active,
+                                )
+                                .on_hover_text(project.path.to_string_lossy().to_string());
+
+                                if row.disclosure.clicked() {
+                                    toggle_project_path = Some(project.path.clone());
+                                    if !is_active {
+                                        select_project_path = Some(project.path.clone());
+                                    }
+                                } else if row.row.clicked() {
+                                    if is_active {
+                                        toggle_project_path = Some(project.path.clone());
+                                    } else {
+                                        select_project_path = Some(project.path.clone());
+                                        if !project.expanded {
+                                            toggle_project_path = Some(project.path.clone());
+                                        }
+                                    }
+                                    self.selected_tree_path = None;
+                                }
+
+                                if is_active && row.row.hovered() && pointer_released {
+                                    if let Some(source) = self.dragged_tree_path.take() {
+                                        move_request = Some((source, String::new()));
+                                    }
+                                }
+
+                                if is_active && self.active_project_is_expanded() {
+                                    if self.file_rows.is_empty() {
+                                        empty_state(
+                                            ui,
+                                            "Файлы не найдены",
+                                            "Папка выбрана, но дерево проекта пустое или элементы скрыты фильтром.",
+                                        );
+                                    }
+
+                                    for row_path in &visible_rows {
+                                        let row_path = row_path.clone();
+                                        let is_more = row_path == "...";
+                                        let is_dir = row_path.ends_with('/');
+                                        let depth = file_tree_depth(&row_path);
+                                        let name = file_tree_name(&row_path);
+                                        let selected = self.selected_tree_path.as_deref()
+                                            == Some(row_path.as_str());
+                                        let dir_expanded =
+                                            is_dir && self.active_dir_is_expanded(&row_path);
+
+                                        if self.file_rename_target.as_deref()
+                                            == Some(row_path.as_str())
+                                        {
+                                            if let Some(action) = file_tree_rename_row(
+                                                ui,
+                                                depth,
+                                                is_dir,
+                                                &mut self.file_rename_input,
+                                            ) {
+                                                rename_action = Some(action);
+                                            }
+                                            continue;
+                                        }
+
+                                        let row_response = file_tree_nav_row(
+                                            ui,
+                                            name,
+                                            &row_path,
+                                            depth,
+                                            is_dir,
+                                            selected,
+                                            dir_expanded,
+                                        )
+                                        .on_hover_text(row_path.as_str());
+
+                                        let mut context_action: Option<&'static str> = None;
+                                        row_response.row.clone().context_menu(|ui| {
+                                            ui.set_min_width(180.0);
+                                            if is_dir && !is_more {
+                                                let label = if dir_expanded {
+                                                    "Свернуть"
+                                                } else {
+                                                    "Развернуть"
+                                                };
+                                                if ui.button(label).clicked() {
+                                                    context_action = Some("toggle");
+                                                    ui.close_menu();
+                                                }
+                                            }
+                                            if !is_dir
+                                                && !is_more
+                                                && ui.button("Открыть").clicked()
+                                            {
+                                                context_action = Some("open");
+                                                ui.close_menu();
+                                            }
+                                            if !is_more && ui.button("Переименовать").clicked() {
+                                                context_action = Some("rename");
+                                                ui.close_menu();
+                                            }
+                                            if !is_more && ui.button("Копировать").clicked() {
+                                                context_action = Some("copy");
+                                                ui.close_menu();
+                                            }
+                                            if !is_more && ui.button("Удалить").clicked() {
+                                                context_action = Some("delete");
+                                                ui.close_menu();
+                                            }
+                                        });
+
+                                        match context_action {
+                                            Some("toggle") => {
+                                                toggle_dir_path = Some(row_path.clone())
+                                            }
+                                            Some("open") => {
+                                                clicked_row = Some((
+                                                    row_path.clone(),
+                                                    is_dir,
+                                                    true,
+                                                    ui.input(|input| input.time),
+                                                ));
+                                            }
+                                            Some("rename") => {
+                                                start_rename_path = Some(row_path.clone())
+                                            }
+                                            Some("copy") => duplicate_path = Some(row_path.clone()),
+                                            Some("delete") => delete_path = Some(row_path.clone()),
+                                            _ => {}
+                                        }
+
+                                        if row_response.disclosure_clicked() && is_dir {
+                                            toggle_dir_path = Some(row_path.clone());
+                                        } else if row_response.row.clicked()
+                                            || row_response.row.double_clicked()
+                                        {
+                                            clicked_row = Some((
+                                                row_path.clone(),
+                                                is_dir,
+                                                row_response.row.double_clicked(),
+                                                ui.input(|input| input.time),
+                                            ));
+                                        }
+
+                                        if row_response.row.drag_started() && !is_more {
+                                            self.dragged_tree_path = Some(row_path.clone());
+                                        }
+                                        if pointer_released
+                                            && row_response.row.hovered()
+                                            && is_dir
+                                        {
+                                            if let Some(source) = self.dragged_tree_path.take() {
+                                                move_request = Some((source, row_path.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                }
+
+                if pointer_released && move_request.is_none() {
+                    self.dragged_tree_path = None;
+                }
+
+                if let Some(path) = select_project_path {
+                    let _ = self.open_workspace_path(path);
+                }
+                if let Some(path) = toggle_project_path {
+                    self.toggle_project_expanded(&path);
+                }
+                if let Some(path) = toggle_dir_path {
+                    self.toggle_active_dir_expanded(&path);
+                }
+                if let Some((path, is_dir, double_clicked, time)) = clicked_row {
+                    self.handle_file_tree_click(&path, is_dir, double_clicked, time);
+                }
+                if let Some(path) = start_rename_path {
+                    self.start_tree_rename(&path);
+                }
+                if let Some(action) = rename_action {
+                    match action {
+                        RenameRowAction::Commit => self.commit_tree_rename(),
+                        RenameRowAction::Cancel => self.cancel_tree_rename(),
+                    }
+                }
+                if let Some(path) = duplicate_path {
+                    self.duplicate_tree_path(&path);
+                }
+                if let Some(path) = delete_path {
+                    self.delete_tree_path(&path);
+                }
+                if let Some((source, target_dir)) = move_request {
+                    self.move_tree_path(&source, &target_dir);
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(6.0);
+                if let Some(path) = self.selected_tree_path.clone() {
+                    ui.label(RichText::new("Выбрано").weak().small());
+                    ui.label(RichText::new(&path).text_style(egui::TextStyle::Monospace));
+                    ui.horizontal_wrapped(|ui| {
+                        let is_dir = path.ends_with('/');
+                        if is_dir {
+                            let label = if self.active_dir_is_expanded(&path) {
+                                "Свернуть"
+                            } else {
+                                "Развернуть"
+                            };
+                            if ui.button(label).clicked() {
+                                self.toggle_active_dir_expanded(&path);
+                            }
+                        }
+                        if ui.button("Переименовать").clicked() {
+                            self.start_tree_rename(&path);
+                        }
+                        if ui.button("Копировать").clicked() {
+                            self.duplicate_tree_path(&path);
+                        }
+                        if ui.button("Удалить").clicked() {
+                            self.delete_tree_path(&path);
+                        }
+                        if !is_dir && ui.button("Открыть").clicked() {
+                            self.load_file_preview(&path);
+                        }
+                    });
+                } else {
+                    ui.label(RichText::new("Проект").weak().small());
+                    ui.label(
+                        RichText::new("Раскройте проект кнопкой слева от названия. Каталоги запомнят своё состояние.")
+                            .weak()
+                            .small(),
+                    );
+                }
+
+                if let Some(source) = &self.dragged_tree_path {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("Перетаскивание: {source}"))
+                            .weak()
+                            .small(),
+                    );
+                }
+                if !self.file_operation_status.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(&self.file_operation_status).weak().small());
+                }
+            });
+    }
+
+    #[allow(dead_code)]
+    fn show_file_panel_flat(&mut self, ctx: &egui::Context) {
         let keyboard_shortcuts_enabled =
             self.file_rename_target.is_none() && !ctx.wants_keyboard_input();
         if keyboard_shortcuts_enabled && ctx.input(|input| input.key_pressed(egui::Key::F2)) {
@@ -5423,6 +5906,205 @@ fn center_tab_button(
     (response, close_clicked)
 }
 
+fn project_nav_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    id_salt: &str,
+    selected: bool,
+    expanded: bool,
+    drop_target: bool,
+) -> ProjectNavRowResponse {
+    let width = ui.available_width().max(160.0);
+    let height = 31.0;
+    let (rect, row) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let fill = if selected {
+        egui::Color32::from_rgb(27, 30, 36)
+    } else if drop_target && row.hovered() {
+        egui::Color32::from_rgb(28, 42, 48)
+    } else if row.hovered() {
+        egui::Color32::from_rgb(22, 25, 31)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    if fill != egui::Color32::TRANSPARENT {
+        ui.painter().rect_filled(
+            rect.shrink2(egui::vec2(2.0, 1.0)),
+            egui::Rounding::same(4.0),
+            fill,
+        );
+    }
+    if selected {
+        ui.painter().line_segment(
+            [
+                egui::pos2(rect.left() + 2.0, rect.top() + 6.0),
+                egui::pos2(rect.left() + 2.0, rect.bottom() - 6.0),
+            ],
+            egui::Stroke::new(2.0, accent_color()),
+        );
+    }
+
+    let disclosure_rect = egui::Rect::from_min_size(
+        egui::pos2(rect.left() + 5.0, rect.center().y - 10.0),
+        egui::vec2(20.0, 20.0),
+    );
+    let disclosure = ui.interact(
+        disclosure_rect,
+        ui.make_persistent_id(("project_disclosure", id_salt)),
+        egui::Sense::click(),
+    );
+    draw_disclosure_icon(
+        ui,
+        disclosure_rect,
+        ui.make_persistent_id(("project_disclosure_anim", id_salt)),
+        expanded,
+        if selected {
+            accent_color()
+        } else {
+            muted_color()
+        },
+    );
+
+    draw_project_icon(
+        ui,
+        egui::pos2(rect.left() + 33.0, rect.center().y),
+        if selected {
+            accent_color()
+        } else {
+            muted_color()
+        },
+    );
+
+    ui.painter().text(
+        egui::pos2(rect.left() + 52.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::new(15.5, egui::FontFamily::Proportional),
+        text_color(),
+    );
+
+    ProjectNavRowResponse { row, disclosure }
+}
+
+fn file_tree_nav_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    id_salt: &str,
+    depth: usize,
+    is_dir: bool,
+    selected: bool,
+    expanded: bool,
+) -> FileTreeNavRowResponse {
+    let width = ui.available_width().max(80.0);
+    let height = 27.0;
+    let (rect, row) =
+        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+    let row_rect = rect.shrink2(egui::vec2(2.0, 1.0));
+    let fill = if selected {
+        egui::Color32::from_rgb(27, 30, 36)
+    } else if row.hovered() {
+        egui::Color32::from_rgb(28, 33, 40)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    if fill != egui::Color32::TRANSPARENT {
+        ui.painter()
+            .rect_filled(row_rect, egui::Rounding::same(4.0), fill);
+    }
+
+    let indent = 8.0 + depth as f32 * 17.0;
+    let icon_x = rect.left() + indent;
+    let text_x = icon_x + 18.0;
+    let text_rect = egui::Rect::from_min_max(
+        egui::pos2(text_x, rect.top()),
+        egui::pos2(rect.right() - 6.0, rect.bottom()),
+    );
+    let text_color = if is_dir {
+        egui::Color32::from_rgb(222, 228, 236)
+    } else {
+        text_color()
+    };
+
+    let disclosure = if is_dir {
+        let disclosure_rect = egui::Rect::from_min_size(
+            egui::pos2(icon_x - 4.0, rect.center().y - 10.0),
+            egui::vec2(20.0, 20.0),
+        );
+        let disclosure = ui.interact(
+            disclosure_rect,
+            ui.make_persistent_id(("dir_disclosure", id_salt)),
+            egui::Sense::click(),
+        );
+        draw_disclosure_icon(
+            ui,
+            disclosure_rect,
+            ui.make_persistent_id(("dir_disclosure_anim", id_salt)),
+            expanded,
+            if selected {
+                accent_color()
+            } else {
+                muted_color()
+            },
+        );
+        Some(disclosure)
+    } else {
+        None
+    };
+
+    ui.painter().with_clip_rect(text_rect).text(
+        egui::pos2(text_rect.left(), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        name,
+        egui::FontId::new(15.5, egui::FontFamily::Proportional),
+        text_color,
+    );
+
+    FileTreeNavRowResponse { row, disclosure }
+}
+
+fn draw_disclosure_icon(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    expanded: bool,
+    color: egui::Color32,
+) {
+    let progress = ui.ctx().animate_bool(id, expanded);
+    let angle = progress * std::f32::consts::FRAC_PI_2;
+    let (sin, cos) = angle.sin_cos();
+    let center = rect.center();
+    let rotate =
+        |x: f32, y: f32| egui::pos2(center.x + x * cos - y * sin, center.y + x * sin + y * cos);
+    let points = [rotate(-3.5, -5.0), rotate(3.5, 0.0), rotate(-3.5, 5.0)];
+    ui.painter()
+        .line_segment([points[0], points[1]], egui::Stroke::new(1.5, color));
+    ui.painter()
+        .line_segment([points[1], points[2]], egui::Stroke::new(1.5, color));
+}
+
+fn draw_project_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
+    let rect = egui::Rect::from_center_size(center, egui::vec2(12.0, 13.0));
+    ui.painter().rect_stroke(
+        rect,
+        egui::Rounding::same(2.0),
+        egui::Stroke::new(1.2, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left() + 3.0, rect.top() + 3.5),
+            egui::pos2(rect.right() - 3.0, rect.top() + 3.5),
+        ],
+        egui::Stroke::new(1.0, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.left() + 3.0, rect.bottom() - 3.5),
+            egui::pos2(rect.right() - 3.0, rect.bottom() - 3.5),
+        ],
+        egui::Stroke::new(1.0, color),
+    );
+}
+
 fn project_root_row(
     ui: &mut egui::Ui,
     name: &str,
@@ -5605,6 +6287,73 @@ fn file_tree_name(path: &str) -> &str {
         return trimmed;
     }
     trimmed.rsplit('/').next().unwrap_or(trimmed)
+}
+
+fn project_display_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| path.to_string_lossy().to_string())
+}
+
+fn project_count_label(count: usize) -> String {
+    let suffix = match count % 100 {
+        11..=14 => "проектов",
+        _ => match count % 10 {
+            1 => "проект",
+            2..=4 => "проекта",
+            _ => "проектов",
+        },
+    };
+    format!("{count} {suffix}")
+}
+
+fn project_paths_match(left: &Path, right: &Path) -> bool {
+    path_key(left) == path_key(right)
+}
+
+fn path_key(path: &Path) -> String {
+    strip_windows_extended_prefix_for_ui(&path.to_string_lossy().replace('\\', "/"))
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn strip_windows_extended_prefix_for_ui(path: &str) -> String {
+    path.strip_prefix("//?/")
+        .or_else(|| path.strip_prefix("\\\\?\\"))
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn normalize_tree_dir(path: &str) -> String {
+    let path = path.trim().replace('\\', "/");
+    let path = path.trim_matches('/').trim();
+    if path.is_empty() || path == "." || path.contains("..") {
+        String::new()
+    } else {
+        format!("{path}/")
+    }
+}
+
+fn file_tree_parent_dirs(path: &str) -> Vec<String> {
+    if path == "..." {
+        return Vec::new();
+    }
+    let trimmed = path.trim_end_matches('/');
+    let parts = trimmed
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() <= 1 {
+        return Vec::new();
+    }
+
+    let mut parents = Vec::new();
+    for index in 1..parts.len() {
+        parents.push(format!("{}/", parts[..index].join("/")));
+    }
+    parents
 }
 
 fn file_tree_base_path(path: &str) -> &str {
