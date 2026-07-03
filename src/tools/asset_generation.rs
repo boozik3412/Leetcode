@@ -66,6 +66,7 @@ pub struct UpscaleAssetArgs {
 pub struct ExportAssetArgs {
     pub source_path: String,
     pub target_name: Option<String>,
+    pub target_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,7 +480,12 @@ pub fn export_existing_asset(
     ) {
         return ToolResult::error("export_asset отклонён пользователем");
     }
-    match export_asset(workspace, source_path, args.target_name.as_deref()) {
+    match export_asset(
+        workspace,
+        source_path,
+        args.target_name.as_deref(),
+        args.target_dir.as_deref(),
+    ) {
         Ok(job) => finish_asset_job(job),
         Err(err) => ToolResult::error(err.to_string()),
     }

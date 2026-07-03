@@ -28,8 +28,9 @@ use crate::governance::{load_governance, save_governance, tool_specs};
 use crate::http::{proxy_status_label, proxy_system_status_label};
 use crate::memory::{
     import_memory_source_file, load_memory, record_decision, record_memory_source,
-    record_project_goal, remove_memory_source, upsert_task, RecordDecisionArgs,
-    RecordMemorySourceArgs, RecordProjectGoalArgs, RemoveMemorySourceArgs, UpsertTaskArgs,
+    record_project_goal, remove_memory_source, update_task_status, upsert_task, ProjectTask,
+    RecordDecisionArgs, RecordMemorySourceArgs, RecordProjectGoalArgs, RemoveMemorySourceArgs,
+    UpdateTaskStatusArgs, UpsertTaskArgs,
 };
 use crate::orchestration::{
     agent_role_specs, export_trace, load_orchestration_state, orchestration_snapshot,
@@ -49,7 +50,7 @@ use crate::tools::shell::{run_shell, RunShellArgs};
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -94,6 +95,10 @@ pub struct LeetcodeApp {
     project_is_running: bool,
     project_cancel: Option<Arc<AtomicBool>>,
     project_status: String,
+    project_task_title_input: String,
+    project_task_workstream_input: String,
+    project_task_milestone_input: String,
+    project_task_priority_input: String,
     last_project_command: Option<ProjectCommand>,
     project_runs: Vec<ProjectRunRecord>,
     project_fix_requests: Vec<ProjectFixRequestRecord>,
@@ -132,6 +137,8 @@ pub struct LeetcodeApp {
     asset_events_rx: Option<Receiver<AssetEvent>>,
     asset_is_running: bool,
     asset_status: String,
+    asset_compare_paths: Vec<String>,
+    asset_import_target_input: String,
     asset_previews: HashMap<String, egui::TextureHandle>,
     events_rx: Option<Receiver<AppEvent>>,
     is_running: bool,
@@ -483,6 +490,10 @@ impl LeetcodeApp {
             project_is_running: false,
             project_cancel: None,
             project_status: String::new(),
+            project_task_title_input: String::new(),
+            project_task_workstream_input: String::new(),
+            project_task_milestone_input: String::new(),
+            project_task_priority_input: "normal".to_string(),
             last_project_command: None,
             project_runs: Vec::new(),
             project_fix_requests: Vec::new(),
@@ -521,6 +532,8 @@ impl LeetcodeApp {
             asset_events_rx: None,
             asset_is_running: false,
             asset_status: String::new(),
+            asset_compare_paths: Vec::new(),
+            asset_import_target_input: "assets/images".to_string(),
             asset_previews: HashMap::new(),
             events_rx: None,
             is_running: false,
@@ -557,6 +570,7 @@ impl LeetcodeApp {
                 self.refresh_file_rows();
                 self.refresh_project_profiles();
                 self.asset_jobs = self.workspace.as_ref().map(load_jobs).unwrap_or_default();
+                self.asset_compare_paths.clear();
                 self.asset_previews.clear();
                 self.selected_tree_path = None;
                 self.project_rename_target = None;
@@ -743,6 +757,7 @@ impl LeetcodeApp {
         self.file_tabs.clear();
         self.active_center_tab = CenterTab::Agent;
         self.asset_jobs.clear();
+        self.asset_compare_paths.clear();
         self.asset_previews.clear();
         self.project_profiles.clear();
         self.project_runs.clear();
@@ -1943,7 +1958,7 @@ impl LeetcodeApp {
             self.asset_status = "рабочая папка не выбрана".to_string();
             return;
         };
-        match export_asset(workspace, rel_path, None) {
+        match export_asset(workspace, rel_path, None, None) {
             Ok(job) => {
                 self.asset_status = format!("экспортировано: {}", job.id);
                 self.upsert_asset_job(job);
@@ -1951,6 +1966,32 @@ impl LeetcodeApp {
                 self.refresh_git_summary();
             }
             Err(err) => self.asset_status = format!("экспорт не выполнен: {err}"),
+        }
+    }
+
+    fn import_asset_output_to_project(&mut self, rel_path: &str) {
+        let Some(workspace) = &self.workspace else {
+            self.asset_status = "рабочая папка не выбрана".to_string();
+            return;
+        };
+        let target_dir = self.asset_import_target_input.trim().to_string();
+        let target_dir = if target_dir.is_empty() {
+            default_asset_import_target(&asset_kind_for_rel_path(rel_path)).to_string()
+        } else {
+            target_dir
+        };
+        match export_asset(workspace, rel_path, None, Some(&target_dir)) {
+            Ok(job) => {
+                if let Some(output) = job.output_files.first() {
+                    self.asset_status = format!("импортировано в проект: {output}");
+                } else {
+                    self.asset_status = format!("импортировано в проект: {}", job.id);
+                }
+                self.upsert_asset_job(job);
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+            }
+            Err(err) => self.asset_status = format!("импорт в проект не выполнен: {err}"),
         }
     }
 
@@ -2012,6 +2053,29 @@ impl LeetcodeApp {
             self.asset_jobs.push(job);
         }
         self.asset_jobs.sort_by_key(|job| job.created_at);
+    }
+
+    fn toggle_asset_comparison(&mut self, rel_path: &str) {
+        if let Some(index) = self
+            .asset_compare_paths
+            .iter()
+            .position(|known| known == rel_path)
+        {
+            self.asset_compare_paths.remove(index);
+            return;
+        }
+        if self.asset_compare_paths.len() >= 4 {
+            self.asset_compare_paths.remove(0);
+        }
+        self.asset_compare_paths.push(rel_path.to_string());
+        self.asset_import_target_input =
+            default_asset_import_target(&asset_kind_for_rel_path(rel_path)).to_string();
+    }
+
+    fn asset_is_compared(&self, rel_path: &str) -> bool {
+        self.asset_compare_paths
+            .iter()
+            .any(|known| known == rel_path)
     }
 
     fn texture_for_asset(
@@ -4097,6 +4161,9 @@ impl LeetcodeApp {
                                 title,
                                 status: Some("todo".to_string()),
                                 notes: None,
+                                workstream: None,
+                                milestone: None,
+                                priority: None,
                             },
                         );
                         self.memory_status = result.output;
@@ -4576,6 +4643,9 @@ impl LeetcodeApp {
             }
             if let Some(journal_path) = diagnostics.journal_path.as_deref() {
                 status_line(ui, "Journal", journal_path);
+            }
+            if let Some(crash_dir) = diagnostics.crash_dir.as_deref() {
+                status_line(ui, "Crash reports", crash_dir);
             }
             status_line(ui, "Proxy", &diagnostics.proxy);
             status_line(ui, "System proxy", &diagnostics.system_proxy);
@@ -5204,6 +5274,124 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_asset_import_controls(&mut self, ui: &mut egui::Ui) {
+        let kind = self
+            .asset_compare_paths
+            .last()
+            .map(|path| asset_kind_for_rel_path(path))
+            .unwrap_or(AssetKind::Image);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Импорт в проект").strong());
+            egui::ComboBox::from_id_salt("asset_import_target_select")
+                .selected_text(compact_inline(&self.asset_import_target_input, 32))
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for target in asset_import_targets(&kind) {
+                        ui.selectable_value(
+                            &mut self.asset_import_target_input,
+                            (*target).to_string(),
+                            *target,
+                        );
+                    }
+                });
+            ui.add_sized(
+                [ui.available_width().max(160.0), 24.0],
+                TextEdit::singleline(&mut self.asset_import_target_input)
+                    .hint_text("каталог внутри проекта"),
+            );
+        });
+    }
+
+    fn show_asset_comparison_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Сравнение вариантов").strong());
+            ui.label(RichText::new(format!("{} / 4", self.asset_compare_paths.len())).weak());
+            if ui
+                .add_enabled(
+                    !self.asset_compare_paths.is_empty(),
+                    egui::Button::new("Очистить"),
+                )
+                .clicked()
+            {
+                self.asset_compare_paths.clear();
+            }
+        });
+        self.show_asset_import_controls(ui);
+
+        if self.asset_compare_paths.is_empty() {
+            ui.label(
+                RichText::new(
+                    "Нажмите «Сравнить» на карточке ассета, чтобы увидеть варианты рядом.",
+                )
+                .weak(),
+            );
+            return;
+        }
+
+        let selected = self.asset_compare_paths.clone();
+        let columns = selected.len().clamp(1, 4);
+        let mut remove_path: Option<String> = None;
+        let mut import_path: Option<String> = None;
+        let mut open_path: Option<String> = None;
+        ui.columns(columns, |columns| {
+            for (index, rel_path) in selected.iter().enumerate() {
+                let column = &mut columns[index];
+                let job = self
+                    .asset_jobs
+                    .iter()
+                    .find(|job| job.output_files.iter().any(|output| output == rel_path))
+                    .cloned();
+                column.vertical(|ui| {
+                    if let Some(texture) = self.texture_for_asset(ctx, rel_path) {
+                        let size = texture.size_vec2();
+                        let scale = (180.0 / size.x.max(size.y)).min(1.0);
+                        ui.image((texture.id(), size * scale));
+                    } else {
+                        ui.label(
+                            RichText::new(asset_kind_label(&asset_kind_for_rel_path(rel_path)))
+                                .strong(),
+                        );
+                    }
+                    ui.label(RichText::new(compact_inline(rel_path, 58)).monospace());
+                    if let Some(job) = &job {
+                        ui.horizontal_wrapped(|ui| {
+                            chip(ui, asset_status_label(&job.status));
+                            chip(ui, image_provider_name(&job.provider));
+                            chip(ui, &job.model);
+                        });
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(compact_inline(&job.prompt, 140)).weak(),
+                            )
+                            .wrap(),
+                        );
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.small_button("В проект").clicked() {
+                            import_path = Some(rel_path.clone());
+                        }
+                        if ui.small_button("Папка").clicked() {
+                            open_path = Some(rel_path.clone());
+                        }
+                        if ui.small_button("Убрать").clicked() {
+                            remove_path = Some(rel_path.clone());
+                        }
+                    });
+                });
+            }
+        });
+        if let Some(path) = remove_path {
+            self.asset_compare_paths.retain(|known| known != &path);
+        }
+        if let Some(path) = import_path {
+            self.import_asset_output_to_project(&path);
+        }
+        if let Some(path) = open_path {
+            self.open_asset_folder(&path);
+        }
+    }
+
     fn show_asset_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.separator();
         ui.horizontal_wrapped(|ui| {
@@ -5366,6 +5554,7 @@ impl LeetcodeApp {
         if !self.asset_status.is_empty() {
             ui.label(RichText::new(&self.asset_status).weak());
         }
+        self.show_asset_comparison_panel(ui, ctx);
 
         egui::ScrollArea::vertical()
             .id_salt("asset_jobs_scroll")
@@ -5434,6 +5623,20 @@ impl LeetcodeApp {
                     self.vary_asset_job(&job);
                 }
                 if let Some(output) = first_output.as_deref() {
+                    let compared = self.asset_is_compared(output);
+                    if ui
+                        .button(if compared {
+                            "Убрать из сравнения"
+                        } else {
+                            "Сравнить"
+                        })
+                        .clicked()
+                    {
+                        self.toggle_asset_comparison(output);
+                    }
+                    if ui.button("В проект").clicked() {
+                        self.import_asset_output_to_project(output);
+                    }
                     if ui.button("Сделать иконкой").clicked() {
                         self.use_asset_as_app_icon(output);
                     }
@@ -5629,6 +5832,184 @@ impl LeetcodeApp {
         self.show_center_tabs(ui);
     }
 
+    fn show_project_task_tree(&mut self, ui: &mut egui::Ui) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let memory = load_memory(&workspace);
+        let tasks = memory.tasks.clone();
+        let open_tasks = tasks.iter().filter(|task| task.status != "done").count();
+        let done_tasks = tasks.iter().filter(|task| task.status == "done").count();
+        let mut grouped: BTreeMap<String, BTreeMap<String, Vec<ProjectTask>>> = BTreeMap::new();
+        for task in tasks {
+            let workstream = task_tree_value(&task.workstream, "Разработка");
+            let milestone = task_tree_value(&task.milestone, "Текущий этап");
+            grouped
+                .entry(workstream)
+                .or_default()
+                .entry(milestone)
+                .or_default()
+                .push(task);
+        }
+
+        ui.separator();
+        panel_header(
+            ui,
+            "Дерево задач",
+            "Рабочая карта проекта по направлениям, этапам и приоритетам.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            metric_chip(ui, "направления", grouped.len());
+            metric_chip(ui, "открытые", open_tasks);
+            metric_chip(ui, "готовые", done_tasks);
+        });
+        ui.add_space(6.0);
+        self.show_project_task_quick_add(ui, &workspace);
+
+        if grouped.is_empty() {
+            empty_state(
+                ui,
+                "Задач пока нет",
+                "Добавьте первую задачу вручную или попросите агента разложить работу по направлениям и этапам.",
+            );
+            return;
+        }
+
+        let mut status_update: Option<(String, String)> = None;
+        for (workstream, milestones) in grouped.iter_mut() {
+            let workstream_count = milestones.values().map(Vec::len).sum::<usize>();
+            let title = format!("{workstream} · {workstream_count}");
+            egui::CollapsingHeader::new(RichText::new(title).strong())
+                .default_open(true)
+                .show(ui, |ui| {
+                    for (milestone, tasks) in milestones.iter_mut() {
+                        tasks.sort_by(|left, right| {
+                            task_status_sort_key(&left.status)
+                                .cmp(&task_status_sort_key(&right.status))
+                                .then(
+                                    task_priority_sort_key(&left.priority)
+                                        .cmp(&task_priority_sort_key(&right.priority)),
+                                )
+                                .then(left.title.cmp(&right.title))
+                        });
+                        let milestone_title = format!("{milestone} · {}", tasks.len());
+                        egui::CollapsingHeader::new(RichText::new(milestone_title))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                for task in tasks.iter() {
+                                    ui.horizontal_wrapped(|ui| {
+                                        chip(ui, task_status_label(&task.status));
+                                        chip(ui, task_priority_label(&task.priority));
+                                        ui.label(RichText::new(&task.title).strong());
+                                        if !task.notes.trim().is_empty() {
+                                            ui.label(
+                                                RichText::new(compact_inline(&task.notes, 100))
+                                                    .weak(),
+                                            );
+                                        }
+                                        if task.status != "doing"
+                                            && ui.small_button("В работу").clicked()
+                                        {
+                                            status_update =
+                                                Some((task.id.clone(), "doing".to_string()));
+                                        }
+                                        if task.status != "done"
+                                            && ui.small_button("Готово").clicked()
+                                        {
+                                            status_update =
+                                                Some((task.id.clone(), "done".to_string()));
+                                        }
+                                        if task.status != "blocked"
+                                            && ui.small_button("Блокер").clicked()
+                                        {
+                                            status_update =
+                                                Some((task.id.clone(), "blocked".to_string()));
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                });
+        }
+        if let Some((id, status)) = status_update {
+            let result = update_task_status(
+                &workspace,
+                UpdateTaskStatusArgs {
+                    id,
+                    status,
+                    notes: None,
+                },
+            );
+            self.project_status = result.output;
+        }
+    }
+
+    fn show_project_task_quick_add(&mut self, ui: &mut egui::Ui, workspace: &Workspace) {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                [240.0, 26.0],
+                TextEdit::singleline(&mut self.project_task_title_input).hint_text("задача"),
+            );
+            ui.add_sized(
+                [140.0, 26.0],
+                TextEdit::singleline(&mut self.project_task_workstream_input)
+                    .hint_text("направление"),
+            );
+            ui.add_sized(
+                [140.0, 26.0],
+                TextEdit::singleline(&mut self.project_task_milestone_input).hint_text("этап"),
+            );
+            egui::ComboBox::from_id_salt("project_task_priority")
+                .selected_text(task_priority_label(&self.project_task_priority_input))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut self.project_task_priority_input,
+                        "high".to_string(),
+                        "Высокий",
+                    );
+                    ui.selectable_value(
+                        &mut self.project_task_priority_input,
+                        "normal".to_string(),
+                        "Обычный",
+                    );
+                    ui.selectable_value(
+                        &mut self.project_task_priority_input,
+                        "low".to_string(),
+                        "Низкий",
+                    );
+                });
+            if ui.button("Добавить").clicked() {
+                let title = self.project_task_title_input.trim().to_string();
+                if !title.is_empty() {
+                    let workstream = self.project_task_workstream_input.trim().to_string();
+                    let milestone = self.project_task_milestone_input.trim().to_string();
+                    let result = upsert_task(
+                        workspace,
+                        UpsertTaskArgs {
+                            id: None,
+                            title,
+                            status: Some("todo".to_string()),
+                            notes: None,
+                            workstream: if workstream.is_empty() {
+                                None
+                            } else {
+                                Some(workstream)
+                            },
+                            milestone: if milestone.is_empty() {
+                                None
+                            } else {
+                                Some(milestone)
+                            },
+                            priority: Some(self.project_task_priority_input.clone()),
+                        },
+                    );
+                    self.project_status = result.output;
+                    self.project_task_title_input.clear();
+                }
+            }
+        });
+    }
+
     fn show_project_command_center(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Project Command Center").strong().size(22.0));
@@ -5703,6 +6084,8 @@ impl LeetcodeApp {
             }
         });
         ui.add_space(8.0);
+        self.show_project_task_tree(ui);
+        ui.add_space(10.0);
 
         if !self.project_profiles.is_empty() {
             let profiles = self.project_profiles.clone();
@@ -7255,6 +7638,52 @@ fn remap_tree_path_after_base_move(path: &str, old_base: &str, new_base: &str) -
     })
 }
 
+fn task_tree_value(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn task_status_sort_key(status: &str) -> u8 {
+    match status {
+        "doing" => 0,
+        "blocked" => 1,
+        "todo" => 2,
+        "done" => 3,
+        _ => 4,
+    }
+}
+
+fn task_priority_sort_key(priority: &str) -> u8 {
+    match priority {
+        "high" => 0,
+        "normal" => 1,
+        "low" => 2,
+        _ => 3,
+    }
+}
+
+fn task_status_label(status: &str) -> &'static str {
+    match status {
+        "doing" => "в работе",
+        "done" => "готово",
+        "blocked" => "блокер",
+        "todo" => "к плану",
+        _ => "задача",
+    }
+}
+
+fn task_priority_label(priority: &str) -> &'static str {
+    match priority {
+        "high" => "Высокий",
+        "low" => "Низкий",
+        _ => "Обычный",
+    }
+}
+
 fn panel_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.label(RichText::new(title).strong());
     ui.add(egui::Label::new(RichText::new(subtitle).weak().small()).wrap());
@@ -7319,6 +7748,55 @@ fn asset_kind_label(kind: &AssetKind) -> &'static str {
         AssetKind::Audio => "аудио",
         AssetKind::Video => "видео",
     }
+}
+
+fn asset_kind_for_rel_path(path: &str) -> AssetKind {
+    match file_extension(path).as_deref() {
+        Some("wav" | "mp3" | "ogg" | "flac" | "opus") => AssetKind::Audio,
+        Some("mp4" | "mov" | "webm") => AssetKind::Video,
+        Some("json") if path.to_ascii_lowercase().contains("spritesheet") => AssetKind::Spritesheet,
+        _ => AssetKind::Image,
+    }
+}
+
+fn asset_import_targets(kind: &AssetKind) -> &'static [&'static str] {
+    match kind {
+        AssetKind::Image => &[
+            "assets/images",
+            "assets/icons",
+            "assets/textures",
+            "public/assets/images",
+            "src/assets/images",
+            "Assets/Art",
+        ],
+        AssetKind::Spritesheet => &[
+            "assets/spritesheets",
+            "assets/animations",
+            "public/assets/spritesheets",
+            "src/assets/spritesheets",
+            "Assets/Sprites",
+        ],
+        AssetKind::Audio => &[
+            "assets/audio",
+            "assets/sfx",
+            "public/assets/audio",
+            "src/assets/audio",
+            "Assets/Audio",
+        ],
+        AssetKind::Video => &[
+            "assets/video",
+            "public/assets/video",
+            "src/assets/video",
+            "Assets/Video",
+        ],
+    }
+}
+
+fn default_asset_import_target(kind: &AssetKind) -> &'static str {
+    asset_import_targets(kind)
+        .first()
+        .copied()
+        .unwrap_or("assets")
 }
 
 fn asset_status_label(status: &AssetStatus) -> &'static str {

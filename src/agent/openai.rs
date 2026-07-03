@@ -838,7 +838,11 @@ pub fn act_tool_schema() -> Value {
                             "type": "object",
                             "properties": {
                                 "source_path": { "type": "string" },
-                                "target_name": { "type": "string" }
+                                "target_name": { "type": "string" },
+                                "target_dir": {
+                                    "type": "string",
+                                    "description": "Optional relative project folder for copying the asset, for example assets/images, public/assets/images, src/assets/audio, or Assets/Art."
+                                }
                             },
                             "required": ["source_path"],
                             "additionalProperties": false

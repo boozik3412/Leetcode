@@ -123,14 +123,14 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Build fix prompts from the exact failed command output so the agent receives actionable diagnostics.
 - Done: Add lightweight build-error grouping for failed command output.
 - Done: Add structured diagnostics by compiler/test framework with file, line, column, type, targeted fix prompts, and fix-request history.
-- Todo: Add richer task tree across project milestones and launch/game-development workstreams.
+- Done: Add richer task tree across project milestones and launch/game-development workstreams.
 
 ## Stage 15 - Asset Studio
 
 - Done: Promote asset generation and asset history into a dedicated workspace mode.
 - Done: Show generated asset history, variants, favorites, export, attach, and source metadata from one place.
-- Todo: Add side-by-side comparison for multiple generated results.
-- Todo: Add project import targets for common game/app asset folders.
+- Done: Add side-by-side comparison for multiple generated results.
+- Done: Add project import targets for common game/app asset folders.
 
 ## Stage 16 - Real Provider Validation
 
@@ -148,8 +148,8 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Expose environment diagnostics as the read-only `environment_snapshot` agent tool.
 - Done: Add release checklist for icon, version, README, provider setup, diagnostics, and workspace/config storage.
 - Done: Document current crash/log folder policy.
-- Todo: Add installer build path or signed portable archive.
-- Todo: Add optional crash dump folder and panic hook.
+- Done: Add signed portable archive path with zip output, SHA256 manifest, and optional SignTool support.
+- Done: Add optional crash report folder and panic hook.
 
 ## Ongoing Quality Bar
 

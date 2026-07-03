@@ -48,6 +48,12 @@ pub struct ProjectTask {
     pub id: String,
     pub title: String,
     pub status: String,
+    #[serde(default)]
+    pub workstream: String,
+    #[serde(default)]
+    pub milestone: String,
+    #[serde(default)]
+    pub priority: String,
     pub notes: String,
     pub updated_at: u64,
 }
@@ -80,6 +86,9 @@ pub struct UpsertTaskArgs {
     pub title: String,
     pub status: Option<String>,
     pub notes: Option<String>,
+    pub workstream: Option<String>,
+    pub milestone: Option<String>,
+    pub priority: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,7 +165,16 @@ pub fn memory_summary_for_prompt(workspace: Option<&Workspace>) -> String {
         .iter()
         .filter(|task| task.status != "done")
         .take(6)
-        .map(|task| format!("- {} [{}]", task.title, task.status))
+        .map(|task| {
+            format!(
+                "- {} [{}; {}; {}; {}]",
+                task.title,
+                task.status,
+                task_field_or(&task.workstream, "Разработка"),
+                task_field_or(&task.milestone, "Текущий этап"),
+                task_field_or(&task.priority, "normal"),
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let decisions = memory
@@ -211,9 +229,23 @@ pub fn upsert_task(workspace: &Workspace, args: UpsertTaskArgs) -> ToolResult {
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| format!("task-{}", uuid::Uuid::new_v4()));
     let status = normalize_status(args.status.as_deref().unwrap_or("todo"));
+    let workstream = args
+        .workstream
+        .as_deref()
+        .map(|value| normalize_task_group(value, "Разработка"));
+    let milestone = args
+        .milestone
+        .as_deref()
+        .map(|value| normalize_task_group(value, "Текущий этап"));
+    let priority = args.priority.as_deref().map(normalize_priority);
     if let Some(task) = memory.tasks.iter_mut().find(|task| task.id == id) {
         task.title = title.to_string();
         task.status = status;
+        task.workstream =
+            workstream.unwrap_or_else(|| task_field_or(&task.workstream, "Разработка"));
+        task.milestone =
+            milestone.unwrap_or_else(|| task_field_or(&task.milestone, "Текущий этап"));
+        task.priority = priority.unwrap_or_else(|| task_field_or(&task.priority, "normal"));
         task.notes = args.notes.unwrap_or_default();
         task.updated_at = now;
     } else {
@@ -221,6 +253,9 @@ pub fn upsert_task(workspace: &Workspace, args: UpsertTaskArgs) -> ToolResult {
             id: id.clone(),
             title: title.to_string(),
             status,
+            workstream: workstream.unwrap_or_else(|| "Разработка".to_string()),
+            milestone: milestone.unwrap_or_else(|| "Текущий этап".to_string()),
+            priority: priority.unwrap_or_else(|| "normal".to_string()),
             notes: args.notes.unwrap_or_default(),
             updated_at: now,
         });
@@ -492,6 +527,37 @@ fn normalize_status(status: &str) -> String {
     }
 }
 
+fn normalize_task_group(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.chars().take(80).collect()
+    }
+}
+
+fn normalize_priority(priority: &str) -> String {
+    match priority.trim().to_ascii_lowercase().as_str() {
+        "high" | "critical" | "urgent" | "p0" | "p1" | "высокий" | "критичный" | "срочно" => {
+            "high".to_string()
+        }
+        "low" | "p3" | "p4" | "низкий" => "low".to_string(),
+        "normal" | "medium" | "p2" | "обычный" | "средний" | "" => {
+            "normal".to_string()
+        }
+        other => other.chars().take(32).collect(),
+    }
+}
+
+fn task_field_or(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn normalize_source_kind(kind: &str) -> String {
     match kind.trim().to_ascii_lowercase().replace('-', "_").as_str() {
         "file" | "document" | "doc" => "file".to_string(),
@@ -573,11 +639,18 @@ mod tests {
                 title: "Build launcher".to_string(),
                 status: Some("doing".to_string()),
                 notes: None,
+                workstream: Some("Desktop".to_string()),
+                milestone: Some("MVP".to_string()),
+                priority: Some("high".to_string()),
             },
         );
 
         assert!(result.ok);
-        assert_eq!(load_memory(&workspace).tasks.len(), 1);
+        let memory = load_memory(&workspace);
+        assert_eq!(memory.tasks.len(), 1);
+        assert_eq!(memory.tasks[0].workstream, "Desktop");
+        assert_eq!(memory.tasks[0].milestone, "MVP");
+        assert_eq!(memory.tasks[0].priority, "high");
     }
 
     #[test]

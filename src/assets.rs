@@ -1175,6 +1175,7 @@ pub fn export_asset(
     workspace: &Workspace,
     source_path: &str,
     target_name: Option<&str>,
+    target_dir: Option<&str>,
 ) -> anyhow::Result<AssetJob> {
     let source = workspace.resolve_existing(source_path)?;
     if !source.is_file() {
@@ -1196,6 +1197,7 @@ pub fn export_asset(
                 .map(slugify)
                 .unwrap_or_else(|| "asset-export".to_string())
         });
+    let target_dir = normalize_export_dir(target_dir.unwrap_or("assets/generated/exports"));
     let mut job = AssetJob {
         id: format!("export-{}", uuid::Uuid::new_v4()),
         kind: kind_for_path(&source),
@@ -1205,7 +1207,8 @@ pub fn export_asset(
         prompt: format!("Export {source_path}"),
         parameters: json!({
             "source_path": source_path,
-            "target_name": target_name
+            "target_name": target_name,
+            "target_dir": target_dir
         }),
         output_files: Vec::new(),
         metadata: json!({}),
@@ -1213,8 +1216,12 @@ pub fn export_asset(
         created_at: now,
         updated_at: now,
     };
-    let rel_path = format!("assets/generated/exports/{}-{}.{}", stem, job.id, extension);
-    let target = workspace.resolve_for_write(&rel_path)?;
+    let file_name = if target_dir == "assets/generated/exports" {
+        format!("{}-{}.{}", stem, job.id, extension)
+    } else {
+        format!("{stem}.{extension}")
+    };
+    let (rel_path, target) = unique_export_target(workspace, &target_dir, &file_name)?;
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1224,6 +1231,7 @@ pub fn export_asset(
     job.metadata = json!({
         "operation": "export",
         "source_path": source_path,
+        "target_dir": target_dir,
         "license": license_metadata("local-export")
     });
     job.updated_at = unix_timestamp();
@@ -1467,6 +1475,51 @@ fn slugify(text: &str) -> String {
     }
 }
 
+fn normalize_export_dir(target_dir: &str) -> String {
+    let normalized = target_dir
+        .trim()
+        .replace('\\', "/")
+        .trim_matches('/')
+        .to_string();
+    if normalized.is_empty() {
+        "assets/generated/exports".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn unique_export_target(
+    workspace: &Workspace,
+    target_dir: &str,
+    file_name: &str,
+) -> anyhow::Result<(String, PathBuf)> {
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(slugify)
+        .unwrap_or_else(|| "asset".to_string());
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bin");
+
+    for index in 0..1000 {
+        let candidate_name = if index == 0 {
+            format!("{stem}.{extension}")
+        } else {
+            format!("{stem}-{index}.{extension}")
+        };
+        let rel_path = format!("{target_dir}/{candidate_name}");
+        let target = workspace.resolve_for_write(&rel_path)?;
+        if !target.exists() {
+            return Ok((rel_path, target));
+        }
+    }
+
+    anyhow::bail!("could not create unique export name in {target_dir}")
+}
+
 fn unix_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1489,6 +1542,35 @@ mod tests {
         assert!(ids.contains(&GEMINI_IMAGE_PROVIDER_ID));
         assert!(ids.contains(&STABILITY_IMAGE_PROVIDER_ID));
         assert!(ids.contains(&REPLICATE_IMAGE_PROVIDER_ID));
+    }
+
+    #[test]
+    fn exports_asset_to_project_target_without_overwrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        let source_dir = temp.path().join("assets/generated/images");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("icon.png"), b"png").unwrap();
+
+        let first = export_asset(
+            &workspace,
+            "assets/generated/images/icon.png",
+            None,
+            Some("assets/icons"),
+        )
+        .unwrap();
+        let second = export_asset(
+            &workspace,
+            "assets/generated/images/icon.png",
+            None,
+            Some("assets/icons"),
+        )
+        .unwrap();
+
+        assert_eq!(first.output_files[0], "assets/icons/icon.png");
+        assert_eq!(second.output_files[0], "assets/icons/icon-1.png");
+        assert!(temp.path().join("assets/icons/icon.png").is_file());
+        assert!(temp.path().join("assets/icons/icon-1.png").is_file());
     }
 
     #[test]

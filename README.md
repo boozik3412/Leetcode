@@ -189,6 +189,10 @@ powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
 
 The output is written to `dist/leetcode-portable`.
 
+The package script also creates `dist/leetcode-portable.zip` and `dist/leetcode-portable.sha256.txt` by default. Pass `-Sign` with `LEETCODE_SIGN_CERT_THUMBPRINT` when a Windows code-signing certificate is available.
+
+Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
+
 Before packaging, open `Контроль -> Диагностика` inside the app. It reports the executable path, config path, journal path, selected workspace data path, proxy state, and local toolchain availability without exposing API keys. The agent can request the same read-only report with `environment_snapshot`.
 
 ## Notes

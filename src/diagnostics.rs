@@ -1,5 +1,6 @@
 use crate::agent::types::ToolResult;
 use crate::config::{config_path, journal_path, AppConfig};
+use crate::crash::crash_dir;
 use crate::http::{proxy_status_label, proxy_system_status_label};
 use crate::workspace::Workspace;
 use serde::Serialize;
@@ -16,6 +17,7 @@ pub struct EnvironmentDiagnostics {
     pub workspace: Option<String>,
     pub config_path: Option<String>,
     pub journal_path: Option<String>,
+    pub crash_dir: Option<String>,
     pub proxy: String,
     pub system_proxy: String,
     pub tools: Vec<DiagnosticItem>,
@@ -41,6 +43,7 @@ pub fn environment_diagnostics(
         .unwrap_or_else(|err| format!("unavailable: {err}"));
     let config_path = config_path().map(display_path);
     let journal_path = journal_path().map(display_path);
+    let crash_dir = crash_dir().map(display_path);
     let workspace_root = workspace.map(|workspace| workspace.root().display().to_string());
 
     EnvironmentDiagnostics {
@@ -52,6 +55,7 @@ pub fn environment_diagnostics(
         workspace: workspace_root.clone(),
         config_path: config_path.clone(),
         journal_path: journal_path.clone(),
+        crash_dir: crash_dir.clone(),
         proxy: proxy_status_label(config),
         system_proxy: proxy_system_status_label(config).to_string(),
         tools: vec![
@@ -68,7 +72,7 @@ pub fn environment_diagnostics(
                 ],
             ),
         ],
-        release_notes: release_diagnostics(config_path, journal_path, workspace_root),
+        release_notes: release_diagnostics(config_path, journal_path, crash_dir, workspace_root),
     }
 }
 
@@ -105,30 +109,49 @@ fn command_diagnostic(command: &str, args: &[&str]) -> DiagnosticItem {
 fn release_diagnostics(
     config_path: Option<String>,
     journal_path: Option<String>,
+    crash_dir: Option<String>,
     workspace: Option<String>,
 ) -> Vec<DiagnosticItem> {
     vec![
         DiagnosticItem {
             name: "config".to_string(),
-            status: if config_path.is_some() { "ok" } else { "missing" }.to_string(),
+            status: if config_path.is_some() {
+                "ok"
+            } else {
+                "missing"
+            }
+            .to_string(),
             detail: config_path.unwrap_or_else(|| "config directory is unavailable".to_string()),
         },
         DiagnosticItem {
             name: "journal".to_string(),
-            status: if journal_path.is_some() { "ok" } else { "missing" }.to_string(),
+            status: if journal_path.is_some() {
+                "ok"
+            } else {
+                "missing"
+            }
+            .to_string(),
             detail: journal_path.unwrap_or_else(|| "data directory is unavailable".to_string()),
         },
         DiagnosticItem {
             name: "workspace data".to_string(),
-            status: if workspace.is_some() { "ok" } else { "not selected" }.to_string(),
+            status: if workspace.is_some() {
+                "ok"
+            } else {
+                "not selected"
+            }
+            .to_string(),
             detail: workspace
                 .map(|root| format!("{root}/assets/generated/leetcode"))
-                .unwrap_or_else(|| "select a project to enable workspace-local history".to_string()),
+                .unwrap_or_else(|| {
+                    "select a project to enable workspace-local history".to_string()
+                }),
         },
         DiagnosticItem {
             name: "crash policy".to_string(),
-            status: "documented".to_string(),
-            detail: "fatal crashes are not intercepted yet; local audit data is written to the journal and selected workspace".to_string(),
+            status: if crash_dir.is_some() { "ok" } else { "missing" }.to_string(),
+            detail: crash_dir
+                .unwrap_or_else(|| "crash report directory is unavailable".to_string()),
         },
     ]
 }

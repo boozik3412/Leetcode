@@ -5,6 +5,7 @@ mod app;
 mod asset_library;
 mod assets;
 mod config;
+mod crash;
 mod diagnostics;
 mod evals;
 mod game_workflows;
@@ -24,6 +25,8 @@ use std::sync::Arc;
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
 
 fn main() -> eframe::Result<()> {
+    crash::install_panic_hook();
+
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([900.0, 620.0]);
