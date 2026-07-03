@@ -5,6 +5,7 @@ mod app;
 mod asset_library;
 mod assets;
 mod config;
+mod diagnostics;
 mod evals;
 mod game_workflows;
 mod governance;

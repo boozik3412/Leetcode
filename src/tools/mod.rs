@@ -12,6 +12,7 @@ pub mod terminal;
 use crate::agent::types::{ActRequest, AppEvent, ToolAction, ToolCall, ToolResult};
 use crate::asset_library::{ExportAssetPackArgs, FavoriteAssetArgs, TagAssetArgs};
 use crate::config::AppConfig;
+use crate::diagnostics;
 use crate::evals::RunReplayEvalArgs;
 use crate::governance::{AddShellDenyPatternArgs, SetCategoryEnabledArgs, SetToolEnabledArgs};
 use crate::memory::{
@@ -813,6 +814,9 @@ impl ToolDispatcher {
             }
             ToolAction::ProviderHealthSnapshot => {
                 provider_health::provider_health_snapshot(&self.config)
+            }
+            ToolAction::EnvironmentSnapshot => {
+                diagnostics::environment_snapshot(&self.config, self.workspace.as_ref())
             }
         }
     }

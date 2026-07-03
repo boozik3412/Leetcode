@@ -141,6 +141,7 @@ pub enum ToolAction {
     RunReplayEval,
     EvalSnapshot,
     ProviderHealthSnapshot,
+    EnvironmentSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -403,6 +404,10 @@ mod tests {
                 r#"{"action":"provider_health_snapshot","args":{}}"#,
                 "providers",
             ),
+            (
+                r#"{"action":"environment_snapshot","args":{}}"#,
+                "environment",
+            ),
         ] {
             let request = serde_json::from_str::<ActRequest>(json).expect(expected);
             match expected {
@@ -418,6 +423,9 @@ mod tests {
                 "evals" => assert!(matches!(request.action, ToolAction::RunReplayEval)),
                 "providers" => {
                     assert!(matches!(request.action, ToolAction::ProviderHealthSnapshot))
+                }
+                "environment" => {
+                    assert!(matches!(request.action, ToolAction::EnvironmentSnapshot))
                 }
                 _ => unreachable!(),
             }

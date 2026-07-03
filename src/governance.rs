@@ -372,6 +372,12 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "low",
             "Посмотреть состояние провайдеров.",
         ),
+        spec(
+            "environment_snapshot",
+            "diagnostics",
+            "low",
+            "Посмотреть диагностику окружения, путей, proxy и toolchain.",
+        ),
     ];
     SPECS
 }
@@ -564,6 +570,7 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::RunReplayEval => "run_replay_eval",
         ToolAction::EvalSnapshot => "eval_snapshot",
         ToolAction::ProviderHealthSnapshot => "provider_health_snapshot",
+        ToolAction::EnvironmentSnapshot => "environment_snapshot",
     }
 }
 

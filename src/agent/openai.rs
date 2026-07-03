@@ -948,7 +948,8 @@ pub fn act_tool_schema() -> Value {
                                 "export_asset_pack",
                                 "run_replay_eval",
                                 "eval_snapshot",
-                                "provider_health_snapshot"
+                                "provider_health_snapshot",
+                                "environment_snapshot"
                             ]
                         },
                         "args": {
@@ -1233,6 +1234,7 @@ pub fn gemini_act_function_declaration() -> Value {
                         "run_replay_eval",
                         "eval_snapshot",
                         "provider_health_snapshot",
+                        "environment_snapshot",
                         "screenshot",
                         "active_window",
                         "focus_window",
@@ -1308,6 +1310,7 @@ fn act_compatible_parameters_schema() -> Value {
                     "run_replay_eval",
                     "eval_snapshot",
                     "provider_health_snapshot",
+                    "environment_snapshot",
                     "screenshot",
                     "active_window",
                     "focus_window",
@@ -1572,6 +1575,7 @@ mod tests {
             assert!(schema.contains("run_replay_eval"));
             assert!(schema.contains("eval_snapshot"));
             assert!(schema.contains("provider_health_snapshot"));
+            assert!(schema.contains("environment_snapshot"));
             assert!(schema.contains("screenshot"));
             assert!(schema.contains("active_window"));
             assert!(schema.contains("focus_window"));

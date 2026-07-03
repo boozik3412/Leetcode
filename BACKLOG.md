@@ -106,6 +106,49 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Check configured keys, selected models, registry coverage, and provider issues.
 - Done: Add a Providers UI panel and agent-callable provider health snapshot.
 
+## Stage 13 - UX Polish "Codex-style"
+
+- Done: Add clear interface modes: Chat, Code, Assets, and Project.
+- Done: Scope the right sidebar by the selected mode so it does not show every tool group at once.
+- Done: Keep file tabs and agent chat as first-class central surfaces.
+- Todo: Continue visual simplification after real screenshots from daily usage.
+
+## Stage 14 - Project Command Center
+
+- Done: Promote project profiles, quick commands, preview hooks, terminal state, and recent command output into a command-center view.
+- Done: Add first-pass rerun and "ask agent to fix" actions for project command failures.
+- Done: Add command-run records with status, timestamp, exit code, command, and compact stdout/stderr tail.
+- Done: Add "fix", "rerun", and "open preview" actions tied to concrete command runs.
+- Done: Build fix prompts from the exact failed command output so the agent receives actionable diagnostics.
+- Done: Add lightweight build-error grouping for failed command output.
+- Todo: Add richer task tree and structured diagnostics by compiler/test framework.
+
+## Stage 15 - Asset Studio
+
+- Done: Promote asset generation and asset history into a dedicated workspace mode.
+- Done: Show generated asset history, variants, favorites, export, attach, and source metadata from one place.
+- Todo: Add side-by-side comparison for multiple generated results.
+- Todo: Add project import targets for common game/app asset folders.
+
+## Stage 16 - Real Provider Validation
+
+- Done: Add a validation checklist for OpenAI, Claude, DeepSeek, Gemini, image, audio, and video providers.
+- Done: Add safe manual live validation for chat providers through the real provider layer: model text response plus tool-call shape check.
+- Done: Run provider validation through the configured HTTP/proxy client.
+- Done: Add explicit paid smoke buttons for image, audio, and video providers that launch small Asset Studio jobs only after a user click.
+- Done: Keep recent provider validation results visible in the Providers panel.
+- Done: Persist provider validation results under `assets/generated/leetcode/provider_validation_results.json`.
+
+## Stage 17 - Packaging
+
+- Done: Add Windows packaging docs and a portable build script.
+- Done: Add runtime environment diagnostics for executable/config/journal/workspace paths, proxy state, and local toolchain availability.
+- Done: Expose environment diagnostics as the read-only `environment_snapshot` agent tool.
+- Done: Add release checklist for icon, version, README, provider setup, diagnostics, and workspace/config storage.
+- Done: Document current crash/log folder policy.
+- Todo: Add installer build path or signed portable archive.
+- Todo: Add optional crash dump folder and panic hook.
+
 ## Ongoing Quality Bar
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

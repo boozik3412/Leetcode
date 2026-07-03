@@ -19,6 +19,7 @@ use crate::config::{
     append_journal, clear_journal, permission_mode_description, policy_profile_labels,
     read_journal_tail, AppConfig,
 };
+use crate::diagnostics::environment_diagnostics;
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
 use crate::game_workflows::{
     parse_workflow_kind, run_game_workflow, workflow_specs, GameWorkflowRequest,
@@ -34,7 +35,10 @@ use crate::orchestration::{
     parse_agent_role, record_handoff,
 };
 use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
-use crate::provider_health::provider_health_report;
+use crate::provider_health::{
+    load_provider_validation_history, provider_health_report, provider_validation_plan,
+    record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
+};
 use crate::terminal::{
     clear_terminal_output, read_terminal_snapshot, start_terminal_session, stop_terminal_session,
     write_terminal_input,
@@ -50,6 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct LeetcodeApp {
     config: AppConfig,
@@ -74,6 +79,9 @@ pub struct LeetcodeApp {
     project_is_running: bool,
     project_cancel: Option<Arc<AtomicBool>>,
     project_status: String,
+    last_project_command: Option<ProjectCommand>,
+    project_runs: Vec<ProjectRunRecord>,
+    active_project_run_id: Option<String>,
     desktop_status: String,
     desktop_last_screenshot: Option<String>,
     desktop_active_window: String,
@@ -91,6 +99,9 @@ pub struct LeetcodeApp {
     asset_library_status: String,
     eval_status: String,
     provider_health_status: String,
+    provider_validation_rx: Option<Receiver<ProviderValidationRun>>,
+    provider_validation_running: bool,
+    provider_validation_results: Vec<ProviderValidationRun>,
     orchestration_status: String,
     asset_provider_input: String,
     asset_kind_input: String,
@@ -110,6 +121,7 @@ pub struct LeetcodeApp {
     agent_state: Arc<Mutex<AgentState>>,
     approvals: ApprovalMap,
     pending_approval: Option<PendingApproval>,
+    workspace_mode: WorkspaceMode,
     right_panel_view: RightPanelView,
     active_center_tab: CenterTab,
     file_tabs: Vec<FilePreviewTab>,
@@ -131,6 +143,14 @@ enum RightPanelView {
     Logs,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkspaceMode {
+    Chat,
+    Code,
+    Assets,
+    Project,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CenterTab {
     Agent,
@@ -146,15 +166,29 @@ struct FilePreviewTab {
     status: String,
 }
 
-impl RightPanelView {
-    const ALL: [RightPanelView; 5] = [
-        RightPanelView::Overview,
-        RightPanelView::Project,
-        RightPanelView::Assets,
-        RightPanelView::Control,
-        RightPanelView::Logs,
-    ];
+#[derive(Clone, Debug)]
+struct ProjectRunRecord {
+    id: String,
+    command: ProjectCommand,
+    label: String,
+    shell_command: String,
+    started_at: u64,
+    finished_at: Option<u64>,
+    status: ProjectRunStatus,
+    exit_code: Option<i32>,
+    error_summary: Vec<String>,
+    output_tail: String,
+}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectRunStatus {
+    Running,
+    Passed,
+    Failed,
+    Cancelled,
+}
+
+impl RightPanelView {
     fn label(self) -> &'static str {
         match self {
             RightPanelView::Overview => "Сводка",
@@ -164,14 +198,72 @@ impl RightPanelView {
             RightPanelView::Logs => "Логи",
         }
     }
+}
+
+impl WorkspaceMode {
+    const ALL: [WorkspaceMode; 4] = [
+        WorkspaceMode::Chat,
+        WorkspaceMode::Code,
+        WorkspaceMode::Assets,
+        WorkspaceMode::Project,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            WorkspaceMode::Chat => "Чат",
+            WorkspaceMode::Code => "Код",
+            WorkspaceMode::Assets => "Ассеты",
+            WorkspaceMode::Project => "Проект",
+        }
+    }
 
     fn subtitle(self) -> &'static str {
         match self {
-            RightPanelView::Overview => "текущее состояние агента и проекта",
-            RightPanelView::Project => "команды, терминал и рабочий стол",
-            RightPanelView::Assets => "генерация, библиотека и экспорт",
-            RightPanelView::Control => "доступ, память, провайдеры и проверки",
-            RightPanelView::Logs => "журнал, Git и агентные передачи",
+            WorkspaceMode::Chat => "диалог, разрешения и журнал агента",
+            WorkspaceMode::Code => "файлы, правки, терминал и проверки",
+            WorkspaceMode::Assets => "генерация, история и библиотека ассетов",
+            WorkspaceMode::Project => "команды, preview, сборка и рабочий стол",
+        }
+    }
+
+    fn default_panel(self) -> RightPanelView {
+        match self {
+            WorkspaceMode::Chat => RightPanelView::Overview,
+            WorkspaceMode::Code => RightPanelView::Project,
+            WorkspaceMode::Assets => RightPanelView::Control,
+            WorkspaceMode::Project => RightPanelView::Overview,
+        }
+    }
+
+    fn panels(self) -> &'static [RightPanelView] {
+        match self {
+            WorkspaceMode::Chat => &[
+                RightPanelView::Overview,
+                RightPanelView::Control,
+                RightPanelView::Logs,
+            ],
+            WorkspaceMode::Code => &[
+                RightPanelView::Project,
+                RightPanelView::Control,
+                RightPanelView::Logs,
+            ],
+            WorkspaceMode::Assets => &[RightPanelView::Control, RightPanelView::Logs],
+            WorkspaceMode::Project => &[
+                RightPanelView::Overview,
+                RightPanelView::Control,
+                RightPanelView::Logs,
+            ],
+        }
+    }
+}
+
+impl ProjectRunStatus {
+    fn label(self) -> &'static str {
+        match self {
+            ProjectRunStatus::Running => "выполняется",
+            ProjectRunStatus::Passed => "успешно",
+            ProjectRunStatus::Failed => "ошибка",
+            ProjectRunStatus::Cancelled => "остановлено",
         }
     }
 }
@@ -193,6 +285,10 @@ impl LeetcodeApp {
         let project_profiles = workspace
             .as_ref()
             .map(detect_project_profiles)
+            .unwrap_or_default();
+        let provider_validation_results = workspace
+            .as_ref()
+            .map(|workspace| load_provider_validation_history(workspace).runs)
             .unwrap_or_default();
 
         let api_key_input = config.api_key.clone();
@@ -229,6 +325,9 @@ impl LeetcodeApp {
             project_is_running: false,
             project_cancel: None,
             project_status: String::new(),
+            last_project_command: None,
+            project_runs: Vec::new(),
+            active_project_run_id: None,
             desktop_status: String::new(),
             desktop_last_screenshot: None,
             desktop_active_window: String::new(),
@@ -246,6 +345,9 @@ impl LeetcodeApp {
             asset_library_status: String::new(),
             eval_status: String::new(),
             provider_health_status: String::new(),
+            provider_validation_rx: None,
+            provider_validation_running: false,
+            provider_validation_results,
             orchestration_status: String::new(),
             asset_provider_input,
             asset_kind_input: "image".to_string(),
@@ -265,6 +367,7 @@ impl LeetcodeApp {
             agent_state: Arc::new(Mutex::new(AgentState::default())),
             approvals,
             pending_approval: None,
+            workspace_mode: WorkspaceMode::Chat,
             right_panel_view: RightPanelView::Overview,
             active_center_tab: CenterTab::Agent,
             file_tabs: Vec::new(),
@@ -281,6 +384,8 @@ impl LeetcodeApp {
                 self.sync_config_from_inputs();
                 self.sync_asset_provider_settings();
                 self.config.last_workspace = Some(path);
+                self.provider_validation_results =
+                    load_provider_validation_history(&workspace).runs;
                 self.workspace = Some(workspace);
                 self.refresh_file_rows();
                 self.refresh_project_profiles();
@@ -303,6 +408,13 @@ impl LeetcodeApp {
             Err(err) => self.chat.push(ChatLine::system(format!(
                 "Не удалось открыть рабочую папку: {err}"
             ))),
+        }
+    }
+
+    fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
+        if self.workspace_mode != mode {
+            self.workspace_mode = mode;
+            self.right_panel_view = mode.default_panel();
         }
     }
 
@@ -514,15 +626,30 @@ impl LeetcodeApp {
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         let policy = PolicyConfig::from_config(&self.config);
-        let tool_id = format!("project-{}", command.id);
+        let tool_id = format!("project-{}-{}", command.id, uuid::Uuid::new_v4());
         let label = command.label.clone();
+        let shell_command = command.command.clone();
         let summary = format!("{}: {}", command.label, command.command);
+        self.last_project_command = Some(command.clone());
         let args = RunShellArgs {
-            cmd: command.command,
-            cwd: Some(command.cwd),
+            cmd: shell_command.clone(),
+            cwd: Some(command.cwd.clone()),
             shell: None,
             timeout_secs: Some(command.timeout_secs),
         };
+        self.project_runs.push(ProjectRunRecord {
+            id: tool_id.clone(),
+            command: command.clone(),
+            label: label.clone(),
+            shell_command,
+            started_at: unix_timestamp(),
+            finished_at: None,
+            status: ProjectRunStatus::Running,
+            exit_code: None,
+            error_summary: Vec::new(),
+            output_tail: String::new(),
+        });
+        self.active_project_run_id = Some(tool_id.clone());
 
         self.project_events_rx = Some(rx);
         self.project_is_running = true;
@@ -567,6 +694,115 @@ impl LeetcodeApp {
             self.answer_approval(false);
         }
         self.project_status = "остановка запрошена".to_string();
+    }
+
+    fn append_project_run_output(&mut self, id: &str, chunk: &str) {
+        if let Some(run) = self.project_runs.iter_mut().find(|run| run.id == id) {
+            append_output_tail(&mut run.output_tail, chunk, 12_000);
+        }
+    }
+
+    fn finish_project_run(&mut self, id: &str, output: &str) {
+        let exit_code = parse_project_exit_code(output);
+        let mut project_status = None;
+        if let Some(run) = self.project_runs.iter_mut().find(|run| run.id == id) {
+            append_output_tail(&mut run.output_tail, output, 12_000);
+            run.error_summary = project_error_summary(&run.output_tail);
+            run.finished_at = Some(unix_timestamp());
+            run.exit_code = exit_code;
+            run.status = match exit_code {
+                Some(0) => ProjectRunStatus::Passed,
+                Some(_) => ProjectRunStatus::Failed,
+                None if output.to_lowercase().contains("cancel") || output.contains("отмен") => {
+                    ProjectRunStatus::Cancelled
+                }
+                None => ProjectRunStatus::Failed,
+            };
+            project_status = Some(format!(
+                "{}: {}{}",
+                run.label,
+                run.status.label(),
+                run.exit_code
+                    .map(|code| format!(" (exit code {code})"))
+                    .unwrap_or_default()
+            ));
+        }
+        if let Some(project_status) = project_status {
+            self.project_status = project_status;
+        }
+    }
+
+    fn fail_active_project_run(&mut self, error: &str) {
+        let Some(id) = self.active_project_run_id.clone() else {
+            return;
+        };
+
+        let mut project_status = None;
+        if let Some(run) = self.project_runs.iter_mut().find(|run| run.id == id) {
+            append_output_tail(&mut run.output_tail, error, 12_000);
+            run.error_summary = project_error_summary(&run.output_tail);
+            run.finished_at = Some(unix_timestamp());
+            if run.status == ProjectRunStatus::Running {
+                run.status = if error.to_lowercase().contains("cancel") || error.contains("отмен")
+                {
+                    ProjectRunStatus::Cancelled
+                } else {
+                    ProjectRunStatus::Failed
+                };
+            }
+            project_status = Some(format!("{}: {}", run.label, run.status.label()));
+        }
+        if let Some(project_status) = project_status {
+            self.project_status = project_status;
+        }
+    }
+
+    fn latest_failed_or_last_project_run(&self) -> Option<ProjectRunRecord> {
+        self.project_runs
+            .iter()
+            .rev()
+            .find(|run| run.status == ProjectRunStatus::Failed)
+            .or_else(|| self.project_runs.last())
+            .cloned()
+    }
+
+    fn prepare_fix_prompt_from_run(&mut self, run: &ProjectRunRecord) {
+        self.input = format!(
+            "Проанализируй падение проектной команды и исправь причину минимальными изменениями.\n\nКоманда: {}\nСтатус: {}\nExit code: {}\n\nХвост вывода:\n```text\n{}\n```\n\nСначала кратко назови вероятную причину, затем внеси правки и проверь подходящей командой.",
+            run.shell_command,
+            run.status.label(),
+            run.exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "нет".to_string()),
+            compact(&run.output_tail, 5_000)
+        );
+        self.active_center_tab = CenterTab::Agent;
+        self.set_workspace_mode(WorkspaceMode::Chat);
+    }
+
+    fn open_first_project_preview(&mut self) {
+        let profiles = self.project_profiles.clone();
+        for profile in profiles {
+            for hook in profile.previews {
+                if let Some(url) = hook.url.as_deref() {
+                    self.open_preview_url_from_ui(url);
+                    return;
+                }
+                if let Some(command_id) = hook.command_id.as_deref() {
+                    if let Some(command) = profile
+                        .commands
+                        .iter()
+                        .find(|command| command.id == command_id)
+                        .cloned()
+                    {
+                        self.start_project_command(command);
+                        return;
+                    }
+                }
+            }
+        }
+
+        self.project_status = "preview для проекта не найден".to_string();
     }
 
     fn create_game_workflow_from_ui(&mut self, workflow_id: &str) {
@@ -622,7 +858,9 @@ impl LeetcodeApp {
 
         self.project_status = match result {
             Ok(()) => format!("открыто: {url}"),
-            Err(err) => format!("не удалось открыть предпросмотр: {err}"),
+            Err(err) => {
+                format!("не удалось открыть предпросмотр: {err}")
+            }
         };
     }
 
@@ -889,7 +1127,9 @@ impl LeetcodeApp {
 
         self.asset_status = match result {
             Ok(()) => "папка ассета открыта".to_string(),
-            Err(err) => format!("не удалось открыть папку ассета: {err}"),
+            Err(err) => {
+                format!("не удалось открыть папку ассета: {err}")
+            }
         };
     }
 
@@ -1089,6 +1329,7 @@ impl LeetcodeApp {
     }
 
     fn load_file_preview(&mut self, rel: &str) {
+        self.set_workspace_mode(WorkspaceMode::Code);
         if let Some(index) = self.file_tabs.iter().position(|tab| tab.path == rel) {
             self.active_center_tab = CenterTab::File(rel.to_string());
             self.sync_selected_from_file_tab(index);
@@ -1412,6 +1653,7 @@ impl LeetcodeApp {
                     });
                 }
                 AppEvent::ToolOutput { id, chunk } => {
+                    self.append_project_run_output(&id, &chunk);
                     self.tool_log.push(ToolLogLine {
                         title: format!("вывод {id}"),
                         content: chunk,
@@ -1540,11 +1782,11 @@ impl LeetcodeApp {
                     });
                 }
                 AppEvent::ToolFinished { id, output } => {
+                    self.finish_project_run(&id, &output);
                     self.tool_log.push(ToolLogLine {
                         title: format!("готово {id}"),
                         content: compact(&output, 2_000),
                     });
-                    self.project_status = "команда завершена".to_string();
                     self.refresh_file_rows();
                     self.refresh_project_profiles();
                     self.refresh_git_summary();
@@ -1561,6 +1803,7 @@ impl LeetcodeApp {
                     });
                 }
                 AppEvent::Error(err) => {
+                    self.fail_active_project_run(&err);
                     self.project_status = format!("ошибка: {err}");
                     self.tool_log.push(ToolLogLine {
                         title: "ошибка проекта".to_string(),
@@ -1570,6 +1813,7 @@ impl LeetcodeApp {
                 AppEvent::Done => {
                     self.project_is_running = false;
                     self.project_cancel = None;
+                    self.active_project_run_id = None;
                     self.refresh_file_rows();
                     self.refresh_project_profiles();
                     self.refresh_git_summary();
@@ -1581,6 +1825,132 @@ impl LeetcodeApp {
         if had_events {
             self.refresh_journal();
         }
+    }
+
+    fn start_provider_live_validation(&mut self, provider_id: String) {
+        if self.provider_validation_running {
+            return;
+        }
+
+        self.save_settings_from_ui();
+        let config = self.config.clone();
+        let provider_label = provider_name(&provider_id).to_string();
+        let (tx, rx) = mpsc::channel();
+        self.provider_validation_rx = Some(rx);
+        self.provider_validation_running = true;
+        self.provider_health_status = format!("проверка провайдера {provider_label}...");
+
+        thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new()
+                .expect("не удалось запустить tokio runtime")
+                .block_on(run_provider_live_validation(config, provider_id));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn drain_provider_validation_events(&mut self) {
+        let mut results = Vec::new();
+        if let Some(rx) = &self.provider_validation_rx {
+            while let Ok(result) = rx.try_recv() {
+                results.push(result);
+            }
+        }
+
+        for result in results {
+            self.provider_validation_running = false;
+            self.provider_health_status = if result.ok {
+                format!(
+                    "{} {}: live-проверка пройдена за {} мс",
+                    result.provider_name, result.model, result.elapsed_ms
+                )
+            } else {
+                format!(
+                    "{} {}: live-проверка не прошла",
+                    result.provider_name, result.model
+                )
+            };
+            if let Some(workspace) = &self.workspace {
+                match record_provider_validation_run(workspace, result.clone()) {
+                    Ok(history) => {
+                        self.provider_validation_results = history.runs;
+                    }
+                    Err(err) => {
+                        self.provider_health_status =
+                            format!("результат проверки получен, но не сохранён: {err}");
+                        self.provider_validation_results.push(result);
+                    }
+                }
+            } else {
+                self.provider_validation_results.push(result);
+            }
+            if self.provider_validation_results.len() > 100 {
+                let overflow = self.provider_validation_results.len() - 100;
+                self.provider_validation_results.drain(0..overflow);
+            }
+            self.provider_validation_rx = None;
+        }
+    }
+
+    fn start_asset_smoke_validation(&mut self, provider_id: &str) {
+        if self.asset_is_running {
+            self.provider_health_status =
+                "дождитесь завершения текущей генерации ассета".to_string();
+            return;
+        }
+
+        self.save_settings_from_ui();
+        self.set_workspace_mode(WorkspaceMode::Assets);
+        self.right_panel_view = RightPanelView::Control;
+
+        match provider_id {
+            OPENAI_AUDIO_PROVIDER_ID => {
+                let request = AudioAssetRequest {
+                    provider: OPENAI_AUDIO_PROVIDER_ID.to_string(),
+                    prompt: "Say exactly: Leetcode provider validation passed.".to_string(),
+                    model: media_model_from_config(
+                        &self.config,
+                        OPENAI_AUDIO_PROVIDER_ID,
+                        default_audio_model(OPENAI_AUDIO_PROVIDER_ID),
+                    ),
+                    voice: "alloy".to_string(),
+                    format: "wav".to_string(),
+                };
+                self.start_audio_asset_request(request);
+            }
+            OPENAI_VIDEO_PROVIDER_ID => {
+                let request = VideoAssetRequest {
+                    provider: OPENAI_VIDEO_PROVIDER_ID.to_string(),
+                    prompt: "A one second neutral desktop app validation clip with a simple glowing checkmark."
+                        .to_string(),
+                    model: media_model_from_config(
+                        &self.config,
+                        OPENAI_VIDEO_PROVIDER_ID,
+                        default_video_model(OPENAI_VIDEO_PROVIDER_ID),
+                    ),
+                    size: "1280x720".to_string(),
+                    seconds: 1,
+                };
+                self.start_video_asset_request(request);
+            }
+            provider_id => {
+                let provider_id = provider_id.to_string();
+                self.asset_provider_input = provider_id.clone();
+                self.asset_kind_input = "image".to_string();
+                self.asset_api_key_input = image_api_key_from_config(&self.config, &provider_id);
+                self.asset_model_input = image_model_from_config(&self.config, &provider_id);
+                let request = ImageAssetRequest {
+                    provider: provider_id,
+                    prompt: "Small provider validation image: a clean checkmark icon for a desktop development tool, no text.".to_string(),
+                    model: self.asset_model_input.clone(),
+                    aspect_ratio: "1:1".to_string(),
+                    image_size: "0.5K".to_string(),
+                };
+                self.start_image_asset_request(request);
+            }
+        }
+
+        self.provider_health_status =
+            "asset smoke запущен вручную; результат появится в Asset Studio".to_string();
     }
 
     fn answer_approval(&mut self, approved: bool) {
@@ -1777,6 +2147,16 @@ impl LeetcodeApp {
                     );
                     ui.label(RichText::new("AI-рабочий стол").weak().small());
                     ui.add_space(12.0);
+                    for mode in WorkspaceMode::ALL {
+                        let selected = self.workspace_mode == mode;
+                        let response = ui
+                            .selectable_label(selected, RichText::new(mode.label()).strong())
+                            .on_hover_text(mode.subtitle());
+                        if response.clicked() {
+                            self.set_workspace_mode(mode);
+                        }
+                    }
+                    ui.separator();
 
                     ui.label(RichText::new("Провайдер").weak().small());
                     let old_provider = self.provider_input.clone();
@@ -2386,33 +2766,102 @@ impl LeetcodeApp {
             ui.separator();
             ui.label(RichText::new("Чат-модели").strong());
             for provider in &report.chat_providers {
-                provider_row(
-                    ui,
-                    &provider.name,
-                    provider.key_present,
-                    &provider.selected_model,
-                    if provider.issues.is_empty() {
-                        "ок".to_string()
-                    } else {
-                        provider.issues.join(", ")
-                    },
-                );
+                ui.horizontal_wrapped(|ui| {
+                    provider_row(
+                        ui,
+                        &provider.name,
+                        provider.key_present,
+                        &provider.selected_model,
+                        if provider.issues.is_empty() {
+                            "ок".to_string()
+                        } else {
+                            provider.issues.join(", ")
+                        },
+                    );
+                    if ui
+                        .add_enabled(
+                            provider.implemented
+                                && provider.key_present
+                                && provider.model_known
+                                && !self.provider_validation_running,
+                            egui::Button::new("Live smoke"),
+                        )
+                        .on_hover_text(
+                            "Реальный запрос к модели: короткий текстовый ответ и проверка формы tool-call.",
+                        )
+                        .clicked()
+                    {
+                        self.start_provider_live_validation(provider.id.clone());
+                    }
+                });
             }
 
             ui.separator();
             ui.label(RichText::new("Asset-модели").strong());
             for provider in &report.asset_providers {
-                provider_row(
+                ui.horizontal_wrapped(|ui| {
+                    provider_row(
+                        ui,
+                        &provider.name,
+                        provider.key_present,
+                        &provider.selected_model,
+                        if provider.issues.is_empty() {
+                            provider.env_var.clone()
+                        } else {
+                            provider.issues.join(", ")
+                        },
+                    );
+                    if ui
+                        .add_enabled(
+                            provider.key_present
+                                && self.workspace.is_some()
+                                && !self.asset_is_running,
+                            egui::Button::new("Платный smoke"),
+                        )
+                        .on_hover_text(
+                            "Запускает маленькую тестовую генерацию и сохраняет результат в Asset Studio.",
+                        )
+                        .clicked()
+                    {
+                        self.start_asset_smoke_validation(&provider.id);
+                    }
+                });
+            }
+            ui.separator();
+            ui.label(RichText::new("Live validation plan").strong());
+            for step in provider_validation_plan(&self.config).iter().take(18) {
+                status_line(
                     ui,
-                    &provider.name,
-                    provider.key_present,
-                    &provider.selected_model,
-                    if provider.issues.is_empty() {
-                        provider.env_var.clone()
-                    } else {
-                        provider.issues.join(", ")
-                    },
+                    &format!("{} / {}", step.provider_name, step.check),
+                    &step.status,
                 );
+            }
+            if !self.provider_validation_results.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Последние live-проверки").strong());
+                for result in self.provider_validation_results.iter().rev().take(6) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(format!(
+                            "{} {}",
+                            result.provider_name, result.model
+                        ))
+                        .strong());
+                        chip(ui, if result.ok { "успешно" } else { "ошибка" });
+                        ui.label(RichText::new(format!("{} мс", result.elapsed_ms)).weak());
+                    });
+                    for check in &result.checks {
+                        status_line(
+                            ui,
+                            &check.check,
+                            if check.ok {
+                                "ок"
+                            } else {
+                                check.detail.as_str()
+                            },
+                        );
+                    }
+                    ui.add_space(4.0);
+                }
             }
             if !self.provider_health_status.is_empty() {
                 ui.label(RichText::new(&self.provider_health_status).weak());
@@ -2586,7 +3035,62 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_environment_panel(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Диагностика", |ui| {
+            let diagnostics = environment_diagnostics(&self.config, self.workspace.as_ref());
+            panel_header(
+                ui,
+                "Диагностика окружения",
+                "Локальные пути, proxy, toolchain и release-проверки без секретов.",
+            );
+            status_line(ui, "Версия", &diagnostics.app_version);
+            status_line(
+                ui,
+                "Платформа",
+                &format!("{} / {}", diagnostics.os, diagnostics.arch),
+            );
+            status_line(ui, "Процесс", &diagnostics.executable);
+            status_line(ui, "Текущая папка", &diagnostics.current_dir);
+            if let Some(workspace) = diagnostics.workspace.as_deref() {
+                status_line(ui, "Workspace", workspace);
+            }
+            if let Some(config_path) = diagnostics.config_path.as_deref() {
+                status_line(ui, "Config", config_path);
+            }
+            if let Some(journal_path) = diagnostics.journal_path.as_deref() {
+                status_line(ui, "Journal", journal_path);
+            }
+            status_line(ui, "Proxy", &diagnostics.proxy);
+            status_line(ui, "System proxy", &diagnostics.system_proxy);
+
+            ui.separator();
+            ui.label(RichText::new("Инструменты").strong());
+            for item in &diagnostics.tools {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&item.name).monospace());
+                    chip(ui, item.status.as_str());
+                    ui.label(RichText::new(&item.detail).weak());
+                });
+            }
+
+            ui.separator();
+            ui.label(RichText::new("Release policy").strong());
+            for item in &diagnostics.release_notes {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&item.name).monospace());
+                    chip(ui, item.status.as_str());
+                    ui.label(RichText::new(&item.detail).weak());
+                });
+            }
+        });
+    }
+
     fn show_tool_panel(&mut self, ctx: &egui::Context) {
+        let allowed_panels = self.workspace_mode.panels();
+        if !allowed_panels.contains(&self.right_panel_view) {
+            self.right_panel_view = self.workspace_mode.default_panel();
+        }
+
         egui::SidePanel::right("tools")
             .resizable(true)
             .default_width(380.0)
@@ -2595,19 +3099,19 @@ impl LeetcodeApp {
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Рабочая панель").strong().size(18.0));
+                    ui.label(
+                        RichText::new(format!("{} панель", self.workspace_mode.label()))
+                            .strong()
+                            .size(18.0),
+                    );
                     if self.is_running || self.project_is_running || self.asset_is_running {
                         ui.spinner();
                     }
                 });
-                ui.label(
-                    RichText::new(self.right_panel_view.subtitle())
-                        .weak()
-                        .small(),
-                );
+                ui.label(RichText::new(self.workspace_mode.subtitle()).weak().small());
                 ui.add_space(6.0);
 
-                panel_switcher(ui, &mut self.right_panel_view);
+                panel_switcher(ui, &mut self.right_panel_view, allowed_panels);
                 ui.add_space(8.0);
 
                 egui::ScrollArea::vertical()
@@ -2629,6 +3133,7 @@ impl LeetcodeApp {
                             flat_section(ui, |ui| self.show_memory_panel(ui));
                             flat_section(ui, |ui| self.show_provider_health_panel(ui));
                             flat_section(ui, |ui| self.show_evals_panel(ui));
+                            flat_section(ui, |ui| self.show_environment_panel(ui));
                         }
                         RightPanelView::Logs => {
                             flat_section(ui, |ui| self.show_orchestration_panel(ui));
@@ -3577,50 +4082,277 @@ impl LeetcodeApp {
             });
     }
 
-    #[allow(unreachable_code)]
+    fn show_main_workspace(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        match self.workspace_mode {
+            WorkspaceMode::Chat => self.show_center_tabs(ui),
+            WorkspaceMode::Code => self.show_code_workspace(ui),
+            WorkspaceMode::Assets => self.show_asset_studio_center(ui, ctx),
+            WorkspaceMode::Project => self.show_project_command_center(ui),
+        }
+    }
+
+    fn show_code_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Код").strong().size(22.0));
+            if self.file_tabs.is_empty() {
+                ui.label(
+                    RichText::new("выберите файл слева или попросите агента внести правку").weak(),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!("открыто вкладок: {}", self.file_tabs.len())).weak(),
+                );
+            }
+        });
+        ui.add_space(6.0);
+        self.show_center_tabs(ui);
+    }
+
+    fn show_project_command_center(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Project Command Center").strong().size(22.0));
+            if self.project_is_running {
+                ui.spinner();
+            }
+            if ui
+                .add_enabled(self.workspace.is_some(), egui::Button::new("Обновить"))
+                .clicked()
+            {
+                self.refresh_project_profiles();
+                self.refresh_git_summary();
+            }
+            if ui
+                .add_enabled(self.project_is_running, egui::Button::new("Стоп"))
+                .clicked()
+            {
+                self.stop_project_command();
+            }
+        });
+        if let Some(workspace) = &self.workspace {
+            ui.label(RichText::new(format!("Проект: {}", workspace.display_name())).weak());
+        } else {
+            empty_state(
+                ui,
+                "Проект не выбран",
+                "Нажмите «Проект» сверху и выберите рабочую папку.",
+            );
+            return;
+        }
+        if !self.project_status.is_empty() {
+            ui.label(RichText::new(&self.project_status).weak());
+        }
+        let has_preview = self
+            .project_profiles
+            .iter()
+            .any(|profile| !profile.previews.is_empty());
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    self.last_project_command.is_some() && !self.project_is_running,
+                    egui::Button::new("Перезапустить"),
+                )
+                .clicked()
+            {
+                if let Some(command) = self.last_project_command.clone() {
+                    self.start_project_command(command);
+                }
+            }
+            if ui
+                .add_enabled(
+                    self.latest_failed_or_last_project_run().is_some(),
+                    egui::Button::new("Попросить агента исправить"),
+                )
+                .clicked()
+            {
+                if let Some(run) = self.latest_failed_or_last_project_run() {
+                    self.prepare_fix_prompt_from_run(&run);
+                }
+            }
+            if ui
+                .add_enabled(
+                    has_preview && !self.project_is_running,
+                    egui::Button::new("Открыть preview"),
+                )
+                .clicked()
+            {
+                self.open_first_project_preview();
+            }
+            if ui.button("Обновить Git").clicked() {
+                self.refresh_git_summary();
+            }
+        });
+        ui.add_space(8.0);
+
+        if !self.project_profiles.is_empty() {
+            let profiles = self.project_profiles.clone();
+            for profile in profiles {
+                let profile_commands = profile.commands.clone();
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&profile.kind).strong());
+                    ui.label(RichText::new(&profile.name).weak());
+                    if !profile.markers.is_empty() {
+                        ui.label(RichText::new(profile.markers.join(", ")).weak().small());
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    for command in profile.commands {
+                        let response = ui
+                            .add_enabled(
+                                !self.project_is_running,
+                                egui::Button::new(&command.label),
+                            )
+                            .on_hover_text(format!("{}\n{}", command.description, command.command));
+                        if response.clicked() {
+                            self.start_project_command(command);
+                        }
+                    }
+                });
+                if !profile.previews.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Preview").weak());
+                        for hook in profile.previews {
+                            let response = ui
+                                .add_enabled(
+                                    !self.project_is_running,
+                                    egui::Button::new(&hook.label),
+                                )
+                                .on_hover_text(&hook.description);
+                            if response.clicked() {
+                                if let Some(url) = hook.url.as_deref() {
+                                    self.open_preview_url_from_ui(url);
+                                } else if let Some(command_id) = hook.command_id.as_deref() {
+                                    if let Some(command) = profile_commands
+                                        .iter()
+                                        .find(|command| command.id == command_id)
+                                        .cloned()
+                                    {
+                                        self.start_project_command(command);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        } else {
+            empty_state(
+                ui,
+                "Профили не обнаружены",
+                "Можно работать через чат и файловое дерево, но быстрые команды пока не распознаны.",
+            );
+            self.show_game_workflow_buttons(ui);
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.label(RichText::new("История запусков").strong());
+        let runs = self
+            .project_runs
+            .iter()
+            .rev()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>();
+        if runs.is_empty() {
+            ui.label(RichText::new("История команд пока пуста").weak());
+        }
+        for run in runs {
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&run.label).strong());
+                chip(ui, run.status.label());
+                if let Some(code) = run.exit_code {
+                    chip(ui, format!("exit {code}"));
+                }
+                ui.label(RichText::new(format!("старт: {}", run.started_at)).weak());
+                if let Some(finished_at) = run.finished_at {
+                    ui.label(RichText::new(format!("финиш: {finished_at}")).weak());
+                }
+                if ui
+                    .add_enabled(!self.project_is_running, egui::Button::new("Перезапустить"))
+                    .clicked()
+                {
+                    self.start_project_command(run.command.clone());
+                }
+                if ui
+                    .add_enabled(
+                        run.status == ProjectRunStatus::Failed,
+                        egui::Button::new("Исправить"),
+                    )
+                    .clicked()
+                {
+                    self.prepare_fix_prompt_from_run(&run);
+                }
+                if ui
+                    .add_enabled(
+                        has_preview && !self.project_is_running,
+                        egui::Button::new("Preview"),
+                    )
+                    .clicked()
+                {
+                    self.open_first_project_preview();
+                }
+            });
+            ui.label(RichText::new(&run.shell_command).weak().monospace());
+            if !run.error_summary.is_empty() {
+                ui.label(RichText::new("Найденные ошибки").strong());
+                for item in run.error_summary.iter().take(6) {
+                    ui.label(RichText::new(item).color(egui::Color32::from_rgb(235, 154, 154)));
+                }
+            }
+            if run.output_tail.trim().is_empty() {
+                ui.label(RichText::new("вывод пока пуст").weak());
+            } else {
+                let mut output = compact(&run.output_tail, 2_400);
+                ui.add(
+                    TextEdit::multiline(&mut output)
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(5)
+                        .interactive(false),
+                );
+            }
+        }
+    }
+
+    fn show_asset_studio_center(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Asset Studio").strong().size(22.0));
+            if self.asset_is_running {
+                ui.spinner();
+            }
+            if ui
+                .add_enabled(self.workspace.is_some(), egui::Button::new("Обновить"))
+                .clicked()
+            {
+                if let Some(workspace) = &self.workspace {
+                    self.asset_jobs = load_jobs(workspace);
+                }
+            }
+            if ui
+                .add_enabled(self.workspace.is_some(), egui::Button::new("Открыть папку"))
+                .clicked()
+            {
+                self.open_generated_assets_folder();
+            }
+        });
+        ui.label(
+            RichText::new("Генерация, история, варианты, избранное и экспорт ассетов.").weak(),
+        );
+        ui.add_space(8.0);
+        self.show_asset_panel(ui, ctx);
+        ui.separator();
+        self.show_asset_library_panel(ui);
+    }
+
     fn show_chat_panel(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default()
             .frame(central_frame())
             .show(ctx, |ui| {
-                self.show_center_tabs(ui);
-                return;
-
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Leetcode").strong().size(24.0));
-                    ui.label(
-                        RichText::new("Локальный агент для кода, ассетов и рабочего стола")
-                            .weak()
-                            .small(),
-                    );
-                    if self.is_running {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label(RichText::new("агент работает").weak().small());
-                        });
-                    } else if let Some(workspace) = &self.workspace {
-                        ui.label(
-                            RichText::new(format!("Проект: {}", workspace.display_name()))
-                                .weak()
-                                .small(),
-                        );
-                    }
-                });
-                ui.add_space(10.0);
-
-                egui::ScrollArea::vertical()
-                    .id_salt("chat_transcript_scroll")
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        ui.add_space(4.0);
-                        for line in &self.chat {
-                            chat_message(ui, line);
-                        }
-                    });
+                self.show_main_workspace(ui, ctx);
             });
     }
-
     fn show_permission_mode_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Доступ").weak().small());
@@ -3743,6 +4475,7 @@ impl eframe::App for LeetcodeApp {
         self.drain_events();
         self.drain_project_events();
         self.drain_asset_events();
+        self.drain_provider_validation_events();
         self.refresh_terminal_snapshot();
         self.show_menu_bar(ctx);
         self.show_top_bar(ctx);
@@ -3755,6 +4488,7 @@ impl eframe::App for LeetcodeApp {
         if self.is_running
             || self.project_is_running
             || self.asset_is_running
+            || self.provider_validation_running
             || self.terminal_running
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -3925,11 +4659,11 @@ fn flat_collapsing_section(
     ui.add_space(8.0);
 }
 
-fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView) {
+fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView, views: &[RightPanelView]) {
     let available = ui.available_width();
-    let button_width = ((available - 16.0) / RightPanelView::ALL.len() as f32).max(52.0);
+    let button_width = ((available - 16.0) / views.len().max(1) as f32).max(58.0);
     ui.horizontal(|ui| {
-        for view in RightPanelView::ALL {
+        for view in views.iter().copied() {
             let is_selected = *selected == view;
             let response = ui.add_sized(
                 [button_width, 28.0],
@@ -4412,4 +5146,68 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
         compacted.push_str("...");
     }
     compacted
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn append_output_tail(target: &mut String, chunk: &str, max_chars: usize) {
+    if !target.is_empty() && !target.ends_with('\n') {
+        target.push('\n');
+    }
+    target.push_str(chunk);
+    if !target.ends_with('\n') {
+        target.push('\n');
+    }
+
+    let char_count = target.chars().count();
+    if char_count > max_chars {
+        let keep_from = char_count.saturating_sub(max_chars);
+        *target = target.chars().skip(keep_from).collect::<String>();
+        target.insert_str(0, "... ");
+    }
+}
+
+fn parse_project_exit_code(output: &str) -> Option<i32> {
+    for line in output.lines() {
+        let lower = line.to_lowercase();
+        if !(lower.contains("exit code") || lower.contains("код выхода")) {
+            continue;
+        }
+        let Some((_, tail)) = line.rsplit_once(':') else {
+            continue;
+        };
+        if let Ok(code) = tail.trim().parse::<i32>() {
+            return Some(code);
+        }
+    }
+
+    None
+}
+
+fn project_error_summary(output: &str) -> Vec<String> {
+    let mut summary = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+        let is_error = lower.contains("error")
+            || lower.contains("failed")
+            || lower.contains("panic")
+            || lower.contains("ошибка")
+            || lower.contains("не удалось");
+        if is_error && !summary.iter().any(|existing| existing == trimmed) {
+            summary.push(trimmed.to_string());
+        }
+        if summary.len() >= 12 {
+            break;
+        }
+    }
+    summary
 }

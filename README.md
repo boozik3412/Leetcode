@@ -160,7 +160,7 @@ The `Asset Library` panel indexes completed generated asset jobs into `assets/ge
 
 The `Evals` panel runs local static checks for replay eval cases created by `create_replay_eval` and stores results in `assets/generated/leetcode/eval_results.json`. These checks validate prompt presence, expected tool names, and success criteria without calling external APIs.
 
-The `Providers` panel reports offline health for configured chat and asset providers: API key presence, selected model, registry coverage, capabilities, and issues. The agent can request the same report with `provider_health_snapshot`.
+The `Providers` panel reports offline health for configured chat and asset providers: API key presence, selected model, registry coverage, capabilities, and issues. Manual live smoke checks validate a real text response and tool-call shape for chat providers, while paid asset smoke checks launch small Asset Studio jobs only after a user click. Provider validation history is stored per workspace in `assets/generated/leetcode/provider_validation_results.json`. The agent can request the same offline report with `provider_health_snapshot`.
 
 ## Launch
 
@@ -178,6 +178,18 @@ The launcher uses the local `.cargo` and `.rustup` toolchain folders when they e
 .\run-leetcode.cmd build
 .\run-leetcode.cmd release
 ```
+
+## Packaging
+
+Portable Windows packaging is documented in `PACKAGING.md`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+```
+
+The output is written to `dist/leetcode-portable`.
+
+Before packaging, open `Контроль -> Диагностика` inside the app. It reports the executable path, config path, journal path, selected workspace data path, proxy state, and local toolchain availability without exposing API keys. The agent can request the same read-only report with `environment_snapshot`.
 
 ## Notes
 
