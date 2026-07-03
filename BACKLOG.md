@@ -151,6 +151,27 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add signed portable archive path with zip output, SHA256 manifest, and optional SignTool support.
 - Done: Add optional crash report folder and panic hook.
 
+## Stage 18 - Guided Autonomy & Run Timeline
+
+Цель: превратить богатый набор инструментов Leetcode в прозрачный управляемый рабочий процесс: пользователь видит план, текущий шаг, подтверждения, проверки и итоговый отчёт без необходимости собирать картину из разных панелей.
+
+- Done: Added an MVP compact run timeline under the current/last assistant message with planning, assistant output, tool calls, approvals, failure/cancellation, and completion states.
+- Todo: Add explicit pre-run plans for non-trivial tasks with user actions: approve plan, ask to revise, restrict tools, run analysis-only, or allow subagents.
+- Todo: Expand aggregation beyond live agent events to include richer journal, project command records, orchestration summaries, and eval result links in one readable run narrative.
+- Done: Added expandable tool-call detail cards with action/status/duration/compact output for timeline steps.
+- Done: Added an automatic final run report with changed files, commands executed, validation results, risks, next steps, and saved run summary id placeholder.
+- Done: Added reusable `src/run_timeline.rs` module for timeline data structures and aggregation helpers.
+- Done: Added replay/static eval case for timeline-critical behaviours and ran static replay validation.
+- Todo: Add UI polish for daily use: default horizontal alignment should stay left-aligned, not centered; long content must remain constrained between side panels.
+
+### Suggested MVP slice
+
+1. Done: Introduce `RunTimeline`, `RunTimelineStep`, `RunTimelineStatus`, and event mapping from existing agent/tool/project events.
+2. Done: Render a left-aligned collapsible timeline under the active assistant message.
+3. Done: Populate timeline from current live status plus completed tool/project command records.
+4. Done: Generate a final compact report when the agent run finishes.
+5. Done: Validate with `cargo check`, `cargo test`, and one replay eval case.
+
 ## Ongoing Quality Bar
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

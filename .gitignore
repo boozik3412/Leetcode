@@ -5,3 +5,7 @@
 /.idea
 /.vscode
 *.pdb
+/assets/generated/attachments/
+/assets/generated/leetcode/
+/assets/generated/orchestration/
+/assets/generated/screenshots/

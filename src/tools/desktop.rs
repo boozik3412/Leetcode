@@ -5,6 +5,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::Sender;
 
@@ -302,7 +303,7 @@ pub fn hotkey(
         .unwrap_or_else(ToolResult::error)
 }
 
-fn capture_screenshot_file(workspace: &Workspace, prefix: &str) -> Result<String, String> {
+pub fn capture_screenshot_file(workspace: &Workspace, prefix: &str) -> Result<String, String> {
     let rel_path = format!(
         "assets/generated/screenshots/{prefix}-{}.png",
         uuid::Uuid::new_v4()
@@ -316,21 +317,38 @@ fn capture_screenshot_file(workspace: &Workspace, prefix: &str) -> Result<String
 
     #[cfg(target_os = "windows")]
     {
-        let escaped_path = output_path.to_string_lossy().replace('\'', "''");
+        let escaped_path = escape_powershell_single_quoted(&windows_dotnet_path(&output_path));
         let script = format!(
-            r#"$path = '{escaped_path}'
+            r#"$ErrorActionPreference = 'Stop'
+$path = '{escaped_path}'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
 $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
 $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bounds.Size)
-$bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-$graphics.Dispose()
-$bitmap.Dispose()
+try {{
+    $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bounds.Size)
+    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+}} finally {{
+    $graphics.Dispose()
+    $bitmap.Dispose()
+}}
+if (-not (Test-Path -LiteralPath $path)) {{
+    throw "screenshot file was not created: $path"
+}}
+if ((Get-Item -LiteralPath $path).Length -le 0) {{
+    throw "screenshot file is empty: $path"
+}}
 "#
         );
         run_powershell_script(&script, "screenshot")?;
+        let bytes = fs::metadata(&output_path)
+            .map_err(|err| format!("screenshot file is not accessible: {err}"))?
+            .len();
+        if bytes == 0 {
+            let _ = fs::remove_file(&output_path);
+            return Err("screenshot file is empty".to_string());
+        }
         Ok(rel_path)
     }
 
@@ -339,6 +357,23 @@ $bitmap.Dispose()
         let _ = workspace;
         let _ = prefix;
         Err("screenshot is currently implemented only on Windows".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn escape_powershell_single_quoted(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_dotnet_path(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('/', "\\");
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path
     }
 }
 

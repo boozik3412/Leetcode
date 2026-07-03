@@ -116,7 +116,7 @@ pub async fn run_user_turn(
 
     let mut input = ProviderInput::Text(user_input);
 
-    for _ in 0..24 {
+    loop {
         if cancel.load(Ordering::SeqCst) {
             anyhow::bail!("Запуск отменён");
         }
@@ -200,6 +200,4 @@ pub async fn run_user_turn(
             input = ProviderInput::ToolOutputs(tool_outputs);
         }
     }
-
-    anyhow::bail!("Агентный цикл остановлен: слишком много раундов инструментов");
 }

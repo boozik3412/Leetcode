@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+arboard = "3"
 async-trait = "0.1"
 base64 = "0.22"
 dirs = "5"

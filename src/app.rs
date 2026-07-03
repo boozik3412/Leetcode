@@ -41,14 +41,17 @@ use crate::provider_health::{
     load_provider_validation_history, provider_health_report, provider_validation_plan,
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
+use crate::run_timeline::{RunTimeline, RunTimelineStatus};
 use crate::terminal::{
     clear_terminal_output, read_terminal_snapshot, start_terminal_session, stop_terminal_session,
     write_terminal_input,
 };
+use crate::tools::desktop::capture_screenshot_file;
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::shell::{run_shell, RunShellArgs};
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
+use image::{ColorType, ImageFormat};
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -58,7 +61,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub struct LeetcodeApp {
     config: AppConfig,
@@ -85,11 +88,17 @@ pub struct LeetcodeApp {
     selected_file_editable: bool,
     editor_status: String,
     input: String,
+    input_attachments: Vec<InputAttachment>,
+    input_attachment_status: String,
+    input_paste_shortcut_down: bool,
     chat: Vec<ChatLine>,
     tool_log: Vec<ToolLogLine>,
     journal_lines: Vec<String>,
     journal_status: String,
     git_summary: String,
+    git_action_status: String,
+    git_commit_dialog_open: bool,
+    git_commit_message_input: String,
     project_profiles: Vec<ProjectProfile>,
     project_events_rx: Option<Receiver<AppEvent>>,
     project_is_running: bool,
@@ -142,7 +151,13 @@ pub struct LeetcodeApp {
     asset_previews: HashMap<String, egui::TextureHandle>,
     events_rx: Option<Receiver<AppEvent>>,
     is_running: bool,
+    agent_started_at: Option<Instant>,
+    agent_user_message_index: Option<usize>,
+    agent_chat_start_index: Option<usize>,
+    agent_live_status: String,
     cancel: Option<Arc<AtomicBool>>,
+    run_timeline: Option<RunTimeline>,
+    run_timeline_anchor_index: Option<usize>,
     agent_state: Arc<Mutex<AgentState>>,
     approvals: ApprovalMap,
     pending_approval: Option<PendingApproval>,
@@ -157,6 +172,30 @@ struct PendingApproval {
     id: String,
     summary: String,
     detail: String,
+}
+
+#[derive(Clone, Debug)]
+struct InputAttachment {
+    path: String,
+    name: String,
+    kind: InputAttachmentKind,
+    bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputAttachmentKind {
+    File,
+    Image,
+    Screenshot,
+}
+
+impl InputAttachmentKind {
+    fn promote_image(self) -> Self {
+        match self {
+            Self::File => Self::Image,
+            Self::Image | Self::Screenshot => self,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -478,6 +517,9 @@ impl LeetcodeApp {
             selected_file_editable: false,
             editor_status: String::new(),
             input: String::new(),
+            input_attachments: Vec::new(),
+            input_attachment_status: String::new(),
+            input_paste_shortcut_down: false,
             chat: vec![ChatLine::system(
                 "Выберите проект, проверьте модель/API-ключ и отправьте задачу агенту.",
             )],
@@ -485,6 +527,9 @@ impl LeetcodeApp {
             journal_lines,
             journal_status: String::new(),
             git_summary: String::new(),
+            git_action_status: String::new(),
+            git_commit_dialog_open: false,
+            git_commit_message_input: String::new(),
             project_profiles,
             project_events_rx: None,
             project_is_running: false,
@@ -537,7 +582,13 @@ impl LeetcodeApp {
             asset_previews: HashMap::new(),
             events_rx: None,
             is_running: false,
+            agent_started_at: None,
+            agent_user_message_index: None,
+            agent_chat_start_index: None,
+            agent_live_status: String::new(),
             cancel: None,
+            run_timeline: None,
+            run_timeline_anchor_index: None,
             agent_state: Arc::new(Mutex::new(AgentState::default())),
             approvals,
             pending_approval: None,
@@ -1244,6 +1295,98 @@ impl LeetcodeApp {
         };
 
         self.git_summary = format!("{status_text}\n\n{diff_text}");
+    }
+
+    fn show_git_status_from_ui(&mut self) {
+        self.refresh_git_summary();
+        self.git_action_status = if self.workspace.is_some() {
+            "status обновлён".to_string()
+        } else {
+            "рабочая папка не выбрана".to_string()
+        };
+    }
+
+    fn run_git_action_from_ui(&mut self, title: &str, args: &[&str]) {
+        let Some(workspace) = &self.workspace else {
+            self.git_action_status = "рабочая папка не выбрана".to_string();
+            return;
+        };
+
+        let result = run_git_command(workspace, args);
+        self.git_action_status = result.display.clone();
+        self.tool_log.push(ToolLogLine {
+            title: title.to_string(),
+            content: result.display,
+        });
+        self.refresh_git_summary();
+    }
+
+    fn commit_git_from_ui(&mut self) {
+        let message = self.git_commit_message_input.trim().to_string();
+        if message.is_empty() {
+            self.git_action_status = "введите комментарий коммита".to_string();
+            return;
+        }
+
+        let Some(workspace) = &self.workspace else {
+            self.git_action_status = "рабочая папка не выбрана".to_string();
+            return;
+        };
+
+        let add = run_git_command(workspace, &["add", "-A"]);
+        let commit = if add.success {
+            run_git_command(workspace, &["commit", "-m", &message])
+        } else {
+            GitCommandResult {
+                success: false,
+                display: "commit не запущен: git add -A завершился ошибкой".to_string(),
+            }
+        };
+
+        self.git_action_status = format!(
+            "git add -A:\n{}\n\ngit commit:\n{}",
+            add.display, commit.display
+        );
+        self.tool_log.push(ToolLogLine {
+            title: "git commit".to_string(),
+            content: self.git_action_status.clone(),
+        });
+
+        if commit.success {
+            self.git_commit_message_input.clear();
+            self.git_commit_dialog_open = false;
+        }
+
+        self.refresh_git_summary();
+    }
+
+    fn show_git_commit_dialog(&mut self, ctx: &egui::Context) {
+        if !self.git_commit_dialog_open {
+            return;
+        }
+
+        let mut open = self.git_commit_dialog_open;
+        let mut should_commit = false;
+        egui::Window::new("Коммит")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label("Комментарий коммита:");
+                ui.add(TextEdit::multiline(&mut self.git_commit_message_input).desired_rows(3));
+                ui.horizontal(|ui| {
+                    if ui.button("Коммит").clicked() {
+                        should_commit = true;
+                    }
+                    if ui.button("Отмена").clicked() {
+                        self.git_commit_dialog_open = false;
+                    }
+                });
+            });
+        self.git_commit_dialog_open = open && self.git_commit_dialog_open;
+        if should_commit {
+            self.commit_git_from_ui();
+        }
     }
 
     fn refresh_journal(&mut self) {
@@ -2319,9 +2462,258 @@ impl LeetcodeApp {
         }
     }
 
+    fn handle_input_dropped_files(&mut self, dropped_files: Vec<egui::DroppedFile>) {
+        if dropped_files.is_empty() {
+            return;
+        }
+
+        let mut added = 0usize;
+        for dropped in dropped_files {
+            let result = if let Some(path) = dropped.path {
+                self.attach_external_file(&path, InputAttachmentKind::File)
+            } else if let Some(bytes) = dropped.bytes {
+                self.attach_dropped_bytes(&dropped.name, bytes.as_ref())
+            } else {
+                Err("перетащенный объект не содержит путь или байты".to_string())
+            };
+
+            match result {
+                Ok(attachment) => {
+                    self.input_attachments.push(attachment);
+                    added += 1;
+                }
+                Err(err) => {
+                    self.input_attachment_status = format!("не удалось добавить файл: {err}");
+                }
+            }
+        }
+
+        if added > 0 {
+            self.input_attachment_status = format!("добавлено вложений: {added}");
+            self.refresh_file_rows();
+        }
+    }
+
+    fn attach_external_file(
+        &mut self,
+        source: &Path,
+        requested_kind: InputAttachmentKind,
+    ) -> Result<InputAttachment, String> {
+        let Some(workspace) = &self.workspace else {
+            return Err("сначала выберите рабочую папку".to_string());
+        };
+        if !source.is_file() {
+            return Err(format!("это не файл: {}", source.display()));
+        }
+
+        let source = source
+            .canonicalize()
+            .map_err(|err| format!("не удалось открыть {}: {err}", source.display()))?;
+        let kind = if is_supported_image_path(&source) {
+            requested_kind.promote_image()
+        } else {
+            requested_kind
+        };
+
+        let rel_path = if let Ok(rel) = source.strip_prefix(workspace.root()) {
+            rel.to_string_lossy().replace('\\', "/")
+        } else {
+            let file_name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(sanitize_attachment_file_name)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "attachment.bin".to_string());
+            let rel_path = format!(
+                "assets/generated/input_attachments/{}-{file_name}",
+                uuid::Uuid::new_v4()
+            );
+            let target = workspace
+                .resolve_for_write(&rel_path)
+                .map_err(|err| err.to_string())?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+            }
+            fs::copy(&source, &target).map_err(|err| err.to_string())?;
+            rel_path
+        };
+
+        self.record_input_attachment_context(&rel_path);
+        let bytes = workspace
+            .resolve_existing(&rel_path)
+            .ok()
+            .and_then(|path| fs::metadata(path).ok())
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        Ok(InputAttachment {
+            name: source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("attachment")
+                .to_string(),
+            path: rel_path,
+            kind,
+            bytes,
+        })
+    }
+
+    fn attach_dropped_bytes(
+        &mut self,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<InputAttachment, String> {
+        let Some(workspace) = &self.workspace else {
+            return Err("сначала выберите рабочую папку".to_string());
+        };
+        if bytes.is_empty() {
+            return Err("пустой файл".to_string());
+        }
+
+        let file_name = sanitize_attachment_file_name(if name.trim().is_empty() {
+            "attachment.bin"
+        } else {
+            name
+        });
+        let rel_path = format!(
+            "assets/generated/input_attachments/{}-{file_name}",
+            uuid::Uuid::new_v4()
+        );
+        let target = workspace
+            .resolve_for_write(&rel_path)
+            .map_err(|err| err.to_string())?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+        }
+        fs::write(&target, bytes).map_err(|err| err.to_string())?;
+        self.record_input_attachment_context(&rel_path);
+
+        Ok(InputAttachment {
+            path: rel_path,
+            name: file_name,
+            kind: if is_supported_image_path(&target) {
+                InputAttachmentKind::Image
+            } else {
+                InputAttachmentKind::File
+            },
+            bytes: bytes.len() as u64,
+        })
+    }
+
+    fn input_paste_shortcut_pressed(&mut self, ui: &egui::Ui) -> bool {
+        let egui_pressed = ui.input(|input| {
+            let keyboard_paste = input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::V,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl || modifiers.command || modifiers.mac_cmd
+                )
+            });
+            let paste_event = input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_)));
+            keyboard_paste || paste_event
+        });
+        let shortcut_down = platform_ctrl_v_down();
+        let platform_pressed = shortcut_down && !self.input_paste_shortcut_down;
+        self.input_paste_shortcut_down = shortcut_down;
+        egui_pressed || platform_pressed
+    }
+    fn attach_clipboard_image(&mut self, report_missing: bool) -> bool {
+        let Some(workspace) = &self.workspace else {
+            self.input_attachment_status = "сначала выберите рабочую папку".to_string();
+            return false;
+        };
+
+        let rel_path = format!(
+            "assets/generated/screenshots/clipboard-{}.png",
+            uuid::Uuid::new_v4()
+        );
+        let target = match workspace.resolve_for_write(&rel_path) {
+            Ok(target) => target,
+            Err(err) => {
+                self.input_attachment_status = format!("не удалось подготовить файл: {err}");
+                return false;
+            }
+        };
+        if let Some(parent) = target.parent() {
+            if let Err(err) = fs::create_dir_all(parent) {
+                self.input_attachment_status = format!("не удалось создать папку: {err}");
+                return false;
+            }
+        }
+        if let Err(err) = save_clipboard_image_to_file(&target) {
+            if report_missing {
+                self.input_attachment_status = err;
+            }
+            return false;
+        }
+
+        let bytes = fs::metadata(&target)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        if bytes == 0 {
+            self.input_attachment_status = "буфер обмена сохранён как пустой файл".to_string();
+            let _ = fs::remove_file(&target);
+            return false;
+        }
+
+        self.record_input_attachment_context(&rel_path);
+        self.input_attachments.push(InputAttachment {
+            path: rel_path.clone(),
+            name: "clipboard.png".to_string(),
+            kind: InputAttachmentKind::Screenshot,
+            bytes,
+        });
+        self.input_attachment_status = format!("скриншот из буфера добавлен: {rel_path}");
+        self.refresh_file_rows();
+        true
+    }
+
+    fn capture_input_screenshot(&mut self) {
+        let Some(workspace) = &self.workspace else {
+            self.input_attachment_status = "сначала выберите рабочую папку".to_string();
+            return;
+        };
+
+        match capture_screenshot_file(workspace, "input") {
+            Ok(path) => {
+                self.record_input_attachment_context(&path);
+                let bytes = workspace
+                    .resolve_existing(&path)
+                    .ok()
+                    .and_then(|path| fs::metadata(path).ok())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or_default();
+                self.desktop_last_screenshot = Some(path.clone());
+                self.input_attachments.push(InputAttachment {
+                    path: path.clone(),
+                    name: "screenshot.png".to_string(),
+                    kind: InputAttachmentKind::Screenshot,
+                    bytes,
+                });
+                self.input_attachment_status = format!("скриншот добавлен: {path}");
+                self.refresh_file_rows();
+            }
+            Err(err) => {
+                self.input_attachment_status = format!("не удалось сделать скриншот: {err}");
+            }
+        }
+    }
+
+    fn record_input_attachment_context(&self, rel_path: &str) {
+        if let Some(workspace) = &self.workspace {
+            let _ = attach_asset_context(workspace, rel_path);
+        }
+    }
+
     fn send_current_input(&mut self) {
-        let message = self.input.trim().to_string();
-        if message.is_empty() || self.is_running {
+        let typed_message = self.input.trim().to_string();
+        if (typed_message.is_empty() && self.input_attachments.is_empty()) || self.is_running {
             return;
         }
         if self.workspace.is_none() {
@@ -2332,8 +2724,18 @@ impl LeetcodeApp {
 
         self.save_settings_from_ui();
 
+        let attachments = self.input_attachments.clone();
+        let message = format_input_message_with_attachments(&typed_message, &attachments);
         self.input.clear();
+        self.input_attachments.clear();
+        self.input_attachment_status.clear();
+        let user_message_index = self.chat.len();
         self.chat.push(ChatLine::user(message.clone()));
+        self.agent_user_message_index = Some(user_message_index);
+        self.agent_chat_start_index = Some(self.chat.len());
+        self.agent_live_status = "Агент размышляет".to_string();
+        self.run_timeline = Some(RunTimeline::new(&message));
+        self.run_timeline_anchor_index = Some(user_message_index);
         append_journal(format!("user_input\t{}", compact(&message, 500)));
         self.refresh_journal();
         self.tool_log.push(ToolLogLine {
@@ -2351,6 +2753,7 @@ impl LeetcodeApp {
 
         self.events_rx = Some(rx);
         self.cancel = Some(cancel);
+        self.agent_started_at = Some(Instant::now());
         self.is_running = true;
 
         thread::spawn(move || {
@@ -2374,6 +2777,10 @@ impl LeetcodeApp {
     }
 
     fn stop_run(&mut self) {
+        self.agent_live_status = "Агент останавливается".to_string();
+        if let Some(timeline) = &mut self.run_timeline {
+            timeline.cancel_requested();
+        }
         if let Some(cancel) = &self.cancel {
             cancel.store(true, Ordering::SeqCst);
         }
@@ -2395,7 +2802,26 @@ impl LeetcodeApp {
         self.chat.push(ChatLine::system(
             "Диалог сброшен. Рабочая папка и настройки сохранены.",
         ));
+        self.agent_started_at = None;
+        self.agent_user_message_index = None;
+        self.agent_chat_start_index = None;
+        self.agent_live_status.clear();
+        self.run_timeline = None;
+        self.run_timeline_anchor_index = None;
         self.tool_log.clear();
+    }
+
+    fn mark_latest_agent_message_elapsed(&mut self, elapsed: String) {
+        let start_index = self.agent_chat_start_index.unwrap_or(0);
+        for (index, line) in self.chat.iter_mut().enumerate().rev() {
+            if index < start_index {
+                break;
+            }
+            if matches!(line.role, ChatRole::Assistant) {
+                line.elapsed = Some(elapsed);
+                return;
+            }
+        }
     }
 
     fn drain_events(&mut self) {
@@ -2411,9 +2837,15 @@ impl LeetcodeApp {
             append_journal(format!("event\t{}", compact(&format!("{event:?}"), 2_000)));
             match event {
                 AppEvent::AssistantText(text) => {
+                    self.agent_live_status = "Агент пишет ответ".to_string();
                     self.chat.push(ChatLine::assistant(text));
+                    self.run_timeline_anchor_index = Some(self.chat.len().saturating_sub(1));
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.mark_assistant_text();
+                    }
                 }
                 AppEvent::AssistantDelta(delta) => {
+                    self.agent_live_status = "Агент пишет ответ".to_string();
                     if let Some(last) = self.chat.last_mut() {
                         if matches!(last.role, ChatRole::Assistant) {
                             last.content.push_str(&delta);
@@ -2423,21 +2855,36 @@ impl LeetcodeApp {
                     } else {
                         self.chat.push(ChatLine::assistant(delta));
                     }
+                    self.run_timeline_anchor_index = Some(self.chat.len().saturating_sub(1));
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.mark_assistant_text();
+                    }
                 }
                 AppEvent::ToolStarted { id, name, summary } => {
+                    self.agent_live_status = agent_live_status_for_tool(&name, &summary);
                     self.tool_log.push(ToolLogLine {
                         title: format!("{name} {id}"),
-                        content: summary,
+                        content: summary.clone(),
                     });
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.tool_started(id, name, summary);
+                    }
                 }
                 AppEvent::ToolOutput { id, chunk } => {
+                    if id == "routing" {
+                        self.agent_live_status = "Агент выбирает маршрут и модель".to_string();
+                    }
                     self.append_project_run_output(&id, &chunk);
                     self.tool_log.push(ToolLogLine {
                         title: format!("вывод {id}"),
-                        content: chunk,
+                        content: chunk.clone(),
                     });
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.tool_output(&id, &chunk);
+                    }
                 }
                 AppEvent::ToolFinished { id, output } => {
+                    self.agent_live_status = "Агент анализирует результат инструмента".to_string();
                     self.update_desktop_state_from_tool_output(&output);
                     self.tool_log.push(ToolLogLine {
                         title: format!("готово {id}"),
@@ -2448,22 +2895,42 @@ impl LeetcodeApp {
                     }
                     self.refresh_file_rows();
                     self.refresh_project_profiles();
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.tool_finished(&id, &output);
+                    }
                 }
                 AppEvent::ApprovalRequested {
                     id,
                     summary,
                     detail,
                 } => {
+                    self.agent_live_status = "Агент ждёт подтверждение действия".to_string();
+                    self.active_center_tab = CenterTab::Agent;
                     self.pending_approval = Some(PendingApproval {
-                        id,
-                        summary,
-                        detail,
+                        id: id.clone(),
+                        summary: summary.clone(),
+                        detail: detail.clone(),
                     });
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.approval_requested(id, summary, detail);
+                    }
                 }
                 AppEvent::Error(err) => {
+                    self.agent_live_status = "Агент получил ошибку".to_string();
                     self.chat.push(ChatLine::system(format!("Ошибка: {err}")));
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.fail(&err);
+                    }
                 }
                 AppEvent::Done => {
+                    if let Some(started_at) = self.agent_started_at.take() {
+                        self.mark_latest_agent_message_elapsed(format_duration(
+                            started_at.elapsed(),
+                        ));
+                    }
+                    self.agent_user_message_index = None;
+                    self.agent_chat_start_index = None;
+                    self.agent_live_status.clear();
                     self.is_running = false;
                     self.cancel = None;
                     self.refresh_file_rows();
@@ -2479,6 +2946,10 @@ impl LeetcodeApp {
                         title: "запуск".to_string(),
                         content: "Запуск агента завершён".to_string(),
                     });
+                    let changed_files = self.git_changed_files.clone();
+                    if let Some(timeline) = &mut self.run_timeline {
+                        timeline.finish(&changed_files);
+                    }
                 }
             }
         }
@@ -2574,6 +3045,7 @@ impl LeetcodeApp {
                     summary,
                     detail,
                 } => {
+                    self.active_center_tab = CenterTab::Agent;
                     self.pending_approval = Some(PendingApproval {
                         id,
                         summary,
@@ -2745,6 +3217,22 @@ impl LeetcodeApp {
             let _ = sender.send(approved);
         }
 
+        let decision = if approved {
+            "Согласовано"
+        } else {
+            "Отклонено"
+        };
+        self.chat.push(ChatLine::assistant(format!(
+            "{} — {decision}\n\n{}",
+            prompt.summary,
+            compact(&prompt.detail, 1_500)
+        )));
+        self.run_timeline_anchor_index = Some(self.chat.len().saturating_sub(1));
+        self.active_center_tab = CenterTab::Agent;
+
+        if let Some(timeline) = &mut self.run_timeline {
+            timeline.approval_answered(&prompt.id, approved);
+        }
         self.tool_log.push(ToolLogLine {
             title: "подтверждение".to_string(),
             content: if approved {
@@ -3909,6 +4397,7 @@ impl LeetcodeApp {
                             ui.add(
                                 TextEdit::multiline(&mut self.selected_preview)
                                     .desired_width(f32::INFINITY)
+                                    .horizontal_align(egui::Align::Min)
                                     .font(egui::TextStyle::Monospace)
                                     .interactive(self.selected_file_editable),
                             );
@@ -3941,6 +4430,7 @@ impl LeetcodeApp {
                 TextEdit::multiline(&mut journal_text)
                     .font(egui::TextStyle::Monospace)
                     .desired_width(f32::INFINITY)
+                    .horizontal_align(egui::Align::Min)
                     .desired_rows(10)
                     .interactive(false),
             );
@@ -4243,6 +4733,7 @@ impl LeetcodeApp {
             ui.add(
                 TextEdit::multiline(&mut self.memory_source_note_input)
                     .desired_rows(3)
+                    .horizontal_align(egui::Align::Min)
                     .hint_text("заметка, выдержка из документа, ссылка или правило проекта"),
             );
             if ui.button("Сохранить заметку в память").clicked() {
@@ -4845,10 +5336,43 @@ impl LeetcodeApp {
     fn show_git_section(&mut self, ui: &mut egui::Ui) {
         flat_collapsing_section(ui, "Git", true, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Обновить").clicked() {
-                    self.refresh_git_summary();
+                let has_workspace = self.workspace.is_some();
+                if ui
+                    .add_enabled(has_workspace, egui::Button::new("Коммит"))
+                    .clicked()
+                {
+                    self.git_commit_dialog_open = true;
+                }
+                if ui
+                    .add_enabled(has_workspace, egui::Button::new("Пуш"))
+                    .clicked()
+                {
+                    self.run_git_action_from_ui("git push", &["push"]);
+                }
+                if ui
+                    .add_enabled(has_workspace, egui::Button::new("Статус"))
+                    .clicked()
+                {
+                    self.show_git_status_from_ui();
+                }
+                if ui
+                    .add_enabled(has_workspace, egui::Button::new("Пулл"))
+                    .clicked()
+                {
+                    self.run_git_action_from_ui("git pull", &["pull"]);
                 }
             });
+            if !self.git_action_status.trim().is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&self.git_action_status)
+                            .text_style(egui::TextStyle::Monospace)
+                            .weak(),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+            }
             ui.add(
                 egui::Label::new(
                     RichText::new(if self.git_summary.trim().is_empty() {
@@ -5118,6 +5642,7 @@ impl LeetcodeApp {
                 TextEdit::multiline(&mut output)
                     .font(egui::TextStyle::Monospace)
                     .desired_width(f32::INFINITY)
+                    .horizontal_align(egui::Align::Min)
                     .desired_rows(12)
                     .interactive(false),
             );
@@ -5510,6 +6035,7 @@ impl LeetcodeApp {
             TextEdit::multiline(&mut self.asset_prompt)
                 .hint_text("Промпт для игрового/app-ассета")
                 .desired_width(f32::INFINITY)
+                .horizontal_align(egui::Align::Min)
                 .desired_rows(3),
         );
 
@@ -5741,12 +6267,115 @@ impl LeetcodeApp {
             .id_salt("chat_transcript_scroll")
             .auto_shrink([false, false])
             .stick_to_bottom(true)
-            .show(ui, |ui| {
-                ui.add_space(4.0);
-                for line in &self.chat {
-                    chat_message(ui, line);
-                }
+            .show_viewport(ui, |ui, viewport| {
+                // Keep transcript content constrained to the visible chat viewport, not to
+                // the scroll area's virtual content width. Otherwise egui may place the row
+                // as if it was much wider than the central panel, which makes messages look
+                // centered on the screen instead of starting at the chat area's left edge.
+                let transcript_width = viewport.width().max(1.0);
+                ui.set_min_width(transcript_width);
+                ui.set_max_width(transcript_width);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(transcript_width, 0.0),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_min_width(transcript_width);
+                        ui.set_max_width(transcript_width);
+                        ui.add_space(4.0);
+                        for (index, line) in self.chat.iter().enumerate() {
+                            let live_status = if self.is_running
+                                && self.agent_user_message_index == Some(index)
+                                && !self.agent_live_status.trim().is_empty()
+                            {
+                                Some(self.agent_live_status.as_str())
+                            } else {
+                                None
+                            };
+                            chat_message(ui, line, live_status);
+                            if self.run_timeline_anchor_index == Some(index) {
+                                if let Some(timeline) = &self.run_timeline {
+                                    run_timeline_card(ui, timeline);
+                                }
+                            }
+                        }
+                        if self.pending_approval.is_some() {
+                            self.show_pending_approval_message(ui);
+                        }
+                    },
+                );
             });
+    }
+
+    fn show_pending_approval_message(&mut self, ui: &mut egui::Ui) {
+        let Some(prompt) = self.pending_approval.clone() else {
+            return;
+        };
+        let width = ui.available_width().max(1.0);
+        let content_width = (width - 24.0).max(1.0);
+
+        egui::Frame::none()
+            .fill(surface_bg())
+            .stroke(egui::Stroke::new(1.0, subtle_accent()))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+            .show(ui, |ui| {
+                ui.set_min_width(content_width);
+                ui.set_max_width(content_width);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        RichText::new("Агент просит согласовать доступ")
+                            .strong()
+                            .small()
+                            .color(egui::Color32::from_rgb(236, 214, 151)),
+                    );
+                });
+                ui.add_space(6.0);
+                full_width_wrapped_label(ui, RichText::new(&prompt.summary).strong());
+                ui.add_space(6.0);
+                ui.label(RichText::new("Обоснование / детали").weak().small());
+                egui::Frame::none()
+                    .fill(egui::Color32::from_rgb(15, 17, 21))
+                    .stroke(egui::Stroke::new(1.0, border_color()))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt(format!("approval_detail_scroll_{}", prompt.id))
+                            .max_height(220.0)
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let detail_width = (content_width - 16.0).max(1.0);
+                                ui.set_max_width(detail_width);
+                                full_width_wrapped_label(
+                                    ui,
+                                    RichText::new(&prompt.detail)
+                                        .text_style(egui::TextStyle::Monospace)
+                                        .small(),
+                                );
+                            });
+                    });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                RichText::new("Согласовать")
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(5, 12, 16)),
+                            )
+                            .fill(accent_color()),
+                        )
+                        .clicked()
+                    {
+                        self.answer_approval(true);
+                    }
+                    if ui.button("Отклонить").clicked() {
+                        self.answer_approval(false);
+                    }
+                });
+            });
+        ui.add_space(8.0);
     }
 
     fn show_file_preview_tab(&mut self, ui: &mut egui::Ui, path: &str) {
@@ -5800,6 +6429,7 @@ impl LeetcodeApp {
                 ui.add(
                     TextEdit::multiline(&mut self.file_tabs[index].content)
                         .desired_width(f32::INFINITY)
+                        .horizontal_align(egui::Align::Min)
                         .font(egui::TextStyle::Monospace)
                         .interactive(editable),
                 );
@@ -6251,6 +6881,7 @@ impl LeetcodeApp {
                     TextEdit::multiline(&mut output)
                         .font(egui::TextStyle::Monospace)
                         .desired_width(f32::INFINITY)
+                        .horizontal_align(egui::Align::Min)
                         .desired_rows(5)
                         .interactive(false),
                 );
@@ -6307,7 +6938,9 @@ impl LeetcodeApp {
         egui::CentralPanel::default()
             .frame(central_frame())
             .show(ctx, |ui| {
-                self.show_main_workspace(ui, ctx);
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    self.show_main_workspace(ui, ctx);
+                });
             });
     }
     fn show_permission_mode_controls(&mut self, ui: &mut egui::Ui) {
@@ -6336,22 +6969,25 @@ impl LeetcodeApp {
 
     fn show_input_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("input_bar")
-            .exact_height(150.0)
+            .exact_height(188.0)
             .frame(input_bar_frame())
             .show(ctx, |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.add_space(8.0);
                 card_frame().show(ui, |ui| {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     self.show_permission_mode_controls(ui);
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         let send_width = 118.0;
-                        let input_width = (ui.available_width() - send_width - 12.0).max(260.0);
+                        let input_width = (ui.available_width() - send_width - 12.0).max(80.0);
                         let response = ui.add_sized(
                             [input_width, 58.0],
                             TextEdit::multiline(&mut self.input)
                                 .id_salt("main_prompt_input")
+                                .horizontal_align(egui::Align::Min)
                                 .hint_text(
-                                    "Что сделать в выбранном проекте? Ctrl+Enter для отправки",
+                                    "Что сделать? Ctrl+Enter — отправить, Ctrl+V — вставить скриншот из буфера, Ctrl+Shift+S — снимок экрана",
                                 )
                                 .desired_width(f32::INFINITY),
                         );
@@ -6382,7 +7018,33 @@ impl LeetcodeApp {
                             )
                             .clicked()
                             && !self.is_running;
-                        let enter_pressed = response.has_focus()
+                        let input_has_focus = response.has_focus();
+                        let dropped_files = if response.hovered() || input_has_focus {
+                            ctx.input(|input| input.raw.dropped_files.clone())
+                        } else {
+                            Vec::new()
+                        };
+                        if !dropped_files.is_empty() {
+                            self.handle_input_dropped_files(dropped_files);
+                        }
+
+                        let paste_image_pressed =
+                            input_has_focus && self.input_paste_shortcut_pressed(ui);
+                        if paste_image_pressed {
+                            self.attach_clipboard_image(false);
+                        }
+
+                        let screenshot_pressed = input_has_focus
+                            && ui.input(|input| {
+                                input.key_pressed(egui::Key::S)
+                                    && input.modifiers.ctrl
+                                    && input.modifiers.shift
+                            });
+                        if screenshot_pressed {
+                            self.capture_input_screenshot();
+                        }
+
+                        let enter_pressed = input_has_focus
                             && ui.input(|input| {
                                 input.key_pressed(egui::Key::Enter) && input.modifiers.ctrl
                             });
@@ -6391,37 +7053,51 @@ impl LeetcodeApp {
                             self.send_current_input();
                         }
                     });
+
+                    if !self.input_attachments.is_empty() {
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("Вложения:").weak().small());
+                            let mut remove_index = None;
+                            for (index, attachment) in self.input_attachments.iter().enumerate() {
+                                let label = format!(
+                                    "{} {} ({})",
+                                    input_attachment_kind_label(attachment.kind),
+                                    attachment.name,
+                                    format_bytes_short(attachment.bytes)
+                                );
+                                if ui
+                                    .small_button(label)
+                                    .on_hover_text(&attachment.path)
+                                    .clicked()
+                                {
+                                    remove_index = Some(index);
+                                }
+                            }
+                            if let Some(index) = remove_index {
+                                self.input_attachments.remove(index);
+                                self.input_attachment_status = "вложение удалено из сообщения".to_string();
+                            }
+                        });
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.small_button("Вставить скриншот из буфера").clicked() {
+                            self.attach_clipboard_image(true);
+                        }
+                        if ui.small_button("Сделать снимок экрана").clicked() {
+                            self.capture_input_screenshot();
+                        }
+                        ui.label(
+                            RichText::new("Также можно перетащить файлы в поле ввода. Клик по вложению удаляет его.")
+                                .weak()
+                                .small(),
+                        );
+                        if !self.input_attachment_status.is_empty() {
+                            ui.label(RichText::new(&self.input_attachment_status).weak().small());
+                        }
+                    });
+                    });
                 });
-            });
-    }
-
-    fn show_approval_window(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = self.pending_approval.clone() else {
-            return;
-        };
-
-        egui::Window::new("Подтверждение действия")
-            .collapsible(false)
-            .resizable(true)
-            .default_width(520.0)
-            .show(ctx, |ui| {
-                ui.label(RichText::new(prompt.summary).strong());
-                ui.separator();
-                let mut detail = prompt.detail.clone();
-                ui.add(
-                    TextEdit::multiline(&mut detail)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(10)
-                        .interactive(false),
-                );
-                ui.horizontal(|ui| {
-                    if ui.button("Разрешить").clicked() {
-                        self.answer_approval(true);
-                    }
-                    if ui.button("Отклонить").clicked() {
-                        self.answer_approval(false);
-                    }
                 });
             });
     }
@@ -6436,11 +7112,14 @@ impl eframe::App for LeetcodeApp {
         self.refresh_terminal_snapshot();
         self.show_menu_bar(ctx);
         self.show_top_bar(ctx);
-        self.show_input_bar(ctx);
         self.show_file_panel(ctx);
         self.show_tool_panel(ctx);
+        // Bottom input belongs to the central workspace, so it must be created
+        // after the side panels reserve their widths. Otherwise it spans the
+        // full window and feels like it sits below/under the tool panels.
+        self.show_input_bar(ctx);
         self.show_chat_panel(ctx);
-        self.show_approval_window(ctx);
+        self.show_git_commit_dialog(ctx);
 
         if self.is_running
             || self.project_is_running
@@ -6665,6 +7344,162 @@ fn status_line(ui: &mut egui::Ui, label: &str, value: &str) {
     });
 }
 
+fn full_width_wrapped_label(
+    ui: &mut egui::Ui,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let width = ui.available_width().max(1.0);
+    ui.add_sized(
+        [width, 0.0],
+        egui::Label::new(text).wrap().halign(egui::Align::Min),
+    )
+}
+
+fn full_width_formatted_label(ui: &mut egui::Ui, job: egui::text::LayoutJob) -> egui::Response {
+    let width = ui.available_width().max(1.0);
+    ui.add_sized(
+        [width, 0.0],
+        egui::Label::new(job).wrap().halign(egui::Align::Min),
+    )
+}
+
+fn chat_inline_job(text: &str, font_size: f32, strong: bool) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.halign = egui::Align::Min;
+    let normal_format = egui::TextFormat {
+        font_id: egui::FontId::new(font_size, egui::FontFamily::Proportional),
+        color: text_color(),
+        ..Default::default()
+    };
+    let code_format = egui::TextFormat {
+        font_id: egui::FontId::new((font_size - 1.0).max(11.0), egui::FontFamily::Monospace),
+        color: egui::Color32::from_rgb(221, 226, 234),
+        background: egui::Color32::from_rgb(34, 39, 48),
+        ..Default::default()
+    };
+    let mut base_format = normal_format;
+    if strong {
+        base_format.font_id = egui::FontId::new(font_size, egui::FontFamily::Proportional);
+    }
+
+    for (index, part) in text.split('`').enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        let format = if index % 2 == 1 {
+            code_format.clone()
+        } else {
+            base_format.clone()
+        };
+        job.append(part, 0.0, format);
+    }
+    job
+}
+
+fn render_chat_text(ui: &mut egui::Ui, content: &str) {
+    let mut in_code_block = false;
+    let mut code_block = String::new();
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim_end();
+        let trimmed = line.trim_start();
+
+        if trimmed.starts_with("```") {
+            if in_code_block {
+                render_chat_code_block(ui, &code_block);
+                code_block.clear();
+                in_code_block = false;
+            } else {
+                in_code_block = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_block.push_str(line);
+            code_block.push('\n');
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            ui.add_space(6.0);
+            continue;
+        }
+
+        if let Some(text) = trimmed.strip_prefix("### ") {
+            full_width_formatted_label(ui, chat_inline_job(text, 17.0, true));
+            ui.add_space(2.0);
+        } else if let Some(text) = trimmed.strip_prefix("## ") {
+            full_width_formatted_label(ui, chat_inline_job(text, 18.0, true));
+            ui.add_space(2.0);
+        } else if let Some(text) = trimmed.strip_prefix("# ") {
+            full_width_formatted_label(ui, chat_inline_job(text, 20.0, true));
+            ui.add_space(2.0);
+        } else if let Some(text) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            render_chat_bullet(ui, text);
+        } else if let Some((number, text)) = split_numbered_list_item(trimmed) {
+            render_chat_numbered_item(ui, number, text);
+        } else if let Some(text) = trimmed.strip_prefix("> ") {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("|").weak());
+                full_width_formatted_label(ui, chat_inline_job(text, 14.0, false));
+            });
+        } else {
+            full_width_formatted_label(ui, chat_inline_job(trimmed, 14.0, false));
+        }
+    }
+
+    if in_code_block && !code_block.is_empty() {
+        render_chat_code_block(ui, &code_block);
+    }
+}
+
+fn render_chat_bullet(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("-").weak());
+        full_width_formatted_label(ui, chat_inline_job(text, 14.0, false));
+    });
+}
+
+fn render_chat_numbered_item(ui: &mut egui::Ui, number: &str, text: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{number}.")).weak());
+        full_width_formatted_label(ui, chat_inline_job(text, 14.0, false));
+    });
+}
+
+fn render_chat_code_block(ui: &mut egui::Ui, code: &str) {
+    let width = ui.available_width().max(1.0);
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(15, 17, 21))
+        .stroke(egui::Stroke::new(1.0, border_color()))
+        .rounding(egui::Rounding::same(6.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            ui.set_min_width((width - 18.0).max(1.0));
+            ui.set_max_width((width - 18.0).max(1.0));
+            full_width_wrapped_label(
+                ui,
+                RichText::new(code.trim_end())
+                    .text_style(egui::TextStyle::Monospace)
+                    .small(),
+            );
+        });
+    ui.add_space(4.0);
+}
+
+fn split_numbered_list_item(line: &str) -> Option<(&str, &str)> {
+    let (number, rest) = line.split_once(". ")?;
+    if !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit()) {
+        Some((number, rest))
+    } else {
+        None
+    }
+}
+
 fn inline_log_entry(ui: &mut egui::Ui, title: &str, content: &str) {
     ui.vertical(|ui| {
         ui.set_min_width(ui.available_width());
@@ -6682,46 +7517,331 @@ fn inline_log_entry(ui: &mut egui::Ui, title: &str, content: &str) {
     ui.add_space(6.0);
 }
 
-fn chat_message(ui: &mut egui::Ui, line: &ChatLine) {
-    let width = ui.available_width().max(260.0);
-    let (label, fill, stroke, label_color) = match line.role {
-        ChatRole::User => (
-            "Вы",
-            egui::Color32::from_rgb(28, 48, 62),
-            egui::Stroke::new(1.0, subtle_accent()),
-            accent_color(),
-        ),
-        ChatRole::Assistant => (
-            "Агент",
-            surface_bg(),
-            egui::Stroke::new(1.0, border_color()),
-            egui::Color32::from_rgb(236, 214, 151),
-        ),
-        ChatRole::System => (
-            "Система",
-            egui::Color32::from_rgb(20, 23, 28),
-            egui::Stroke::new(1.0, egui::Color32::from_rgb(38, 44, 52)),
-            muted_color(),
-        ),
+fn agent_live_status_for_tool(name: &str, summary: &str) -> String {
+    let text = format!("{} {}", name, summary).to_lowercase();
+    let action_status = [
+        ("apply_patch", "Агент применяет patch"),
+        ("edit_file", "Агент редактирует файл"),
+        ("write_file", "Агент записывает файл"),
+        ("read_file", "Агент читает файл"),
+        ("list_files", "Агент изучает файлы проекта"),
+        ("grep", "Агент ищет по коду"),
+        ("project_command", "Агент запускает команду проекта"),
+        ("run_shell", "Агент выполняет shell-команду"),
+        ("terminal_start", "Агент запускает терминал"),
+        ("terminal_write", "Агент пишет в терминал"),
+        ("terminal_read", "Агент читает терминал"),
+        ("run_subagent", "Агент запускает субагента"),
+        ("delegate_agent", "Агент передаёт задачу субагенту"),
+        ("generate_image_asset", "Агент генерирует изображение"),
+        ("generate_audio_asset", "Агент генерирует звук"),
+        ("generate_video_asset", "Агент генерирует видео"),
+        ("desktop_step", "Агент управляет рабочим столом"),
+        ("screenshot", "Агент делает скриншот"),
+        ("record_decision", "Агент обновляет память проекта"),
+        ("record_memory_source", "Агент сохраняет контекст в память"),
+        ("upsert_task", "Агент обновляет задачи проекта"),
+    ];
+    for (needle, status) in action_status {
+        if text.contains(needle) {
+            return status.to_string();
+        }
+    }
+    if name == "act" {
+        "Агент использует инструмент".to_string()
+    } else {
+        format!("Агент выполняет {name}")
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let total_ms = duration.as_millis();
+    if total_ms < 1_000 {
+        format!("{total_ms} мс")
+    } else if total_ms < 60_000 {
+        format!("{:.1} с", total_ms as f64 / 1_000.0)
+    } else {
+        let minutes = total_ms / 60_000;
+        let seconds = (total_ms % 60_000) / 1_000;
+        format!("{minutes} мин {seconds:02} с")
+    }
+}
+
+fn run_timeline_card(ui: &mut egui::Ui, timeline: &RunTimeline) {
+    let width = ui.available_width().max(1.0);
+    ui.set_min_width(width);
+    ui.set_max_width(width);
+
+    let overall_status = timeline_overall_status(timeline);
+    egui::CollapsingHeader::new(
+        RichText::new(timeline_status_summary(timeline))
+            .small()
+            .strong()
+            .color(timeline_status_color(&overall_status)),
+    )
+    .id_salt("run_timeline_status")
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.set_min_width(width);
+        ui.set_max_width(width);
+        full_width_wrapped_label(ui, RichText::new(&timeline.title).weak().small());
+        ui.add_space(4.0);
+        for (index, step) in timeline.steps.iter().enumerate() {
+            let title = format!(
+                "{}. {} — {}{}",
+                index + 1,
+                step.title,
+                step.status.label(),
+                step.duration_label()
+                    .map(|duration| format!(" · {duration}"))
+                    .unwrap_or_default()
+            );
+            egui::CollapsingHeader::new(
+                RichText::new(title)
+                    .small()
+                    .color(timeline_status_color(&step.status)),
+            )
+            .default_open(matches!(
+                step.status,
+                RunTimelineStatus::Running
+                    | RunTimelineStatus::WaitingApproval
+                    | RunTimelineStatus::Failed
+            ))
+            .show(ui, |ui| {
+                if !step.detail.trim().is_empty() {
+                    full_width_wrapped_label(ui, step.detail.as_str());
+                }
+                if !step.output.trim().is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("вывод / примечание").weak().small());
+                    full_width_wrapped_label(
+                        ui,
+                        RichText::new(step.output.as_str()).monospace().small(),
+                    );
+                }
+            });
+        }
+    });
+    ui.add_space(4.0);
+}
+
+fn timeline_status_summary(timeline: &RunTimeline) -> String {
+    let status = timeline_overall_status(timeline);
+    let marker = match &status {
+        RunTimelineStatus::Running => "●",
+        RunTimelineStatus::WaitingApproval => "◆",
+        RunTimelineStatus::Succeeded => "✓",
+        RunTimelineStatus::Failed => "×",
+        RunTimelineStatus::Cancelled => "–",
     };
 
-    egui::Frame::none()
-        .fill(fill)
-        .stroke(stroke)
-        .rounding(egui::Rounding::same(8.0))
-        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
-        .show(ui, |ui| {
-            ui.set_min_width(width - 6.0);
-            ui.horizontal(|ui| {
+    if timeline.finished_at.is_some() {
+        return format!(
+            "{marker} {} · время: {} · файлы: {} · инструменты: {} · шагов: {}",
+            timeline_finished_label(&status),
+            timeline.elapsed_label(),
+            timeline_file_summary(timeline),
+            timeline_tool_summary(timeline),
+            timeline.steps.len()
+        );
+    }
+
+    let step_title = timeline
+        .steps
+        .iter()
+        .rev()
+        .find(|step| {
+            matches!(
+                step.status,
+                RunTimelineStatus::Running | RunTimelineStatus::WaitingApproval
+            )
+        })
+        .or_else(|| {
+            timeline
+                .steps
+                .iter()
+                .rev()
+                .find(|step| step.status == status)
+        })
+        .or_else(|| timeline.steps.last())
+        .map(|step| compact_inline(&step.title, 64))
+        .unwrap_or_else(|| "нет шагов".to_string());
+
+    format!(
+        "{marker} {} · {} · шагов: {} · время: {}",
+        status.label(),
+        step_title,
+        timeline.steps.len(),
+        timeline.elapsed_label()
+    )
+}
+
+fn timeline_finished_label(status: &RunTimelineStatus) -> &'static str {
+    match status {
+        RunTimelineStatus::Succeeded => "Задача выполнена",
+        RunTimelineStatus::Failed => "Задача завершена с ошибкой",
+        RunTimelineStatus::Cancelled => "Задача отменена",
+        RunTimelineStatus::WaitingApproval => "Задача ждёт доступа",
+        RunTimelineStatus::Running => "Задача выполняется",
+    }
+}
+
+fn timeline_file_summary(timeline: &RunTimeline) -> String {
+    if timeline.changed_files.is_empty() {
+        return "нет".to_string();
+    }
+    compact_list(timeline.changed_files.iter().map(String::as_str), 3, 24)
+}
+
+fn timeline_tool_summary(timeline: &RunTimeline) -> String {
+    let mut tools = Vec::new();
+    for step in &timeline.steps {
+        let Some(tool) = step.title.strip_prefix("Инструмент: ") else {
+            continue;
+        };
+        if !tools.iter().any(|known| *known == tool) {
+            tools.push(tool);
+        }
+    }
+    if tools.is_empty() {
+        "нет".to_string()
+    } else {
+        compact_list(tools.into_iter(), 4, 22)
+    }
+}
+
+fn compact_list<'a>(
+    items: impl Iterator<Item = &'a str>,
+    shown: usize,
+    item_chars: usize,
+) -> String {
+    let items = items.collect::<Vec<_>>();
+    let total = items.len();
+    let mut parts = items
+        .into_iter()
+        .take(shown)
+        .map(|item| compact_inline(item, item_chars))
+        .collect::<Vec<_>>();
+    if total > shown {
+        parts.push(format!("+{}", total - shown));
+    }
+    parts.join(", ")
+}
+
+fn timeline_overall_status(timeline: &RunTimeline) -> RunTimelineStatus {
+    if timeline
+        .steps
+        .iter()
+        .any(|step| step.status == RunTimelineStatus::WaitingApproval)
+    {
+        RunTimelineStatus::WaitingApproval
+    } else if timeline
+        .steps
+        .iter()
+        .any(|step| step.status == RunTimelineStatus::Running)
+    {
+        RunTimelineStatus::Running
+    } else if timeline
+        .steps
+        .iter()
+        .any(|step| step.status == RunTimelineStatus::Failed)
+        || timeline.failed
+    {
+        RunTimelineStatus::Failed
+    } else if timeline
+        .steps
+        .iter()
+        .any(|step| step.status == RunTimelineStatus::Cancelled)
+    {
+        RunTimelineStatus::Cancelled
+    } else {
+        RunTimelineStatus::Succeeded
+    }
+}
+
+fn timeline_status_color(status: &RunTimelineStatus) -> egui::Color32 {
+    match status {
+        RunTimelineStatus::Running => egui::Color32::from_rgb(236, 214, 151),
+        RunTimelineStatus::WaitingApproval => egui::Color32::from_rgb(240, 180, 96),
+        RunTimelineStatus::Succeeded => egui::Color32::from_rgb(139, 211, 158),
+        RunTimelineStatus::Failed => egui::Color32::from_rgb(235, 120, 120),
+        RunTimelineStatus::Cancelled => egui::Color32::from_rgb(190, 190, 190),
+    }
+}
+
+fn chat_message(ui: &mut egui::Ui, line: &ChatLine, live_status: Option<&str>) {
+    let width = ui.available_width().max(1.0);
+    let is_user = matches!(line.role, ChatRole::User);
+    let message_width = if is_user {
+        (width * 0.68).clamp(320.0, 780.0).min(width)
+    } else {
+        width.min(980.0).max(1.0)
+    };
+
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 0.0),
+        egui::Layout::left_to_right(egui::Align::Min),
+        |ui| {
+            if is_user {
+                ui.add_space((width - message_width).max(0.0));
+            }
+            ui.allocate_ui_with_layout(
+                egui::vec2(message_width, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_width(message_width);
+                    ui.set_max_width(message_width);
+                    chat_message_body(ui, line, live_status);
+                },
+            );
+        },
+    );
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(8.0);
+}
+
+fn chat_message_body(ui: &mut egui::Ui, line: &ChatLine, live_status: Option<&str>) {
+    let content_width = ui.available_width().max(1.0);
+    let (label, label_color) = match line.role {
+        ChatRole::User => ("Вы", accent_color()),
+        ChatRole::Assistant => ("Агент", egui::Color32::from_rgb(236, 214, 151)),
+        ChatRole::System => ("Система", muted_color()),
+    };
+
+    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_min_width(content_width);
+        ui.set_max_width(content_width);
+        ui.allocate_ui_with_layout(
+            egui::vec2(content_width, 0.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
                 ui.label(RichText::new(label).strong().small().color(label_color));
                 if matches!(line.role, ChatRole::System) {
                     ui.label(RichText::new("стартовый контекст").weak().small());
                 }
+                if let Some(elapsed) = line.elapsed.as_deref() {
+                    if matches!(line.role, ChatRole::Assistant) {
+                        ui.label(RichText::new(format!("· {elapsed}")).weak().small());
+                    }
+                }
+            },
+        );
+        ui.add_space(4.0);
+        render_chat_text(ui, line.content.as_str());
+        if let Some(status) = live_status {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new(status)
+                        .weak()
+                        .small()
+                        .color(egui::Color32::from_rgb(236, 214, 151)),
+                );
             });
-            ui.add_space(4.0);
-            ui.add(egui::Label::new(line.content.as_str()).wrap());
-        });
-    ui.add_space(8.0);
+        }
+    });
 }
 
 fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
@@ -7428,6 +8548,49 @@ fn project_count_label(count: usize) -> String {
     format!("{count} {suffix}")
 }
 
+struct GitCommandResult {
+    success: bool,
+    display: String,
+}
+
+fn run_git_command(workspace: &Workspace, args: &[&str]) -> GitCommandResult {
+    let command_line = format!("git {}", args.join(" "));
+    match Command::new("git")
+        .args(args)
+        .current_dir(workspace.root())
+        .output()
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let mut parts = Vec::new();
+            if !stdout.is_empty() {
+                parts.push(stdout);
+            }
+            if !stderr.is_empty() {
+                parts.push(stderr);
+            }
+            let body = if parts.is_empty() {
+                if output.status.success() {
+                    "готово".to_string()
+                } else {
+                    "команда завершилась без вывода".to_string()
+                }
+            } else {
+                parts.join("\n")
+            };
+            GitCommandResult {
+                success: output.status.success(),
+                display: format!("{command_line}\n{body}"),
+            }
+        }
+        Err(err) => GitCommandResult {
+            success: false,
+            display: format!("{command_line}\nне удалось запустить: {err}"),
+        },
+    }
+}
+
 fn git_changed_files_for_workspace(workspace: &Workspace) -> Vec<String> {
     let Ok(output) = Command::new("git")
         .arg("status")
@@ -7690,7 +8853,41 @@ fn panel_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
 }
 
 fn metric_chip(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
-    chip(ui, format!("{label}: {value}"));
+    let value = value.to_string();
+    let shown_label = compact_inline(label, 24);
+    let shown_value = compact_inline(&value, 12);
+    let response = egui::Frame::none()
+        .fill(surface_alt_bg())
+        .stroke(egui::Stroke::new(1.0, border_color()))
+        .rounding(egui::Rounding::same(7.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
+        .show(ui, |ui| {
+            // Counters live mostly in the narrow right panel. A two-line fixed
+            // mini-card is more stable there than a long "label: value" chip:
+            // values align visually, labels do not push neighbours away, and
+            // wrapped rows remain predictable while resizing the panel.
+            ui.set_min_width(96.0);
+            ui.set_max_width(96.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new(&shown_value)
+                        .strong()
+                        .size(17.0)
+                        .color(accent_color())
+                        .text_style(egui::TextStyle::Monospace),
+                );
+                ui.label(
+                    RichText::new(&shown_label)
+                        .weak()
+                        .small()
+                        .color(muted_color()),
+                );
+            });
+        })
+        .response;
+    if shown_label != label || shown_value != value {
+        response.on_hover_text(format!("{label}: {value}"));
+    }
 }
 
 fn chip(ui: &mut egui::Ui, text: impl Into<String>) {
@@ -7849,6 +9046,192 @@ fn yes_no(value: bool) -> &'static str {
         "да"
     } else {
         "нет"
+    }
+}
+
+fn format_input_message_with_attachments(text: &str, attachments: &[InputAttachment]) -> String {
+    let mut message = text.trim().to_string();
+    if attachments.is_empty() {
+        return message;
+    }
+
+    if !message.is_empty() {
+        message.push_str("\n\n");
+    }
+    message.push_str("Вложения к сообщению (пути относительны рабочей папке):\n");
+    for attachment in attachments {
+        message.push_str(&format!(
+            "- {} `{}` — {} ({}).\n",
+            input_attachment_kind_label(attachment.kind),
+            attachment.path,
+            attachment.name,
+            format_bytes_short(attachment.bytes)
+        ));
+    }
+    message.push_str(
+        "Используй эти пути как контекст; для текстовых файлов можно читать содержимое через read_file, для изображений учитывай, что это приложенные скриншоты/картинки."
+    );
+    message
+}
+
+fn input_attachment_kind_label(kind: InputAttachmentKind) -> &'static str {
+    match kind {
+        InputAttachmentKind::File => "файл",
+        InputAttachmentKind::Image => "изображение",
+        InputAttachmentKind::Screenshot => "скриншот",
+    }
+}
+
+fn format_bytes_short(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn sanitize_attachment_file_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if sanitized.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        sanitized.chars().take(96).collect()
+    }
+}
+
+fn is_supported_image_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp")
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn platform_ctrl_v_down() -> bool {
+    const VK_CONTROL: i32 = 0x11;
+    const VK_LCONTROL: i32 = 0xA2;
+    const VK_RCONTROL: i32 = 0xA3;
+    const VK_V: i32 = 0x56;
+
+    fn key_down(v_key: i32) -> bool {
+        unsafe { (GetAsyncKeyState(v_key) as u16 & 0x8000) != 0 }
+    }
+
+    (key_down(VK_CONTROL) || key_down(VK_LCONTROL) || key_down(VK_RCONTROL)) && key_down(VK_V)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_ctrl_v_down() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(v_key: i32) -> i16;
+}
+fn save_clipboard_image_to_file(target: &Path) -> Result<(), String> {
+    match save_clipboard_image_with_arboard(target) {
+        Ok(()) => Ok(()),
+        Err(arboard_err) => {
+            #[cfg(target_os = "windows")]
+            {
+                save_clipboard_image_with_powershell(target).map_err(|powershell_err| {
+                    format!(
+                        "в буфере нет доступного изображения: arboard: {arboard_err}; Windows Clipboard: {powershell_err}"
+                    )
+                })
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                Err(format!("в буфере нет изображения: {arboard_err}"))
+            }
+        }
+    }?;
+
+    let bytes = fs::metadata(target)
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+    if bytes == 0 {
+        return Err("изображение из буфера сохранилось как пустой файл".to_string());
+    }
+    Ok(())
+}
+
+fn save_clipboard_image_with_arboard(target: &Path) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|err| format!("буфер обмена недоступен: {err}"))?;
+    let image = clipboard
+        .get_image()
+        .map_err(|err| format!("изображение не найдено: {err}"))?;
+    image::save_buffer_with_format(
+        target,
+        image.bytes.as_ref(),
+        image.width as u32,
+        image.height as u32,
+        ColorType::Rgba8,
+        ImageFormat::Png,
+    )
+    .map_err(|err| format!("не удалось сохранить изображение: {err}"))
+}
+
+#[cfg(target_os = "windows")]
+fn save_clipboard_image_with_powershell(target: &Path) -> Result<(), String> {
+    let escaped_path = target.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        r#"$ErrorActionPreference = 'Stop'
+$path = '{escaped_path}'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+if (-not [System.Windows.Forms.Clipboard]::ContainsImage()) {{
+    Write-Error 'clipboard does not contain an image'
+    exit 2
+}}
+$image = [System.Windows.Forms.Clipboard]::GetImage()
+$image.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+$image.Dispose()
+"#
+    );
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-STA",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .map_err(|err| format!("не удалось запустить powershell: {err}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        Err(if detail.is_empty() {
+            format!("powershell завершился с кодом {}", output.status)
+        } else {
+            detail
+        })
     }
 }
 

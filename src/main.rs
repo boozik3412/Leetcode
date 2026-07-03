@@ -15,6 +15,7 @@ mod memory;
 mod orchestration;
 mod project;
 mod provider_health;
+mod run_timeline;
 mod terminal;
 mod tools;
 mod workspace;

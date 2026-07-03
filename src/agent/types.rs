@@ -11,6 +11,7 @@ pub enum ChatRole {
 pub struct ChatLine {
     pub role: ChatRole,
     pub content: String,
+    pub elapsed: Option<String>,
 }
 
 impl ChatLine {
@@ -18,6 +19,7 @@ impl ChatLine {
         Self {
             role: ChatRole::User,
             content: content.into(),
+            elapsed: None,
         }
     }
 
@@ -25,6 +27,7 @@ impl ChatLine {
         Self {
             role: ChatRole::Assistant,
             content: content.into(),
+            elapsed: None,
         }
     }
 
@@ -32,6 +35,7 @@ impl ChatLine {
         Self {
             role: ChatRole::System,
             content: content.into(),
+            elapsed: None,
         }
     }
 }
