@@ -86,6 +86,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add goals, tasks, decisions, and prompt-time memory summaries.
 - Done: Add a Memory UI panel for quick goal/task/decision capture.
 - Done: Expose memory snapshot and update tools to the agent.
+- Done: Add project memory sources for imported files and saved notes, including agent-callable source capture.
 
 ## Stage 10 - Asset Library Manager
 
@@ -121,7 +122,8 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add "fix", "rerun", and "open preview" actions tied to concrete command runs.
 - Done: Build fix prompts from the exact failed command output so the agent receives actionable diagnostics.
 - Done: Add lightweight build-error grouping for failed command output.
-- Todo: Add richer task tree and structured diagnostics by compiler/test framework.
+- Done: Add structured diagnostics by compiler/test framework with file, line, column, type, targeted fix prompts, and fix-request history.
+- Todo: Add richer task tree across project milestones and launch/game-development workstreams.
 
 ## Stage 15 - Asset Studio
 

@@ -48,6 +48,7 @@ use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::shell::{run_shell, RunShellArgs};
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
+use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,6 +96,7 @@ pub struct LeetcodeApp {
     project_status: String,
     last_project_command: Option<ProjectCommand>,
     project_runs: Vec<ProjectRunRecord>,
+    project_fix_requests: Vec<ProjectFixRequestRecord>,
     active_project_run_id: Option<String>,
     desktop_status: String,
     desktop_last_screenshot: Option<String>,
@@ -262,7 +264,35 @@ struct ProjectRunRecord {
     status: ProjectRunStatus,
     exit_code: Option<i32>,
     error_summary: Vec<String>,
+    diagnostics: Vec<ProjectDiagnostic>,
     output_tail: String,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectDiagnostic {
+    kind: ProjectDiagnosticKind,
+    file: Option<String>,
+    line: Option<usize>,
+    column: Option<usize>,
+    message: String,
+    raw: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectDiagnosticKind {
+    Error,
+    Warning,
+    Panic,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectFixRequestRecord {
+    id: String,
+    run_id: String,
+    run_label: String,
+    target: String,
+    requested_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -353,6 +383,30 @@ impl ProjectRunStatus {
     }
 }
 
+impl ProjectDiagnosticKind {
+    fn label(self) -> &'static str {
+        match self {
+            ProjectDiagnosticKind::Error => "error",
+            ProjectDiagnosticKind::Warning => "warning",
+            ProjectDiagnosticKind::Panic => "panic",
+            ProjectDiagnosticKind::Failed => "failed",
+        }
+    }
+
+    fn from_text(text: &str) -> Self {
+        let lower = text.to_lowercase();
+        if lower.contains("warning") {
+            ProjectDiagnosticKind::Warning
+        } else if lower.contains("panic") {
+            ProjectDiagnosticKind::Panic
+        } else if lower.contains("failed") {
+            ProjectDiagnosticKind::Failed
+        } else {
+            ProjectDiagnosticKind::Error
+        }
+    }
+}
+
 impl LeetcodeApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_app_theme(&cc.egui_ctx);
@@ -431,6 +485,7 @@ impl LeetcodeApp {
             project_status: String::new(),
             last_project_command: None,
             project_runs: Vec::new(),
+            project_fix_requests: Vec::new(),
             active_project_run_id: None,
             desktop_status: String::new(),
             desktop_last_screenshot: None,
@@ -690,6 +745,8 @@ impl LeetcodeApp {
         self.asset_jobs.clear();
         self.asset_previews.clear();
         self.project_profiles.clear();
+        self.project_runs.clear();
+        self.project_fix_requests.clear();
         self.git_summary.clear();
         self.git_changed_files.clear();
         self.provider_validation_results.clear();
@@ -1229,6 +1286,7 @@ impl LeetcodeApp {
             status: ProjectRunStatus::Running,
             exit_code: None,
             error_summary: Vec::new(),
+            diagnostics: Vec::new(),
             output_tail: String::new(),
         });
         self.active_project_run_id = Some(tool_id.clone());
@@ -1289,7 +1347,9 @@ impl LeetcodeApp {
         let mut project_status = None;
         if let Some(run) = self.project_runs.iter_mut().find(|run| run.id == id) {
             append_output_tail(&mut run.output_tail, output, 12_000);
-            run.error_summary = project_error_summary(&run.output_tail);
+            run.diagnostics = project_diagnostics(&run.output_tail);
+            run.error_summary =
+                project_error_summary_from_diagnostics(&run.diagnostics, &run.output_tail);
             run.finished_at = Some(unix_timestamp());
             run.exit_code = exit_code;
             run.status = match exit_code {
@@ -1322,7 +1382,9 @@ impl LeetcodeApp {
         let mut project_status = None;
         if let Some(run) = self.project_runs.iter_mut().find(|run| run.id == id) {
             append_output_tail(&mut run.output_tail, error, 12_000);
-            run.error_summary = project_error_summary(&run.output_tail);
+            run.diagnostics = project_diagnostics(&run.output_tail);
+            run.error_summary =
+                project_error_summary_from_diagnostics(&run.diagnostics, &run.output_tail);
             run.finished_at = Some(unix_timestamp());
             if run.status == ProjectRunStatus::Running {
                 run.status = if error.to_lowercase().contains("cancel") || error.contains("отмен")
@@ -1349,6 +1411,10 @@ impl LeetcodeApp {
     }
 
     fn prepare_fix_prompt_from_run(&mut self, run: &ProjectRunRecord) {
+        if !run.id.is_empty() {
+            self.prepare_structured_fix_prompt_from_run(run);
+            return;
+        }
         self.input = format!(
             "Проанализируй падение проектной команды и исправь причину минимальными изменениями.\n\nКоманда: {}\nСтатус: {}\nExit code: {}\n\nХвост вывода:\n```text\n{}\n```\n\nСначала кратко назови вероятную причину, затем внеси правки и проверь подходящей командой.",
             run.shell_command,
@@ -1360,6 +1426,58 @@ impl LeetcodeApp {
         );
         self.active_center_tab = CenterTab::Agent;
         self.set_workspace_mode(WorkspaceMode::Chat);
+    }
+
+    fn prepare_structured_fix_prompt_from_run(&mut self, run: &ProjectRunRecord) {
+        let diagnostics = project_diagnostics_prompt_block(run, 8);
+        self.input = format!(
+            "Проанализируй падение проектной команды и исправь причину минимальными изменениями.\n\nКоманда: {}\nСтатус: {}\nExit code: {}\n\nСтруктурированная диагностика:\n{}\n\nХвост вывода:\n```text\n{}\n```\n\nСначала кратко назови вероятную причину, затем внеси правки и проверь подходящей командой.",
+            run.shell_command,
+            run.status.label(),
+            run.exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "нет".to_string()),
+            diagnostics,
+            compact(&run.output_tail, 5_000)
+        );
+        self.record_project_fix_request(run, "весь запуск".to_string());
+        self.active_center_tab = CenterTab::Agent;
+        self.set_workspace_mode(WorkspaceMode::Chat);
+    }
+
+    fn prepare_fix_prompt_from_diagnostic(
+        &mut self,
+        run: &ProjectRunRecord,
+        diagnostic: &ProjectDiagnostic,
+    ) {
+        self.input = format!(
+            "Исправь конкретную проблему из диагностики проектной команды минимальными изменениями.\n\nКоманда: {}\nСтатус: {}\nExit code: {}\n\nПроблема:\n{}\n\nСырой фрагмент:\n```text\n{}\n```\n\nХвост вывода:\n```text\n{}\n```\n\nСначала открой и изучи связанный файл, затем исправь причину и проверь подходящей командой.",
+            run.shell_command,
+            run.status.label(),
+            run.exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "нет".to_string()),
+            diagnostic_prompt_line(diagnostic),
+            diagnostic.raw,
+            compact(&run.output_tail, 5_000)
+        );
+        self.record_project_fix_request(run, diagnostic_short_target(diagnostic));
+        self.active_center_tab = CenterTab::Agent;
+        self.set_workspace_mode(WorkspaceMode::Chat);
+    }
+
+    fn record_project_fix_request(&mut self, run: &ProjectRunRecord, target: String) {
+        self.project_fix_requests.push(ProjectFixRequestRecord {
+            id: format!("fix-{}", uuid::Uuid::new_v4()),
+            run_id: run.id.clone(),
+            run_label: run.label.clone(),
+            target,
+            requested_at: unix_timestamp(),
+        });
+        if self.project_fix_requests.len() > 40 {
+            let overflow = self.project_fix_requests.len() - 40;
+            self.project_fix_requests.drain(0..overflow);
+        }
     }
 
     fn open_first_project_preview(&mut self) {
@@ -5698,6 +5816,44 @@ impl LeetcodeApp {
                 }
             });
             ui.label(RichText::new(&run.shell_command).weak().monospace());
+            if !run.diagnostics.is_empty() {
+                ui.label(RichText::new("Диагностика").strong());
+                let mut open_diagnostic_file = None;
+                let mut fix_diagnostic = None;
+                for diagnostic in run.diagnostics.iter().take(8) {
+                    ui.horizontal_wrapped(|ui| {
+                        chip(ui, diagnostic.kind.label());
+                        if let Some(location) = diagnostic_location(diagnostic) {
+                            ui.label(RichText::new(location).monospace().strong());
+                        }
+                        ui.label(
+                            RichText::new(compact_inline(&diagnostic.message, 160))
+                                .color(egui::Color32::from_rgb(235, 154, 154)),
+                        )
+                        .on_hover_text(&diagnostic.raw);
+                        if let Some(file) = &diagnostic.file {
+                            if ui.button("Открыть").clicked() {
+                                open_diagnostic_file = Some(file.clone());
+                            }
+                        }
+                        if ui
+                            .add_enabled(
+                                run.status == ProjectRunStatus::Failed,
+                                egui::Button::new("Исправить"),
+                            )
+                            .clicked()
+                        {
+                            fix_diagnostic = Some(diagnostic.clone());
+                        }
+                    });
+                }
+                if let Some(file) = open_diagnostic_file {
+                    self.load_file_preview(&file);
+                }
+                if let Some(diagnostic) = fix_diagnostic {
+                    self.prepare_fix_prompt_from_diagnostic(&run, &diagnostic);
+                }
+            }
             if !run.error_summary.is_empty() {
                 ui.label(RichText::new("Найденные ошибки").strong());
                 for item in run.error_summary.iter().take(6) {
@@ -5715,6 +5871,21 @@ impl LeetcodeApp {
                         .desired_rows(5)
                         .interactive(false),
                 );
+            }
+        }
+
+        if !self.project_fix_requests.is_empty() {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("История исправлений").strong());
+            for request in self.project_fix_requests.iter().rev().take(8) {
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, format!("#{}", compact_inline(&request.id, 10)));
+                    chip(ui, format!("run {}", compact_inline(&request.run_id, 8)));
+                    ui.label(RichText::new(&request.run_label).strong());
+                    ui.label(RichText::new(compact_inline(&request.target, 140)).weak());
+                    ui.label(RichText::new(format!("{}", request.requested_at)).weak());
+                });
             }
         }
     }
@@ -7260,6 +7431,261 @@ fn parse_project_exit_code(output: &str) -> Option<i32> {
     None
 }
 
+fn project_diagnostics(output: &str) -> Vec<ProjectDiagnostic> {
+    let lines = output.lines().collect::<Vec<_>>();
+    let rust_location = Regex::new(r"^\s*-->\s+(.+):(\d+):(\d+)").expect("valid rust regex");
+    let ts_parenthesized = Regex::new(r"^(.+)\((\d+),(\d+)\):\s*(error|warning)\b[^:]*:\s*(.+)$")
+        .expect("valid ts parenthesized regex");
+    let ts_colon = Regex::new(r"^(.+):(\d+):(\d+)\s+-\s+(error|warning)\b[^:]*:\s*(.+)$")
+        .expect("valid ts colon regex");
+    let python_file =
+        Regex::new(r#"^\s*File "(.+)", line (\d+)"#).expect("valid python file regex");
+
+    let mut diagnostics = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(captures) = rust_location.captures(trimmed) {
+            let message = previous_error_line(&lines, index)
+                .unwrap_or_else(|| "Rust compiler diagnostic".to_string());
+            push_unique_diagnostic(
+                &mut diagnostics,
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::from_text(&message),
+                    file: Some(normalize_diagnostic_path(&captures[1])),
+                    line: captures[2].parse().ok(),
+                    column: captures[3].parse().ok(),
+                    message,
+                    raw: diagnostic_raw_window(&lines, index.saturating_sub(1), index + 2),
+                },
+            );
+            continue;
+        }
+
+        if let Some(captures) = ts_parenthesized.captures(trimmed) {
+            push_unique_diagnostic(
+                &mut diagnostics,
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::from_text(&captures[4]),
+                    file: Some(normalize_diagnostic_path(&captures[1])),
+                    line: captures[2].parse().ok(),
+                    column: captures[3].parse().ok(),
+                    message: captures[5].trim().to_string(),
+                    raw: trimmed.to_string(),
+                },
+            );
+            continue;
+        }
+
+        if let Some(captures) = ts_colon.captures(trimmed) {
+            push_unique_diagnostic(
+                &mut diagnostics,
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::from_text(&captures[4]),
+                    file: Some(normalize_diagnostic_path(&captures[1])),
+                    line: captures[2].parse().ok(),
+                    column: captures[3].parse().ok(),
+                    message: captures[5].trim().to_string(),
+                    raw: trimmed.to_string(),
+                },
+            );
+            continue;
+        }
+
+        if let Some(captures) = python_file.captures(trimmed) {
+            let message = next_error_line(&lines, index)
+                .unwrap_or_else(|| "Python runtime diagnostic".to_string());
+            push_unique_diagnostic(
+                &mut diagnostics,
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::from_text(&message),
+                    file: Some(normalize_diagnostic_path(&captures[1])),
+                    line: captures[2].parse().ok(),
+                    column: None,
+                    message,
+                    raw: diagnostic_raw_window(&lines, index, index + 4),
+                },
+            );
+            continue;
+        }
+
+        let lower = trimmed.to_lowercase();
+        let is_project_error = lower.contains("error")
+            || lower.contains("failed")
+            || lower.contains("panic")
+            || lower.contains("ошибка")
+            || lower.contains("не удалось");
+        if is_project_error {
+            if lines
+                .get(index + 1)
+                .is_some_and(|next| rust_location.is_match(next.trim()))
+            {
+                continue;
+            }
+            push_unique_diagnostic(
+                &mut diagnostics,
+                ProjectDiagnostic {
+                    kind: ProjectDiagnosticKind::from_text(trimmed),
+                    file: None,
+                    line: None,
+                    column: None,
+                    message: trimmed.to_string(),
+                    raw: trimmed.to_string(),
+                },
+            );
+        }
+
+        if diagnostics.len() >= 24 {
+            break;
+        }
+    }
+    diagnostics
+}
+
+fn project_error_summary_from_diagnostics(
+    diagnostics: &[ProjectDiagnostic],
+    output: &str,
+) -> Vec<String> {
+    if diagnostics.is_empty() {
+        project_error_summary(output)
+    } else {
+        diagnostics
+            .iter()
+            .take(12)
+            .map(diagnostic_prompt_line)
+            .collect()
+    }
+}
+
+fn project_diagnostics_prompt_block(run: &ProjectRunRecord, limit: usize) -> String {
+    if run.diagnostics.is_empty() {
+        return if run.error_summary.is_empty() {
+            "- структурированная диагностика не найдена".to_string()
+        } else {
+            run.error_summary
+                .iter()
+                .take(limit)
+                .map(|line| format!("- {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+    }
+
+    run.diagnostics
+        .iter()
+        .take(limit)
+        .map(|diagnostic| format!("- {}", diagnostic_prompt_line(diagnostic)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn diagnostic_prompt_line(diagnostic: &ProjectDiagnostic) -> String {
+    match diagnostic_location(diagnostic) {
+        Some(location) => format!(
+            "{} {}: {}",
+            diagnostic.kind.label(),
+            location,
+            diagnostic.message
+        ),
+        None => format!("{}: {}", diagnostic.kind.label(), diagnostic.message),
+    }
+}
+
+fn diagnostic_short_target(diagnostic: &ProjectDiagnostic) -> String {
+    match diagnostic_location(diagnostic) {
+        Some(location) => format!("{} {}", location, compact_inline(&diagnostic.message, 90)),
+        None => compact_inline(&diagnostic.message, 120),
+    }
+}
+
+fn diagnostic_location(diagnostic: &ProjectDiagnostic) -> Option<String> {
+    let file = diagnostic.file.as_ref()?;
+    Some(match (diagnostic.line, diagnostic.column) {
+        (Some(line), Some(column)) => format!("{file}:{line}:{column}"),
+        (Some(line), None) => format!("{file}:{line}"),
+        _ => file.clone(),
+    })
+}
+
+fn push_unique_diagnostic(diagnostics: &mut Vec<ProjectDiagnostic>, diagnostic: ProjectDiagnostic) {
+    let key = format!(
+        "{}|{:?}|{:?}|{:?}|{}",
+        diagnostic.file.as_deref().unwrap_or(""),
+        diagnostic.line,
+        diagnostic.column,
+        diagnostic.kind,
+        diagnostic.message
+    );
+    let exists = diagnostics.iter().any(|existing| {
+        format!(
+            "{}|{:?}|{:?}|{:?}|{}",
+            existing.file.as_deref().unwrap_or(""),
+            existing.line,
+            existing.column,
+            existing.kind,
+            existing.message
+        ) == key
+    });
+    if !exists {
+        diagnostics.push(diagnostic);
+    }
+}
+
+fn previous_error_line(lines: &[&str], index: usize) -> Option<String> {
+    lines[..index].iter().rev().find_map(|line| {
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("error")
+            || lower.starts_with("warning")
+            || lower.contains("panic")
+            || lower.contains("failed")
+        {
+            Some(trimmed.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn next_error_line(lines: &[&str], index: usize) -> Option<String> {
+    lines[index.saturating_add(1)..].iter().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            None
+        } else if trimmed.contains("Error")
+            || trimmed.contains("Exception")
+            || trimmed.contains("SyntaxError")
+            || trimmed.contains("Traceback")
+            || trimmed.contains("panic")
+            || trimmed.contains("failed")
+        {
+            Some(trimmed.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn diagnostic_raw_window(lines: &[&str], start: usize, end: usize) -> String {
+    lines
+        .iter()
+        .skip(start)
+        .take(end.saturating_sub(start).max(1))
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_diagnostic_path(path: &str) -> String {
+    path.trim()
+        .trim_start_matches("./")
+        .replace('\\', "/")
+        .to_string()
+}
+
 fn project_error_summary(output: &str) -> Vec<String> {
     let mut summary = Vec::new();
     for line in output.lines() {
@@ -7281,4 +7707,60 @@ fn project_error_summary(output: &str) -> Vec<String> {
         }
     }
     summary
+}
+
+#[cfg(test)]
+mod project_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn parses_rust_compiler_location() {
+        let output = r#"
+error[E0425]: cannot find value `foo` in this scope
+ --> src/main.rs:12:9
+  |
+12 |     foo();
+  |     ^^^ not found in this scope
+"#;
+
+        let diagnostics = project_diagnostics(output);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].file.as_deref(), Some("src/main.rs"));
+        assert_eq!(diagnostics[0].line, Some(12));
+        assert_eq!(diagnostics[0].column, Some(9));
+        assert_eq!(diagnostics[0].kind, ProjectDiagnosticKind::Error);
+    }
+
+    #[test]
+    fn parses_typescript_parenthesized_location() {
+        let output = "src/App.tsx(8,15): error TS2304: Cannot find name 'Widget'.";
+
+        let diagnostics = project_diagnostics(output);
+
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].file.as_deref(), Some("src/App.tsx"));
+        assert_eq!(diagnostics[0].line, Some(8));
+        assert_eq!(diagnostics[0].column, Some(15));
+        assert!(diagnostics[0].message.contains("Cannot find name"));
+    }
+
+    #[test]
+    fn parses_python_traceback_file_line() {
+        let output = r#"
+Traceback (most recent call last):
+  File "scripts/build.py", line 22, in <module>
+    main()
+SyntaxError: invalid syntax
+"#;
+
+        let diagnostics = project_diagnostics(output);
+
+        assert!(diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.file.as_deref() == Some("scripts/build.py")
+                    && diagnostic.line == Some(22)
+            ));
+    }
 }
