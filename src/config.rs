@@ -54,6 +54,10 @@ pub struct ProviderSettings {
 pub struct ProjectUiState {
     pub path: PathBuf,
     #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
     pub expanded: bool,
     #[serde(default)]
     pub expanded_dirs: Vec<String>,
@@ -295,6 +299,30 @@ impl AppConfig {
         self.projects
             .iter_mut()
             .find(|project| project_path_key(&project.path) == key)
+    }
+
+    pub fn remove_project(&mut self, path: &Path) -> bool {
+        let key = project_path_key(path);
+        let before = self.projects.len();
+        self.projects
+            .retain(|project| project_path_key(&project.path) != key);
+        before != self.projects.len()
+    }
+
+    pub fn set_project_display_name(&mut self, path: &Path, display_name: &str) -> bool {
+        let Some(project) = self.project_state_mut(path) else {
+            return false;
+        };
+        project.display_name = display_name.trim().to_string();
+        true
+    }
+
+    pub fn toggle_project_pinned(&mut self, path: &Path) -> bool {
+        let Some(project) = self.project_state_mut(path) else {
+            return false;
+        };
+        project.pinned = !project.pinned;
+        true
     }
 
     pub fn api_key_for_provider(&self, provider_id: &str) -> String {
@@ -598,6 +626,8 @@ fn remember_project_state(projects: &mut Vec<ProjectUiState>, path: PathBuf) {
         projects,
         ProjectUiState {
             path,
+            display_name: String::new(),
+            pinned: false,
             expanded: false,
             expanded_dirs: Vec::new(),
         },
@@ -609,6 +639,7 @@ fn remember_project_state_with_state(
     mut state: ProjectUiState,
 ) {
     state.path = readable_project_path(state.path);
+    state.display_name = state.display_name.trim().to_string();
     let key = project_path_key(&state.path);
     if key.is_empty() {
         return;
@@ -624,6 +655,10 @@ fn remember_project_state_with_state(
         {
             existing.path = state.path;
         }
+        if existing.display_name.trim().is_empty() && !state.display_name.trim().is_empty() {
+            existing.display_name = state.display_name;
+        }
+        existing.pinned |= state.pinned;
         existing.expanded |= state.expanded;
         for dir in state.expanded_dirs {
             if !existing
@@ -941,6 +976,8 @@ mod tests {
         let projects = normalize_project_states(vec![
             ProjectUiState {
                 path: PathBuf::from("C:/Projects/Game"),
+                display_name: "Game Client".to_string(),
+                pinned: false,
                 expanded: true,
                 expanded_dirs: vec![
                     "src".to_string(),
@@ -950,6 +987,8 @@ mod tests {
             },
             ProjectUiState {
                 path: PathBuf::from("//?/C:/Projects/Game/"),
+                display_name: String::new(),
+                pinned: true,
                 expanded: false,
                 expanded_dirs: vec!["assets/generated".to_string()],
             },
@@ -957,6 +996,8 @@ mod tests {
 
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].path, PathBuf::from("C:/Projects/Game"));
+        assert_eq!(projects[0].display_name, "Game Client");
+        assert!(projects[0].pinned);
         assert!(projects[0].expanded);
         assert_eq!(projects[0].expanded_dirs, vec!["src/", "assets/generated/"]);
     }

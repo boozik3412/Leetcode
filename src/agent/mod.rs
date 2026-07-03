@@ -96,7 +96,10 @@ pub async fn run_user_turn(
         .as_ref()
         .map(|workspace| workspace.root().display().to_string())
         .unwrap_or_else(|| "рабочая папка не выбрана".to_string());
-    let project_memory = crate::memory::memory_summary_for_prompt(workspace.as_ref());
+    let project_memory = format!(
+        "{}\nПоддерживай память проекта актуальной: сохраняй устойчивые факты, внешние требования, brief/spec, решения и важные выдержки через record_memory_source, а затем учитывай эти источники при планировании и правках. Если для задачи нужен полный текст источников, сначала вызови memory_snapshot.",
+        crate::memory::memory_summary_for_prompt(workspace.as_ref())
+    );
     let instructions = format!(
         "Ты Leetcode, лаконичный локальный агент для программирования внутри Windows desktop-приложения. \
 Отвечай пользователю на русском языке. Текущий провайдер модели: {} ({}). \

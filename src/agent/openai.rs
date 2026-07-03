@@ -942,6 +942,8 @@ pub fn act_tool_schema() -> Value {
                                 "update_task_status",
                                 "record_decision",
                                 "record_project_goal",
+                                "record_memory_source",
+                                "remove_memory_source",
                                 "asset_library_snapshot",
                                 "tag_asset",
                                 "favorite_asset",
@@ -1227,6 +1229,8 @@ pub fn gemini_act_function_declaration() -> Value {
                         "update_task_status",
                         "record_decision",
                         "record_project_goal",
+                        "record_memory_source",
+                        "remove_memory_source",
                         "asset_library_snapshot",
                         "tag_asset",
                         "favorite_asset",
@@ -1303,6 +1307,8 @@ fn act_compatible_parameters_schema() -> Value {
                     "update_task_status",
                     "record_decision",
                     "record_project_goal",
+                    "record_memory_source",
+                    "remove_memory_source",
                     "asset_library_snapshot",
                     "tag_asset",
                     "favorite_asset",
@@ -1568,6 +1574,8 @@ mod tests {
             assert!(schema.contains("update_task_status"));
             assert!(schema.contains("record_decision"));
             assert!(schema.contains("record_project_goal"));
+            assert!(schema.contains("record_memory_source"));
+            assert!(schema.contains("remove_memory_source"));
             assert!(schema.contains("asset_library_snapshot"));
             assert!(schema.contains("tag_asset"));
             assert!(schema.contains("favorite_asset"));

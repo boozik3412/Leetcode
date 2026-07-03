@@ -16,7 +16,8 @@ use crate::diagnostics;
 use crate::evals::RunReplayEvalArgs;
 use crate::governance::{AddShellDenyPatternArgs, SetCategoryEnabledArgs, SetToolEnabledArgs};
 use crate::memory::{
-    RecordDecisionArgs, RecordProjectGoalArgs, UpdateTaskStatusArgs, UpsertTaskArgs,
+    RecordDecisionArgs, RecordMemorySourceArgs, RecordProjectGoalArgs, RemoveMemorySourceArgs,
+    UpdateTaskStatusArgs, UpsertTaskArgs,
 };
 use crate::provider_health;
 use crate::tools::asset_generation::{
@@ -732,6 +733,38 @@ impl ToolDispatcher {
                             return ToolResult::error("record_project_goal отклонён пользователем");
                         }
                         crate::memory::record_project_goal(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RecordMemorySource => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<RecordMemorySourceArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Record project memory source", &args.title) {
+                            return ToolResult::error(
+                                "record_memory_source отклонён пользователем",
+                            );
+                        }
+                        crate::memory::record_memory_source(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RemoveMemorySource => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<RemoveMemorySourceArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Remove project memory source", &args.id) {
+                            return ToolResult::error(
+                                "remove_memory_source отклонён пользователем",
+                            );
+                        }
+                        crate::memory::remove_memory_source(workspace, args)
                     }
                     Err(err) => ToolResult::error(err.to_string()),
                 }

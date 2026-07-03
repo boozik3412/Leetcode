@@ -27,8 +27,9 @@ use crate::game_workflows::{
 use crate::governance::{load_governance, save_governance, tool_specs};
 use crate::http::{proxy_status_label, proxy_system_status_label};
 use crate::memory::{
-    load_memory, record_decision, record_project_goal, upsert_task, RecordDecisionArgs,
-    RecordProjectGoalArgs, UpsertTaskArgs,
+    import_memory_source_file, load_memory, record_decision, record_memory_source,
+    record_project_goal, remove_memory_source, upsert_task, RecordDecisionArgs,
+    RecordMemorySourceArgs, RecordProjectGoalArgs, RemoveMemorySourceArgs, UpsertTaskArgs,
 };
 use crate::orchestration::{
     agent_role_specs, export_trace, load_orchestration_state, orchestration_snapshot,
@@ -65,6 +66,11 @@ pub struct LeetcodeApp {
     workspace: Option<Workspace>,
     file_rows: Vec<String>,
     selected_tree_path: Option<String>,
+    project_rename_target: Option<PathBuf>,
+    project_rename_input: String,
+    file_search_input: String,
+    file_filter: FileTreeFilter,
+    git_changed_files: Vec<String>,
     file_rename_target: Option<String>,
     file_rename_input: String,
     last_file_click_path: Option<String>,
@@ -102,6 +108,8 @@ pub struct LeetcodeApp {
     memory_goal_input: String,
     memory_task_input: String,
     memory_decision_input: String,
+    memory_source_title_input: String,
+    memory_source_note_input: String,
     memory_status: String,
     asset_library_filter: String,
     asset_library_status: String,
@@ -163,6 +171,32 @@ enum WorkspaceMode {
 enum CenterTab {
     Agent,
     File(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileTreeFilter {
+    All,
+    Modified,
+    Code,
+    Assets,
+}
+
+impl FileTreeFilter {
+    const ALL: [FileTreeFilter; 4] = [
+        FileTreeFilter::All,
+        FileTreeFilter::Modified,
+        FileTreeFilter::Code,
+        FileTreeFilter::Assets,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            FileTreeFilter::All => "Все",
+            FileTreeFilter::Modified => "Изменённые",
+            FileTreeFilter::Code => "Код",
+            FileTreeFilter::Assets => "Ассеты",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -335,6 +369,10 @@ impl LeetcodeApp {
             .as_ref()
             .map(|workspace| workspace.ui_file_rows(600))
             .unwrap_or_default();
+        let git_changed_files = workspace
+            .as_ref()
+            .map(git_changed_files_for_workspace)
+            .unwrap_or_default();
         let asset_jobs = workspace.as_ref().map(load_jobs).unwrap_or_default();
         let project_profiles = workspace
             .as_ref()
@@ -362,6 +400,11 @@ impl LeetcodeApp {
             workspace,
             file_rows,
             selected_tree_path: None,
+            project_rename_target: None,
+            project_rename_input: String::new(),
+            file_search_input: String::new(),
+            file_filter: FileTreeFilter::All,
+            git_changed_files,
             file_rename_target: None,
             file_rename_input: String::new(),
             last_file_click_path: None,
@@ -401,6 +444,8 @@ impl LeetcodeApp {
             memory_goal_input: String::new(),
             memory_task_input: String::new(),
             memory_decision_input: String::new(),
+            memory_source_title_input: String::new(),
+            memory_source_note_input: String::new(),
             memory_status: String::new(),
             asset_library_filter: String::new(),
             asset_library_status: String::new(),
@@ -459,6 +504,8 @@ impl LeetcodeApp {
                 self.asset_jobs = self.workspace.as_ref().map(load_jobs).unwrap_or_default();
                 self.asset_previews.clear();
                 self.selected_tree_path = None;
+                self.project_rename_target = None;
+                self.project_rename_input.clear();
                 self.file_rename_target = None;
                 self.file_rename_input.clear();
                 self.last_file_click_path = None;
@@ -548,6 +595,110 @@ impl LeetcodeApp {
         let _ = self.config.save();
     }
 
+    fn start_project_rename(&mut self, path: &Path) {
+        self.config.remember_project(path.to_path_buf());
+        let name = self
+            .config
+            .project_state(path)
+            .map(project_label)
+            .unwrap_or_else(|| project_display_name(path));
+        self.project_rename_target = Some(path.to_path_buf());
+        self.project_rename_input = name;
+    }
+
+    fn cancel_project_rename(&mut self) {
+        self.project_rename_target = None;
+        self.project_rename_input.clear();
+    }
+
+    fn commit_project_rename(&mut self) {
+        let Some(path) = self.project_rename_target.take() else {
+            return;
+        };
+        let display_name = self.project_rename_input.trim().to_string();
+        self.project_rename_input.clear();
+        if self.config.set_project_display_name(&path, &display_name) {
+            self.file_operation_status = if display_name.is_empty() {
+                "Имя проекта сброшено".to_string()
+            } else {
+                format!("Проект переименован: {display_name}")
+            };
+            let _ = self.config.save();
+        }
+    }
+
+    fn toggle_project_pinned(&mut self, path: &Path) {
+        if self.config.toggle_project_pinned(path) {
+            let pinned = self
+                .config
+                .project_state(path)
+                .map(|project| project.pinned)
+                .unwrap_or(false);
+            self.file_operation_status = if pinned {
+                "Проект закреплён".to_string()
+            } else {
+                "Проект откреплён".to_string()
+            };
+            let _ = self.config.save();
+        }
+    }
+
+    fn remove_project_from_list(&mut self, path: &Path) {
+        let was_active = self.project_is_active(path);
+        if !self.config.remove_project(path) {
+            return;
+        }
+        self.file_operation_status =
+            format!("Проект убран из списка: {}", project_display_name(path));
+        self.project_rename_target = None;
+        self.project_rename_input.clear();
+
+        if was_active {
+            let next_project = self
+                .config
+                .projects
+                .first()
+                .map(|project| project.path.clone());
+            if let Some(next_project) = next_project {
+                let _ = self.open_workspace_path(next_project);
+            } else {
+                self.clear_workspace_selection();
+                let _ = self.config.save();
+            }
+        } else {
+            let _ = self.config.save();
+        }
+    }
+
+    fn clear_workspace_selection(&mut self) {
+        self.config.last_workspace = None;
+        self.workspace = None;
+        self.file_rows.clear();
+        self.selected_tree_path = None;
+        self.file_rename_target = None;
+        self.file_rename_input.clear();
+        self.last_file_click_path = None;
+        self.last_file_click_time = 0.0;
+        self.dragged_tree_path = None;
+        self.selected_file = None;
+        self.selected_preview.clear();
+        self.original_file_content.clear();
+        self.selected_file_editable = false;
+        self.editor_status.clear();
+        self.file_tabs.clear();
+        self.active_center_tab = CenterTab::Agent;
+        self.asset_jobs.clear();
+        self.asset_previews.clear();
+        self.project_profiles.clear();
+        self.git_summary.clear();
+        self.git_changed_files.clear();
+        self.provider_validation_results.clear();
+        self.agent_state
+            .lock()
+            .expect("agent state poisoned")
+            .reset();
+    }
+
     fn active_dir_is_expanded(&self, path: &str) -> bool {
         let dir = normalize_tree_dir(path);
         if dir.is_empty() {
@@ -581,9 +732,11 @@ impl LeetcodeApp {
         if !self.active_project_is_expanded() {
             return Vec::new();
         }
+        let narrowed = self.file_tree_is_narrowed();
         self.file_rows
             .iter()
-            .filter(|row| self.file_tree_row_is_visible(row))
+            .filter(|row| self.file_tree_row_matches_filters(row))
+            .filter(|row| narrowed || self.file_tree_row_is_visible(row))
             .cloned()
             .collect()
     }
@@ -595,6 +748,40 @@ impl LeetcodeApp {
         file_tree_parent_dirs(row)
             .iter()
             .all(|parent| self.active_dir_is_expanded(parent))
+    }
+
+    fn file_tree_is_narrowed(&self) -> bool {
+        !self.file_search_input.trim().is_empty() || self.file_filter != FileTreeFilter::All
+    }
+
+    fn file_tree_row_matches_filters(&self, row: &str) -> bool {
+        self.file_tree_row_matches_search(row) && self.file_tree_row_matches_kind_filter(row)
+    }
+
+    fn file_tree_row_matches_search(&self, row: &str) -> bool {
+        let query = self.file_search_input.trim().to_ascii_lowercase();
+        if query.is_empty() || row == "..." {
+            return true;
+        }
+        let haystack = row.to_ascii_lowercase();
+        haystack.contains(&query)
+            || row.ends_with('/')
+                && self.file_rows.iter().any(|candidate| {
+                    candidate.starts_with(row) && candidate.to_ascii_lowercase().contains(&query)
+                })
+    }
+
+    fn file_tree_row_matches_kind_filter(&self, row: &str) -> bool {
+        match self.file_filter {
+            FileTreeFilter::All => true,
+            FileTreeFilter::Modified => {
+                tree_row_matches_changed_files(row, &self.git_changed_files)
+            }
+            FileTreeFilter::Code => tree_row_matches_any(row, &self.file_rows, is_code_file_path),
+            FileTreeFilter::Assets => {
+                tree_row_matches_any(row, &self.file_rows, is_asset_file_path)
+            }
+        }
     }
 
     fn handle_file_tree_click(
@@ -935,8 +1122,11 @@ impl LeetcodeApp {
     fn refresh_git_summary(&mut self) {
         let Some(workspace) = &self.workspace else {
             self.git_summary.clear();
+            self.git_changed_files.clear();
             return;
         };
+
+        self.git_changed_files = git_changed_files_for_workspace(workspace);
 
         let status = Command::new("git")
             .arg("status")
@@ -1253,6 +1443,20 @@ impl LeetcodeApp {
             Err(err) => {
                 format!("не удалось открыть предпросмотр: {err}")
             }
+        };
+    }
+
+    fn open_project_folder(&mut self, path: &Path) {
+        #[cfg(target_os = "windows")]
+        let result = Command::new("explorer").arg(path).spawn().map(|_| ());
+        #[cfg(target_os = "macos")]
+        let result = Command::new("open").arg(path).spawn().map(|_| ());
+        #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+        let result = Command::new("xdg-open").arg(path).spawn().map(|_| ());
+
+        self.file_operation_status = match result {
+            Ok(()) => format!("Папка открыта: {}", project_display_name(path)),
+            Err(err) => format!("Не удалось открыть папку проекта: {err}"),
         };
     }
 
@@ -2682,8 +2886,9 @@ impl LeetcodeApp {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Обновить").clicked() {
                             self.refresh_file_rows();
+                            self.refresh_git_summary();
                         }
-                        if ui.button("Открыть").clicked() {
+                        if ui.button("Добавить").clicked() {
                             self.choose_workspace();
                         }
                     });
@@ -2695,10 +2900,35 @@ impl LeetcodeApp {
                     .len()
                     .max(usize::from(self.workspace.is_some()));
                 ui.label(RichText::new(project_count_label(project_count)).weak().small());
+                ui.add_space(4.0);
+                ui.add(
+                    TextEdit::singleline(&mut self.file_search_input)
+                        .hint_text("Поиск")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    for filter in FileTreeFilter::ALL {
+                        let label = if filter == FileTreeFilter::Modified {
+                            format!("{} {}", filter.label(), self.git_changed_files.len())
+                        } else {
+                            filter.label().to_string()
+                        };
+                        if ui
+                            .selectable_label(self.file_filter == filter, RichText::new(label).small())
+                            .clicked()
+                        {
+                            self.file_filter = filter;
+                        }
+                    }
+                });
                 ui.add_space(6.0);
 
                 let mut select_project_path: Option<PathBuf> = None;
                 let mut toggle_project_path: Option<PathBuf> = None;
+                let mut rename_project_path: Option<PathBuf> = None;
+                let mut toggle_pin_project_path: Option<PathBuf> = None;
+                let mut remove_project_path: Option<PathBuf> = None;
+                let mut open_project_folder_path: Option<PathBuf> = None;
                 let mut clicked_row: Option<(String, bool, bool, f64)> = None;
                 let mut toggle_dir_path: Option<String> = None;
                 let mut start_rename_path: Option<String> = None;
@@ -2707,13 +2937,21 @@ impl LeetcodeApp {
                 let mut move_request: Option<(String, String)> = None;
                 let mut rename_action: Option<RenameRowAction> = None;
                 let pointer_released = ui.input(|input| input.pointer.any_released());
-                let projects = self.config.projects.clone();
+                let projects = ordered_projects(&self.config.projects);
                 let visible_rows = self.visible_file_rows();
                 let tree_width = file_tree_content_width(&visible_rows)
-                    .max(projects.iter().map(|project| project_display_name(&project.path).chars().count() as f32 * 9.2 + 62.0).fold(190.0, f32::max));
+                    .max(projects.iter().map(|project| project_label(project).chars().count() as f32 * 9.2 + 88.0).fold(190.0, f32::max));
 
                 if projects.is_empty() {
-                    let row = project_nav_row(ui, "Новый проект", "new-project", true, false, false);
+                    let row = project_nav_row(
+                        ui,
+                        "Новый проект",
+                        "new-project",
+                        true,
+                        false,
+                        false,
+                        false,
+                    );
                     if row.row.clicked() {
                         self.selected_tree_path = None;
                     }
@@ -2736,13 +2974,50 @@ impl LeetcodeApp {
                                 let project_id = path_key(&project.path);
                                 let row = project_nav_row(
                                     ui,
-                                    &project_display_name(&project.path),
+                                    &project_label(&project),
                                     &project_id,
                                     is_active,
                                     project.expanded,
                                     self.dragged_tree_path.is_some() && is_active,
+                                    project.pinned,
                                 )
                                 .on_hover_text(project.path.to_string_lossy().to_string());
+
+                                let mut project_context_action: Option<&'static str> = None;
+                                row.row.clone().context_menu(|ui| {
+                                    ui.set_min_width(180.0);
+                                    if ui.button("Переименовать").clicked() {
+                                        project_context_action = Some("rename");
+                                        ui.close_menu();
+                                    }
+                                    let pin_label = if project.pinned {
+                                        "Открепить"
+                                    } else {
+                                        "Закрепить"
+                                    };
+                                    if ui.button(pin_label).clicked() {
+                                        project_context_action = Some("pin");
+                                        ui.close_menu();
+                                    }
+                                    if ui.button("Открыть папку").clicked() {
+                                        project_context_action = Some("open_folder");
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
+                                    if ui.button("Убрать из списка").clicked() {
+                                        project_context_action = Some("remove");
+                                        ui.close_menu();
+                                    }
+                                });
+                                match project_context_action {
+                                    Some("rename") => rename_project_path = Some(project.path.clone()),
+                                    Some("pin") => toggle_pin_project_path = Some(project.path.clone()),
+                                    Some("open_folder") => {
+                                        open_project_folder_path = Some(project.path.clone())
+                                    }
+                                    Some("remove") => remove_project_path = Some(project.path.clone()),
+                                    _ => {}
+                                }
 
                                 if row.disclosure.clicked() {
                                     toggle_project_path = Some(project.path.clone());
@@ -2773,6 +3048,12 @@ impl LeetcodeApp {
                                             ui,
                                             "Файлы не найдены",
                                             "Папка выбрана, но дерево проекта пустое или элементы скрыты фильтром.",
+                                        );
+                                    } else if visible_rows.is_empty() {
+                                        empty_state(
+                                            ui,
+                                            "Ничего не найдено",
+                                            "Измените поиск или фильтр дерева проекта.",
                                         );
                                     }
 
@@ -2907,6 +3188,18 @@ impl LeetcodeApp {
                 if let Some(path) = toggle_project_path {
                     self.toggle_project_expanded(&path);
                 }
+                if let Some(path) = rename_project_path {
+                    self.start_project_rename(&path);
+                }
+                if let Some(path) = toggle_pin_project_path {
+                    self.toggle_project_pinned(&path);
+                }
+                if let Some(path) = open_project_folder_path {
+                    self.open_project_folder(&path);
+                }
+                if let Some(path) = remove_project_path {
+                    self.remove_project_from_list(&path);
+                }
                 if let Some(path) = toggle_dir_path {
                     self.toggle_active_dir_expanded(&path);
                 }
@@ -2965,11 +3258,66 @@ impl LeetcodeApp {
                     });
                 } else {
                     ui.label(RichText::new("Проект").weak().small());
-                    ui.label(
-                        RichText::new("Раскройте проект кнопкой слева от названия. Каталоги запомнят своё состояние.")
-                            .weak()
-                            .small(),
-                    );
+                    if let Some(project) = self.active_project_state().cloned() {
+                        let path = project.path.clone();
+                        ui.label(RichText::new(project_label(&project)).strong());
+                        ui.label(
+                            RichText::new(path.to_string_lossy().to_string())
+                                .weak()
+                                .small()
+                                .text_style(egui::TextStyle::Monospace),
+                        );
+
+                        if self
+                            .project_rename_target
+                            .as_deref()
+                            .is_some_and(|target| project_paths_match(target, &path))
+                        {
+                            let response = ui.add(
+                                TextEdit::singleline(&mut self.project_rename_input)
+                                    .hint_text("Имя проекта в панели")
+                                    .desired_width(f32::INFINITY),
+                            );
+                            let commit = response.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                            let cancel = response.has_focus()
+                                && ui.input(|input| input.key_pressed(egui::Key::Escape));
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Сохранить").clicked() || commit {
+                                    self.commit_project_rename();
+                                }
+                                if ui.button("Отмена").clicked() || cancel {
+                                    self.cancel_project_rename();
+                                }
+                            });
+                        } else {
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.button("Переименовать").clicked() {
+                                    self.start_project_rename(&path);
+                                }
+                                let pin_label = if project.pinned {
+                                    "Открепить"
+                                } else {
+                                    "Закрепить"
+                                };
+                                if ui.button(pin_label).clicked() {
+                                    self.toggle_project_pinned(&path);
+                                }
+                                if ui.button("Открыть папку").clicked() {
+                                    self.open_project_folder(&path);
+                                }
+                                if ui.button("Убрать из списка").clicked() {
+                                    self.remove_project_from_list(&path);
+                                }
+                            });
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new("Раскройте проект кнопкой слева от названия. Каталоги запомнят своё состояние.")
+                                .weak()
+                                .small(),
+                        );
+                    }
                 }
 
                 if let Some(source) = &self.dragged_tree_path {
@@ -3594,9 +3942,9 @@ impl LeetcodeApp {
             });
             ui.add_space(4.0);
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
-                    [(ui.available_width() - 58.0).max(120.0), 22.0],
+                    [(ui.available_width() - 64.0).max(96.0), 22.0],
                     TextEdit::singleline(&mut self.memory_goal_input).hint_text("цель проекта"),
                 );
                 if ui.button("Цель").clicked() {
@@ -3616,9 +3964,9 @@ impl LeetcodeApp {
                 }
             });
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
-                    [(ui.available_width() - 58.0).max(120.0), 22.0],
+                    [(ui.available_width() - 76.0).max(96.0), 22.0],
                     TextEdit::singleline(&mut self.memory_task_input).hint_text("следующая задача"),
                 );
                 if ui.button("Задача").clicked() {
@@ -3639,9 +3987,9 @@ impl LeetcodeApp {
                 }
             });
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
-                    [(ui.available_width() - 78.0).max(120.0), 22.0],
+                    [(ui.available_width() - 92.0).max(96.0), 22.0],
                     TextEdit::singleline(&mut self.memory_decision_input).hint_text("решение"),
                 );
                 if ui.button("Решение").clicked() {
@@ -3685,6 +4033,89 @@ impl LeetcodeApp {
                     "У агента пока нет сохранённой активной работы.",
                 );
             }
+            ui.separator();
+            ui.label(RichText::new("Источники контекста").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized(
+                    [(ui.available_width() - 86.0).max(96.0), 24.0],
+                    TextEdit::singleline(&mut self.memory_source_title_input)
+                        .hint_text("название источника"),
+                );
+                if ui.button("Импорт").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        let title = self.memory_source_title_input.trim().to_string();
+                        let result = import_memory_source_file(
+                            &workspace,
+                            &path,
+                            if title.is_empty() { None } else { Some(title) },
+                            None,
+                        );
+                        self.memory_status = result.output;
+                        self.memory_source_title_input.clear();
+                    }
+                }
+            });
+            ui.add(
+                TextEdit::multiline(&mut self.memory_source_note_input)
+                    .desired_rows(3)
+                    .hint_text("заметка, выдержка из документа, ссылка или правило проекта"),
+            );
+            if ui.button("Сохранить заметку в память").clicked() {
+                let note = self.memory_source_note_input.trim().to_string();
+                if !note.is_empty() {
+                    let title = self.memory_source_title_input.trim().to_string();
+                    let result = record_memory_source(
+                        &workspace,
+                        RecordMemorySourceArgs {
+                            id: None,
+                            title: if title.is_empty() {
+                                "Заметка проекта".to_string()
+                            } else {
+                                title
+                            },
+                            kind: Some("note".to_string()),
+                            summary: None,
+                            content: Some(note),
+                            path: None,
+                        },
+                    );
+                    self.memory_status = result.output;
+                    self.memory_source_title_input.clear();
+                    self.memory_source_note_input.clear();
+                }
+            }
+
+            let mut remove_source_id = None;
+            for source in memory.sources.iter().rev().take(8) {
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, &source.kind);
+                    ui.label(RichText::new(&source.title).strong());
+                    if ui.small_button("Удалить").clicked() {
+                        remove_source_id = Some(source.id.clone());
+                    }
+                });
+                if !source.summary.trim().is_empty() {
+                    ui.label(RichText::new(compact_inline(&source.summary, 180)).weak());
+                } else if !source.content.trim().is_empty() {
+                    ui.label(RichText::new(compact_inline(&source.content, 180)).weak());
+                }
+                if let Some(path) = source.stored_path.as_ref().or(source.original_path.as_ref()) {
+                    ui.label(RichText::new(compact_inline(path, 180)).weak());
+                }
+            }
+            if memory.sources.is_empty() {
+                empty_state(
+                    ui,
+                    "Источников пока нет",
+                    "Импортируйте файл или сохраните заметку, чтобы агент всегда видел важный контекст проекта.",
+                );
+            }
+            if let Some(id) = remove_source_id {
+                let result = remove_memory_source(&workspace, RemoveMemorySourceArgs { id });
+                self.memory_status = result.output;
+            }
+
             if !self.memory_status.is_empty() {
                 ui.label(RichText::new(&self.memory_status).weak());
             }
@@ -3858,14 +4289,14 @@ impl LeetcodeApp {
                 "Библиотека ассетов",
                 "Сгенерированные изображения, аудио, видео и переиспользуемые ассеты для игр/приложений.",
             );
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 metric_chip(ui, "ассеты", library.entries.len());
                 metric_chip(ui, "избранное", favorites);
-                ui.add_sized(
-                    [ui.available_width().max(120.0), 22.0],
-                    TextEdit::singleline(&mut self.asset_library_filter).hint_text("фильтр или тег"),
-                );
             });
+            ui.add_sized(
+                [ui.available_width().max(120.0), 22.0],
+                TextEdit::singleline(&mut self.asset_library_filter).hint_text("фильтр или тег"),
+            );
 
             let filter = self.asset_library_filter.trim().to_ascii_lowercase();
             let matching_entries = library
@@ -4061,8 +4492,8 @@ impl LeetcodeApp {
 
         egui::SidePanel::right("tools")
             .resizable(true)
-            .default_width(380.0)
-            .width_range(300.0..=640.0)
+            .default_width(400.0)
+            .width_range(320.0..=700.0)
             .frame(side_panel_frame())
             .show(ctx, |ui| {
                 ui.add_space(6.0);
@@ -4263,7 +4694,7 @@ impl LeetcodeApp {
     }
 
     fn show_project_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading("Проект");
             if self.project_is_running {
                 ui.spinner();
@@ -4283,7 +4714,11 @@ impl LeetcodeApp {
         });
 
         if !self.project_status.is_empty() {
-            ui.label(RichText::new(&self.project_status).weak());
+            let shown = compact_inline(&self.project_status, 120);
+            let response = ui.label(RichText::new(&shown).weak());
+            if shown != self.project_status {
+                response.on_hover_text(&self.project_status);
+            }
         }
 
         if self.workspace.is_none() {
@@ -4653,7 +5088,7 @@ impl LeetcodeApp {
 
     fn show_asset_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.separator();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading("Ассеты");
             if self.asset_is_running {
                 ui.spinner();
@@ -4676,7 +5111,7 @@ impl LeetcodeApp {
 
         let old_asset_provider = self.asset_provider_input.clone();
         let old_asset_kind = self.asset_kind_input.clone();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Тип");
             egui::ComboBox::from_id_salt("asset_kind_select")
                 .selected_text(match self.asset_kind_input.as_str() {
@@ -4702,7 +5137,7 @@ impl LeetcodeApp {
             self.switch_asset_kind_from_ui();
         }
         if matches!(self.asset_kind_input.as_str(), "image" | "spritesheet") {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Провайдер изображений");
                 egui::ComboBox::from_id_salt("asset_provider_select")
                     .selected_text(image_provider_name(&self.asset_provider_input))
@@ -4739,15 +5174,15 @@ impl LeetcodeApp {
             ui.label(RichText::new(format!("{provider_label} | OPENAI_API_KEY")).weak());
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Модель");
             ui.add_sized(
-                [ui.available_width().max(160.0), 22.0],
+                [ui.available_width().max(120.0), 22.0],
                 TextEdit::singleline(&mut self.asset_model_input),
             );
         });
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(
                 if matches!(self.asset_kind_input.as_str(), "image" | "spritesheet") {
                     "Ключ изображений"
@@ -4755,7 +5190,7 @@ impl LeetcodeApp {
                     "Ключ медиа"
                 },
             );
-            let key_width = (ui.available_width() - 76.0).max(120.0);
+            let key_width = (ui.available_width() - 82.0).max(96.0);
             ui.add_sized(
                 [key_width, 22.0],
                 TextEdit::singleline(&mut self.asset_api_key_input).password(true),
@@ -4772,7 +5207,7 @@ impl LeetcodeApp {
                 .desired_rows(3),
         );
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("asset_aspect_ratio")
                 .selected_text(&self.asset_aspect_ratio)
                 .width(72.0)
@@ -5629,8 +6064,19 @@ fn flat_collapsing_section(
 
 fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView, views: &[RightPanelView]) {
     let available = ui.available_width();
-    let button_width = ((available - 16.0) / views.len().max(1) as f32).max(58.0);
-    ui.horizontal(|ui| {
+    let columns = if views.len() <= 3 || available >= 460.0 {
+        views.len().max(1)
+    } else if available >= 260.0 {
+        2
+    } else {
+        1
+    };
+    let gap = 6.0;
+    let button_width =
+        ((available - gap * (columns.saturating_sub(1) as f32)) / columns.max(1) as f32).max(92.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.spacing_mut().item_spacing.y = 6.0;
         for view in views.iter().copied() {
             let is_selected = *selected == view;
             let response = ui.add_sized(
@@ -5654,11 +6100,14 @@ fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView, views: &[Rig
 }
 
 fn status_line(ui: &mut egui::Ui, label: &str, value: &str) {
-    ui.horizontal(|ui| {
-        ui.set_min_width(ui.available_width());
+    ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(label).weak().small());
         ui.add_space(6.0);
-        ui.label(RichText::new(value).small());
+        let shown = compact_inline(value, 72);
+        let response = ui.label(RichText::new(&shown).small());
+        if shown != value {
+            response.on_hover_text(value);
+        }
     });
 }
 
@@ -5913,6 +6362,7 @@ fn project_nav_row(
     selected: bool,
     expanded: bool,
     drop_target: bool,
+    pinned: bool,
 ) -> ProjectNavRowResponse {
     let width = ui.available_width().max(160.0);
     let height = 31.0;
@@ -5983,6 +6433,11 @@ fn project_nav_row(
         text_color(),
     );
 
+    if pinned {
+        let pin_center = egui::pos2(rect.right() - 12.0, rect.center().y);
+        ui.painter().circle_filled(pin_center, 3.0, subtle_accent());
+    }
+
     ProjectNavRowResponse { row, disclosure }
 }
 
@@ -6014,7 +6469,12 @@ fn file_tree_nav_row(
 
     let indent = 8.0 + depth as f32 * 17.0;
     let icon_x = rect.left() + indent;
-    let text_x = icon_x + 18.0;
+    let kind_icon_center = if is_dir {
+        egui::pos2(icon_x + 22.0, rect.center().y)
+    } else {
+        egui::pos2(icon_x + 8.0, rect.center().y)
+    };
+    let text_x = if is_dir { icon_x + 38.0 } else { icon_x + 24.0 };
     let text_rect = egui::Rect::from_min_max(
         egui::pos2(text_x, rect.top()),
         egui::pos2(rect.right() - 6.0, rect.bottom()),
@@ -6050,6 +6510,8 @@ fn file_tree_nav_row(
     } else {
         None
     };
+
+    draw_tree_item_icon(ui, id_salt, is_dir, kind_icon_center, selected);
 
     ui.painter().with_clip_rect(text_rect).text(
         egui::pos2(text_rect.left(), rect.center().y),
@@ -6103,6 +6565,87 @@ fn draw_project_icon(ui: &egui::Ui, center: egui::Pos2, color: egui::Color32) {
         ],
         egui::Stroke::new(1.0, color),
     );
+}
+
+fn draw_tree_item_icon(
+    ui: &egui::Ui,
+    path: &str,
+    is_dir: bool,
+    center: egui::Pos2,
+    selected: bool,
+) {
+    let color = file_kind_color(path, is_dir, selected);
+    if is_dir {
+        let body = egui::Rect::from_center_size(
+            egui::pos2(center.x + 0.5, center.y + 1.5),
+            egui::vec2(14.0, 9.0),
+        );
+        let tab = egui::Rect::from_min_size(
+            egui::pos2(body.left() + 1.0, body.top() - 3.0),
+            egui::vec2(6.0, 4.0),
+        );
+        ui.painter().rect_stroke(
+            body,
+            egui::Rounding::same(2.0),
+            egui::Stroke::new(1.2, color),
+        );
+        ui.painter().line_segment(
+            [tab.left_top(), egui::pos2(tab.right(), tab.top())],
+            egui::Stroke::new(1.2, color),
+        );
+        ui.painter().line_segment(
+            [tab.left_top(), tab.left_bottom()],
+            egui::Stroke::new(1.2, color),
+        );
+        ui.painter().line_segment(
+            [tab.left_bottom(), egui::pos2(tab.right(), body.top())],
+            egui::Stroke::new(1.2, color),
+        );
+        return;
+    }
+
+    let rect = egui::Rect::from_center_size(center, egui::vec2(11.0, 14.0));
+    ui.painter().rect_stroke(
+        rect,
+        egui::Rounding::same(2.0),
+        egui::Stroke::new(1.1, color),
+    );
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.right() - 4.0, rect.top()),
+            egui::pos2(rect.right(), rect.top() + 4.0),
+        ],
+        egui::Stroke::new(1.1, color),
+    );
+    ui.painter()
+        .circle_filled(egui::pos2(rect.center().x, rect.bottom() - 3.0), 1.3, color);
+}
+
+fn file_kind_color(path: &str, is_dir: bool, selected: bool) -> egui::Color32 {
+    if selected {
+        return accent_color();
+    }
+    if is_dir {
+        return egui::Color32::from_rgb(144, 170, 190);
+    }
+    match file_extension(path).as_deref() {
+        Some(
+            "rs" | "toml" | "lock" | "ts" | "tsx" | "js" | "jsx" | "py" | "go" | "cs" | "cpp" | "c"
+            | "h" | "hpp" | "gd" | "shader" | "wgsl" | "glsl",
+        ) => egui::Color32::from_rgb(102, 184, 224),
+        Some("json" | "yml" | "yaml" | "xml" | "ini" | "env") => {
+            egui::Color32::from_rgb(210, 172, 96)
+        }
+        Some("md" | "txt" | "rst") => egui::Color32::from_rgb(174, 150, 220),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "svg" | "ico") => {
+            egui::Color32::from_rgb(93, 197, 161)
+        }
+        Some("wav" | "mp3" | "ogg" | "flac" | "mp4" | "mov" | "webm") => {
+            egui::Color32::from_rgb(218, 126, 153)
+        }
+        Some("fbx" | "obj" | "gltf" | "glb" | "blend") => egui::Color32::from_rgb(211, 144, 92),
+        _ => muted_color(),
+    }
 }
 
 fn project_root_row(
@@ -6271,7 +6814,7 @@ fn file_tree_content_width(rows: &[String]) -> f32 {
             let depth = file_tree_depth(row) as f32;
             let name = file_tree_name(row);
             let text_width = name.chars().count() as f32 * 8.8;
-            34.0 + depth * 17.0 + text_width
+            58.0 + depth * 17.0 + text_width
         })
         .fold(180.0, f32::max)
         .min(2400.0)
@@ -6297,6 +6840,28 @@ fn project_display_name(path: &Path) -> String {
         .unwrap_or_else(|| path.to_string_lossy().to_string())
 }
 
+fn project_label(project: &ProjectUiState) -> String {
+    if project.display_name.trim().is_empty() {
+        project_display_name(&project.path)
+    } else {
+        project.display_name.trim().to_string()
+    }
+}
+
+fn ordered_projects(projects: &[ProjectUiState]) -> Vec<ProjectUiState> {
+    let mut indexed = projects.iter().cloned().enumerate().collect::<Vec<_>>();
+    indexed.sort_by(|(left_index, left), (right_index, right)| {
+        right
+            .pinned
+            .cmp(&left.pinned)
+            .then(left_index.cmp(right_index))
+    });
+    indexed
+        .into_iter()
+        .map(|(_, project)| project)
+        .collect::<Vec<_>>()
+}
+
 fn project_count_label(count: usize) -> String {
     let suffix = match count % 100 {
         11..=14 => "проектов",
@@ -6307,6 +6872,138 @@ fn project_count_label(count: usize) -> String {
         },
     };
     format!("{count} {suffix}")
+}
+
+fn git_changed_files_for_workspace(workspace: &Workspace) -> Vec<String> {
+    let Ok(output) = Command::new("git")
+        .arg("status")
+        .arg("--porcelain")
+        .current_dir(workspace.root())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(parse_git_status_path)
+        .collect()
+}
+
+fn parse_git_status_path(line: &str) -> Option<String> {
+    if line.len() < 4 {
+        return None;
+    }
+    let path = if let Some((_, target)) = line[3..].split_once(" -> ") {
+        target
+    } else {
+        &line[3..]
+    };
+    let path = path.trim().trim_matches('"').replace('\\', "/");
+    if path.is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn tree_row_matches_changed_files(row: &str, changed_files: &[String]) -> bool {
+    if row == "..." {
+        return true;
+    }
+    if row.ends_with('/') {
+        let dir = row.trim_end_matches('/');
+        changed_files
+            .iter()
+            .any(|changed| path_is_same_or_child(changed, dir))
+    } else {
+        changed_files.iter().any(|changed| changed == row)
+    }
+}
+
+fn tree_row_matches_any(row: &str, rows: &[String], predicate: fn(&str) -> bool) -> bool {
+    if row == "..." {
+        return true;
+    }
+    if row.ends_with('/') {
+        rows.iter()
+            .any(|candidate| candidate.starts_with(row) && predicate(candidate))
+    } else {
+        predicate(row)
+    }
+}
+
+fn is_code_file_path(path: &str) -> bool {
+    matches!(
+        file_extension(path).as_deref(),
+        Some(
+            "rs" | "toml"
+                | "lock"
+                | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "json"
+                | "py"
+                | "go"
+                | "java"
+                | "kt"
+                | "swift"
+                | "cs"
+                | "cpp"
+                | "c"
+                | "h"
+                | "hpp"
+                | "gd"
+                | "shader"
+                | "wgsl"
+                | "glsl"
+                | "html"
+                | "css"
+                | "scss"
+                | "md"
+                | "yml"
+                | "yaml"
+        )
+    )
+}
+
+fn is_asset_file_path(path: &str) -> bool {
+    path.starts_with("assets/")
+        || matches!(
+            file_extension(path).as_deref(),
+            Some(
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "webp"
+                    | "gif"
+                    | "svg"
+                    | "ico"
+                    | "wav"
+                    | "mp3"
+                    | "ogg"
+                    | "flac"
+                    | "mp4"
+                    | "mov"
+                    | "webm"
+                    | "fbx"
+                    | "obj"
+                    | "gltf"
+                    | "glb"
+                    | "blend"
+            )
+        )
+}
+
+fn file_extension(path: &str) -> Option<String> {
+    Path::new(path.trim_end_matches('/'))
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
 }
 
 fn project_paths_match(left: &Path, right: &Path) -> bool {
@@ -6389,7 +7086,7 @@ fn remap_tree_path_after_base_move(path: &str, old_base: &str, new_base: &str) -
 
 fn panel_header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.label(RichText::new(title).strong());
-    ui.label(RichText::new(subtitle).weak().small());
+    ui.add(egui::Label::new(RichText::new(subtitle).weak().small()).wrap());
 }
 
 fn metric_chip(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
@@ -6397,19 +7094,25 @@ fn metric_chip(ui: &mut egui::Ui, label: &str, value: impl std::fmt::Display) {
 }
 
 fn chip(ui: &mut egui::Ui, text: impl Into<String>) {
-    egui::Frame::none()
+    let text = text.into();
+    let shown = compact_inline(&text, 44);
+    let response = egui::Frame::none()
         .fill(surface_alt_bg())
         .stroke(egui::Stroke::new(1.0, border_color()))
         .rounding(egui::Rounding::same(6.0))
         .inner_margin(egui::Margin::symmetric(7.0, 3.0))
         .show(ui, |ui| {
             ui.label(
-                RichText::new(text.into())
+                RichText::new(&shown)
                     .small()
                     .color(egui::Color32::from_rgb(202, 211, 222))
                     .text_style(egui::TextStyle::Monospace),
-            );
-        });
+            )
+        })
+        .inner;
+    if shown != text {
+        response.on_hover_text(text);
+    }
 }
 
 fn empty_state(ui: &mut egui::Ui, title: &str, detail: &str) {
@@ -6426,10 +7129,15 @@ fn empty_state(ui: &mut egui::Ui, title: &str, detail: &str) {
 
 fn provider_row(ui: &mut egui::Ui, name: &str, key_present: bool, model: &str, status: String) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(name).strong());
+        ui.label(RichText::new(compact_inline(name, 38)).strong())
+            .on_hover_text(name);
         chip(ui, format!("ключ: {}", yes_no(key_present)));
         chip(ui, model);
-        ui.label(RichText::new(status).weak());
+        let shown = compact_inline(&status, 70);
+        let response = ui.label(RichText::new(&shown).weak());
+        if shown != status {
+            response.on_hover_text(status);
+        }
     });
 }
 

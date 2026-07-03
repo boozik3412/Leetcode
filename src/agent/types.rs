@@ -134,6 +134,8 @@ pub enum ToolAction {
     UpdateTaskStatus,
     RecordDecision,
     RecordProjectGoal,
+    RecordMemorySource,
+    RemoveMemorySource,
     AssetLibrarySnapshot,
     TagAsset,
     FavoriteAsset,
@@ -398,6 +400,10 @@ mod tests {
                 r#"{"action":"upsert_task","args":{"title":"Ship MVP"}}"#,
                 "memory",
             ),
+            (
+                r#"{"action":"record_memory_source","args":{"title":"Brief","content":"Use cozy art direction."}}"#,
+                "memory",
+            ),
             (r#"{"action":"asset_library_snapshot","args":{}}"#, "assets"),
             (r#"{"action":"run_replay_eval","args":{}}"#, "evals"),
             (
@@ -417,7 +423,9 @@ mod tests {
                 )),
                 "memory" => assert!(matches!(
                     request.action,
-                    ToolAction::MemorySnapshot | ToolAction::UpsertTask
+                    ToolAction::MemorySnapshot
+                        | ToolAction::UpsertTask
+                        | ToolAction::RecordMemorySource
                 )),
                 "assets" => assert!(matches!(request.action, ToolAction::AssetLibrarySnapshot)),
                 "evals" => assert!(matches!(request.action, ToolAction::RunReplayEval)),

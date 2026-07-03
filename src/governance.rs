@@ -367,6 +367,18 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "Записать цель проекта.",
         ),
         spec(
+            "record_memory_source",
+            "memory",
+            "medium",
+            "Сохранить источник или заметку в память проекта.",
+        ),
+        spec(
+            "remove_memory_source",
+            "memory",
+            "medium",
+            "Удалить источник из памяти проекта.",
+        ),
+        spec(
             "provider_health_snapshot",
             "providers",
             "low",
@@ -563,6 +575,8 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::UpdateTaskStatus => "update_task_status",
         ToolAction::RecordDecision => "record_decision",
         ToolAction::RecordProjectGoal => "record_project_goal",
+        ToolAction::RecordMemorySource => "record_memory_source",
+        ToolAction::RemoveMemorySource => "remove_memory_source",
         ToolAction::AssetLibrarySnapshot => "asset_library_snapshot",
         ToolAction::TagAsset => "tag_asset",
         ToolAction::FavoriteAsset => "favorite_asset",
