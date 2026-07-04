@@ -4786,10 +4786,10 @@ impl LeetcodeApp {
 
     fn show_top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top_bar")
-            .exact_height(66.0)
+            .exact_height(56.0)
             .frame(top_bar_frame())
             .show(ctx, |ui| {
-                ui.add_space(6.0);
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     ui.label(
@@ -4811,76 +4811,108 @@ impl LeetcodeApp {
                     }
                     ui.separator();
 
-                    ui.label(RichText::new("Провайдер").weak().small());
-                    let old_provider = self.provider_input.clone();
-                    egui::ComboBox::from_id_salt("provider_select")
-                        .selected_text(provider_name(&self.provider_input))
-                        .width(110.0)
-                        .show_ui(ui, |ui| {
-                            for provider in provider_specs()
-                                .iter()
-                                .filter(|provider| provider.implemented)
-                            {
-                                ui.selectable_value(
-                                    &mut self.provider_input,
-                                    provider.id.to_string(),
-                                    provider.name,
-                                );
-                            }
-                        });
-                    if self.provider_input != old_provider {
-                        self.switch_provider_from_ui(self.provider_input.clone());
-                    }
+                    ui.menu_button("AI", |ui| {
+                        ui.set_min_width(480.0);
+                        ui.label(RichText::new("Модель и провайдер").strong());
+                        ui.add_space(6.0);
 
-                    ui.label(RichText::new("Модель").weak().small());
-                    ui.add_sized([168.0, 30.0], TextEdit::singleline(&mut self.model_input));
-                    let model_options =
-                        models_for_provider(&self.provider_input).collect::<Vec<_>>();
-                    if !model_options.is_empty() {
-                        egui::ComboBox::from_id_salt("model_select")
-                            .selected_text("модели")
-                            .width(76.0)
-                            .show_ui(ui, |ui| {
-                                for model in model_options {
-                                    ui.selectable_value(
-                                        &mut self.model_input,
-                                        model.id.to_string(),
-                                        model.name,
+                        let old_provider = self.provider_input.clone();
+                        egui::Grid::new("daily_ai_settings_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label(RichText::new("Провайдер").weak().small());
+                                egui::ComboBox::from_id_salt("provider_select")
+                                    .selected_text(provider_name(&self.provider_input))
+                                    .width(180.0)
+                                    .show_ui(ui, |ui| {
+                                        for provider in provider_specs()
+                                            .iter()
+                                            .filter(|provider| provider.implemented)
+                                        {
+                                            ui.selectable_value(
+                                                &mut self.provider_input,
+                                                provider.id.to_string(),
+                                                provider.name,
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label(RichText::new("Модель").weak().small());
+                                ui.horizontal(|ui| {
+                                    ui.add_sized(
+                                        [210.0, 30.0],
+                                        TextEdit::singleline(&mut self.model_input),
                                     );
-                                }
-                            });
-                    }
+                                    let model_options = models_for_provider(&self.provider_input)
+                                        .collect::<Vec<_>>();
+                                    if !model_options.is_empty() {
+                                        egui::ComboBox::from_id_salt("model_select")
+                                            .selected_text("модели")
+                                            .width(92.0)
+                                            .show_ui(ui, |ui| {
+                                                for model in model_options {
+                                                    ui.selectable_value(
+                                                        &mut self.model_input,
+                                                        model.id.to_string(),
+                                                        model.name,
+                                                    );
+                                                }
+                                            });
+                                    }
+                                });
+                                ui.end_row();
 
-                    ui.label(RichText::new("Маршрут").weak().small());
-                    egui::ComboBox::from_id_salt("task_route_select")
-                        .selected_text(
-                            route_labels()
-                                .iter()
-                                .find(|(id, _)| *id == self.config.task_route)
-                                .map(|(_, label)| *label)
-                                .unwrap_or("Авто"),
-                        )
-                        .width(86.0)
-                        .show_ui(ui, |ui| {
-                            for (id, label) in route_labels() {
-                                ui.selectable_value(
-                                    &mut self.config.task_route,
-                                    (*id).to_string(),
-                                    *label,
+                                ui.label(RichText::new("Маршрут").weak().small());
+                                egui::ComboBox::from_id_salt("task_route_select")
+                                    .selected_text(
+                                        route_labels()
+                                            .iter()
+                                            .find(|(id, _)| *id == self.config.task_route)
+                                            .map(|(_, label)| *label)
+                                            .unwrap_or("Авто"),
+                                    )
+                                    .width(180.0)
+                                    .show_ui(ui, |ui| {
+                                        for (id, label) in route_labels() {
+                                            ui.selectable_value(
+                                                &mut self.config.task_route,
+                                                (*id).to_string(),
+                                                *label,
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label(RichText::new("API-ключ").weak().small());
+                                ui.add_sized(
+                                    [310.0, 30.0],
+                                    TextEdit::singleline(&mut self.api_key_input).password(true),
                                 );
-                            }
-                        });
+                                ui.end_row();
+                            });
 
-                    ui.separator();
-                    ui.label(RichText::new("API-ключ").weak().small());
-                    ui.add_sized(
-                        [260.0, 30.0],
-                        TextEdit::singleline(&mut self.api_key_input).password(true),
+                        if self.provider_input != old_provider {
+                            self.switch_provider_from_ui(self.provider_input.clone());
+                        }
+
+                        ui.add_space(6.0);
+                        if ui.button("Сохранить настройки AI").clicked() {
+                            self.save_settings_from_ui();
+                            ui.close_menu();
+                        }
+                    })
+                    .response
+                    .on_hover_text("Провайдер, модель, маршрут задач и API-ключ.");
+                    chip(
+                        ui,
+                        format!(
+                            "{} · {}",
+                            provider_name(&self.provider_input),
+                            compact_inline(&self.model_input, 18)
+                        ),
                     );
-
-                    if ui.button("Сохранить").clicked() {
-                        self.save_settings_from_ui();
-                    }
 
                     ui.separator();
                     if ui
@@ -4901,17 +4933,17 @@ impl LeetcodeApp {
                     }
 
                     ui.separator();
-                    if ui
-                        .add_enabled(!self.is_running, egui::Button::new("Сброс"))
-                        .clicked()
-                    {
-                        self.reset_conversation();
-                    }
                     if self.is_running {
                         if ui.button("Стоп").clicked() {
                             self.stop_run();
                         }
                         ui.spinner();
+                    } else if ui
+                        .add_enabled(!self.is_running, egui::Button::new("Сброс"))
+                        .on_hover_text("Очистить текущий диалог.")
+                        .clicked()
+                    {
+                        self.reset_conversation();
                     }
                 });
             });
@@ -7848,8 +7880,8 @@ impl LeetcodeApp {
 
         egui::SidePanel::right("tools")
             .resizable(true)
-            .default_width(400.0)
-            .width_range(320.0..=700.0)
+            .default_width(370.0)
+            .width_range(300.0..=680.0)
             .frame(side_panel_frame())
             .show(ctx, |ui| {
                 ui.add_space(6.0);
@@ -9367,6 +9399,19 @@ impl LeetcodeApp {
         self.show_archived_conversations(ui);
         ui.add_space(10.0);
 
+        let has_dialog_content = self.chat.iter().any(|line| {
+            matches!(line.role, ChatRole::User | ChatRole::Assistant)
+                && !line.content.trim().is_empty()
+        });
+        if !has_dialog_content
+            && self.pending_run_gate.is_none()
+            && self.pending_approval.is_none()
+            && !self.is_running
+        {
+            self.show_agent_daily_home(ui);
+            return;
+        }
+
         egui::ScrollArea::vertical()
             .id_salt("chat_transcript_scroll")
             .auto_shrink([false, false])
@@ -9409,6 +9454,60 @@ impl LeetcodeApp {
                             self.show_pending_approval_message(ui);
                         }
                     },
+                );
+            });
+    }
+
+    fn show_agent_daily_home(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(18.0);
+        let width = safe_available_width(ui, 1.0);
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(15, 18, 23))
+            .stroke(egui::Stroke::new(1.0, border_color()))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(18.0, 16.0))
+            .show(ui, |ui| {
+                ui.set_min_width(width);
+                ui.set_max_width(width);
+                ui.label(
+                    RichText::new("Готов к работе")
+                        .strong()
+                        .size(22.0)
+                        .color(text_color()),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "Выберите проект слева, проверьте AI-настройки сверху и отправьте задачу агенту.",
+                        )
+                        .weak(),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(12.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Проверить проект").clicked() {
+                        self.input =
+                            "Проверь текущий проект: определи тип, запусти безопасные проверки и дай краткий статус.".to_string();
+                    }
+                    if ui.button("Найти следующий шаг").clicked() {
+                        self.input =
+                            "Посмотри roadmap, backlog и состояние проекта. Предложи следующий самый полезный шаг.".to_string();
+                    }
+                    if ui.button("Починить ошибки").clicked() {
+                        self.input =
+                            "Найди последние ошибки сборки или тестов, объясни причину и предложи безопасный план исправления.".to_string();
+                    }
+                    if ui.button("Создать ассет").clicked() {
+                        self.input =
+                            "Помоги подготовить ассет для текущего проекта: уточни назначение и предложи prompt для генерации.".to_string();
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Кнопки только подставляют задачу в поле ввода — запуск остаётся за вами.")
+                        .weak()
+                        .small(),
                 );
             });
     }
@@ -10415,173 +10514,204 @@ impl LeetcodeApp {
                 }
             }
             ui.label(
-                RichText::new(permission_mode_description(&self.config.policy_profile))
-                    .weak()
-                    .small(),
-            );
+                RichText::new(compact_inline(
+                    permission_mode_description(&self.config.policy_profile),
+                    92,
+                ))
+                .weak()
+                .small(),
+            )
+            .on_hover_text(permission_mode_description(&self.config.policy_profile));
         });
     }
 
     fn show_input_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("input_bar")
-            .exact_height(188.0)
+            .exact_height(164.0)
             .frame(input_bar_frame())
             .show(ctx, |ui| {
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.add_space(8.0);
-                card_frame().show(ui, |ui| {
-                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    self.show_permission_mode_controls(ui);
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let attach_width = 44.0;
-                        let send_width = 118.0;
-                        let input_width =
-                            (safe_available_width(ui, 280.0) - attach_width - send_width - 20.0)
-                                .max(80.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(attach_width, 58.0),
-                            egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                            |ui| {
-                                ui.menu_button(RichText::new("+").strong().size(22.0), |ui| {
-                                    ui.set_min_width(220.0);
-                                    if ui.button("Добавить файл").clicked() {
-                                        self.choose_input_files(InputAttachmentKind::File);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Добавить изображение").clicked() {
-                                        self.choose_input_images();
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Добавить папку проекта").clicked() {
-                                        self.choose_input_folder_context();
-                                        ui.close_menu();
-                                    }
-                                    ui.separator();
-                                    if ui.button("Вставить скриншот из буфера").clicked() {
-                                        self.attach_clipboard_image(true);
-                                        ui.close_menu();
-                                    }
-                                    if ui.button("Сделать снимок экрана").clicked() {
-                                        self.capture_input_screenshot();
-                                        ui.close_menu();
-                                    }
-                                })
-                                .response
-                                .on_hover_text("Добавить файл, изображение или снимок в запрос");
-                            },
-                        );
-                        let response = ui.add_sized(
-                            [input_width, 58.0],
-                            TextEdit::multiline(&mut self.input)
-                                .id_salt("main_prompt_input")
-                                .horizontal_align(egui::Align::Min)
-                                .hint_text(
-                                    "Что сделать? Ctrl+Enter — отправить, Ctrl+V — вставить скриншот из буфера, Ctrl+Shift+S — снимок экрана",
-                                )
-                                .desired_width(input_width),
-                        );
-
-                        let send_clicked = ui
-                            .add_sized(
-                                [send_width, 58.0],
-                                egui::Button::new(
-                                    RichText::new(if self.is_running {
-                                        "Выполняется"
-                                    } else {
-                                        "Отправить"
-                                    })
-                                    .strong()
-                                    .color(
-                                        if self.is_running {
-                                            muted_color()
-                                        } else {
-                                            egui::Color32::from_rgb(5, 12, 16)
-                                        },
-                                    ),
-                                )
-                                .fill(if self.is_running {
-                                    panel_bg()
-                                } else {
-                                    accent_color()
-                                }),
-                            )
-                            .clicked()
-                            && !self.is_running;
-                        let input_has_focus = response.has_focus();
-                        let dropped_files = if response.hovered() || input_has_focus {
-                            ctx.input(|input| input.raw.dropped_files.clone())
-                        } else {
-                            Vec::new()
-                        };
-                        if !dropped_files.is_empty() {
-                            self.handle_input_dropped_files(dropped_files);
-                        }
-
-                        let paste_image_pressed =
-                            input_has_focus && self.input_paste_shortcut_pressed(ui);
-                        if paste_image_pressed {
-                            self.attach_clipboard_image(false);
-                        }
-
-                        let screenshot_pressed = input_has_focus
-                            && ui.input(|input| {
-                                input.key_pressed(egui::Key::S)
-                                    && input.modifiers.ctrl
-                                    && input.modifiers.shift
-                            });
-                        if screenshot_pressed {
-                            self.capture_input_screenshot();
-                        }
-
-                        let enter_pressed = input_has_focus
-                            && ui.input(|input| {
-                                input.key_pressed(egui::Key::Enter) && input.modifiers.ctrl
-                            });
-
-                        if (send_clicked || enter_pressed) && !self.is_running {
-                            self.send_current_input();
-                        }
-                    });
-
-                    if !self.input_attachments.is_empty() {
-                        ui.add_space(6.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new("Вложения:").weak().small());
-                            let mut remove_index = None;
-                            for (index, attachment) in self.input_attachments.iter().enumerate() {
-                                let label = format!(
-                                    "{} {} ({})",
-                                    input_attachment_kind_label(attachment.kind),
-                                    attachment.name,
-                                    format_bytes_short(attachment.bytes)
+                    ui.add_space(5.0);
+                    card_frame().show(ui, |ui| {
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            self.show_permission_mode_controls(ui);
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                let attach_width = 42.0;
+                                let send_width = 108.0;
+                                let input_height = 52.0;
+                                let input_width = (safe_available_width(ui, 260.0)
+                                    - attach_width
+                                    - send_width
+                                    - 18.0)
+                                    .max(80.0);
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(attach_width, input_height),
+                                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                                    |ui| {
+                                        ui.menu_button(
+                                            RichText::new("+").strong().size(21.0),
+                                            |ui| {
+                                                ui.set_min_width(220.0);
+                                                if ui.button("Добавить файл").clicked()
+                                                {
+                                                    self.choose_input_files(
+                                                        InputAttachmentKind::File,
+                                                    );
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button("Добавить изображение").clicked()
+                                                {
+                                                    self.choose_input_images();
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button("Добавить папку проекта").clicked()
+                                                {
+                                                    self.choose_input_folder_context();
+                                                    ui.close_menu();
+                                                }
+                                                ui.separator();
+                                                if ui
+                                                    .button("Вставить скриншот из буфера")
+                                                    .clicked()
+                                                {
+                                                    self.attach_clipboard_image(true);
+                                                    ui.close_menu();
+                                                }
+                                                if ui.button("Сделать снимок экрана").clicked()
+                                                {
+                                                    self.capture_input_screenshot();
+                                                    ui.close_menu();
+                                                }
+                                            },
+                                        )
+                                        .response
+                                        .on_hover_text(
+                                            "Добавить файл, изображение или снимок в запрос",
+                                        );
+                                    },
                                 );
-                                if ui
-                                    .small_button(label)
-                                    .on_hover_text(&attachment.path)
+                                let response = ui.add_sized(
+                                    [input_width, input_height],
+                                    TextEdit::multiline(&mut self.input)
+                                        .id_salt("main_prompt_input")
+                                        .horizontal_align(egui::Align::Min)
+                                        .hint_text(
+                                            "Что сделать? Ctrl+Enter — отправить; + — вложения",
+                                        )
+                                        .desired_width(input_width),
+                                );
+
+                                let send_clicked = ui
+                                    .add_sized(
+                                        [send_width, input_height],
+                                        egui::Button::new(
+                                            RichText::new(if self.is_running {
+                                                "Выполняется"
+                                            } else {
+                                                "Отправить"
+                                            })
+                                            .strong()
+                                            .color(
+                                                if self.is_running {
+                                                    muted_color()
+                                                } else {
+                                                    egui::Color32::from_rgb(5, 12, 16)
+                                                },
+                                            ),
+                                        )
+                                        .fill(
+                                            if self.is_running {
+                                                panel_bg()
+                                            } else {
+                                                accent_color()
+                                            },
+                                        ),
+                                    )
                                     .clicked()
-                                {
-                                    remove_index = Some(index);
+                                    && !self.is_running;
+                                let input_has_focus = response.has_focus();
+                                let dropped_files = if response.hovered() || input_has_focus {
+                                    ctx.input(|input| input.raw.dropped_files.clone())
+                                } else {
+                                    Vec::new()
+                                };
+                                if !dropped_files.is_empty() {
+                                    self.handle_input_dropped_files(dropped_files);
                                 }
+
+                                let paste_image_pressed =
+                                    input_has_focus && self.input_paste_shortcut_pressed(ui);
+                                if paste_image_pressed {
+                                    self.attach_clipboard_image(false);
+                                }
+
+                                let screenshot_pressed = input_has_focus
+                                    && ui.input(|input| {
+                                        input.key_pressed(egui::Key::S)
+                                            && input.modifiers.ctrl
+                                            && input.modifiers.shift
+                                    });
+                                if screenshot_pressed {
+                                    self.capture_input_screenshot();
+                                }
+
+                                let enter_pressed = input_has_focus
+                                    && ui.input(|input| {
+                                        input.key_pressed(egui::Key::Enter) && input.modifiers.ctrl
+                                    });
+
+                                if (send_clicked || enter_pressed) && !self.is_running {
+                                    self.send_current_input();
+                                }
+                            });
+
+                            if !self.input_attachments.is_empty() {
+                                ui.add_space(5.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new("Вложения").weak().small());
+                                    let mut remove_index = None;
+                                    for (index, attachment) in
+                                        self.input_attachments.iter().enumerate()
+                                    {
+                                        let label = format!(
+                                            "{} {} ({})",
+                                            input_attachment_kind_label(attachment.kind),
+                                            attachment.name,
+                                            format_bytes_short(attachment.bytes)
+                                        );
+                                        if ui
+                                            .small_button(label)
+                                            .on_hover_text(&attachment.path)
+                                            .clicked()
+                                        {
+                                            remove_index = Some(index);
+                                        }
+                                    }
+                                    if let Some(index) = remove_index {
+                                        self.input_attachments.remove(index);
+                                        self.input_attachment_status =
+                                            "вложение удалено из сообщения".to_string();
+                                    }
+                                });
                             }
-                            if let Some(index) = remove_index {
-                                self.input_attachments.remove(index);
-                                self.input_attachment_status = "вложение удалено из сообщения".to_string();
-                            }
+                            ui.horizontal_wrapped(|ui| {
+                                if !self.input_attachment_status.is_empty() {
+                                    ui.label(
+                                        RichText::new(&self.input_attachment_status).weak().small(),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new(
+                                            "Перетащите файлы в поле ввода или используйте +.",
+                                        )
+                                        .weak()
+                                        .small(),
+                                    );
+                                }
+                            });
                         });
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new("Плюс добавляет файлы, изображения и снимки. Также можно перетащить файлы в поле ввода; клик по вложению удаляет его.")
-                                .weak()
-                                .small(),
-                        );
-                        if !self.input_attachment_status.is_empty() {
-                            ui.label(RichText::new(&self.input_attachment_status).weak().small());
-                        }
                     });
-                    });
-                });
                 });
             });
     }
