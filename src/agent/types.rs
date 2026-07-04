@@ -142,6 +142,11 @@ pub enum ToolAction {
     RecordProjectGoal,
     RecordMemorySource,
     RemoveMemorySource,
+    RoadmapSnapshot,
+    RecordMilestone,
+    UpdateRoadmapItem,
+    PlanRoadmapItem,
+    ExportRoadmap,
     AssetLibrarySnapshot,
     TagAsset,
     FavoriteAsset,
@@ -410,6 +415,20 @@ mod tests {
                 r#"{"action":"record_memory_source","args":{"title":"Brief","content":"Use cozy art direction."}}"#,
                 "memory",
             ),
+            (r#"{"action":"roadmap_snapshot","args":{}}"#, "roadmap"),
+            (
+                r#"{"action":"record_milestone","args":{"title":"Stage 22","detail":"Roadmap module","status":"done"}}"#,
+                "roadmap",
+            ),
+            (
+                r#"{"action":"update_roadmap_item","args":{"id":"stage-22","status":"done"}}"#,
+                "roadmap",
+            ),
+            (
+                r#"{"action":"plan_roadmap_item","args":{"title":"Stage 23"}}"#,
+                "roadmap",
+            ),
+            (r#"{"action":"export_roadmap","args":{}}"#, "roadmap"),
             (r#"{"action":"asset_library_snapshot","args":{}}"#, "assets"),
             (r#"{"action":"run_replay_eval","args":{}}"#, "evals"),
             (
@@ -432,6 +451,14 @@ mod tests {
                     ToolAction::MemorySnapshot
                         | ToolAction::UpsertTask
                         | ToolAction::RecordMemorySource
+                )),
+                "roadmap" => assert!(matches!(
+                    request.action,
+                    ToolAction::RoadmapSnapshot
+                        | ToolAction::RecordMilestone
+                        | ToolAction::UpdateRoadmapItem
+                        | ToolAction::PlanRoadmapItem
+                        | ToolAction::ExportRoadmap
                 )),
                 "assets" => assert!(matches!(request.action, ToolAction::AssetLibrarySnapshot)),
                 "evals" => assert!(matches!(request.action, ToolAction::RunReplayEval)),

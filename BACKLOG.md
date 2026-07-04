@@ -213,17 +213,17 @@ Leetcode развивается из минимального локальног
 - Done: Run `cargo fmt`, `cargo check`, and `cargo test` automatically after self-modification changes.
 - Done: Detect validation-breaking changes and show rollback/targeted-repair guidance with the restore snapshot path.
 - Done: Save self-modification snapshots and validation output into the run timeline and agent history.
-- Todo: Link self-modification runs to structured roadmap milestones after Stage 22 introduces the roadmap state module.
+- Done: Link self-modification snapshots and validation output to structured roadmap milestones through roadmap link fields and `record_milestone`.
 
 ## Этап 22 - Живая дорожная карта проекта
 
 Цель: превратить roadmap в живую историю развития проекта: прошлые изменения, текущая работа, будущие этапы и финальное видение должны быть связаны с коммитами, агентными запусками и памятью проекта.
 
-- Todo: Move roadmap data into a structured module/state file while keeping `BACKLOG.md` as readable documentation.
-- Todo: Add agent-callable tools to record milestones, start/current work, complete roadmap items, and plan future stages.
-- Todo: Link roadmap items to commits, changed files, agent history records, project memory, and validation results.
-- Todo: Add UI controls for filtering roadmap by done/current/next, editing item status, and exporting roadmap snapshots.
-- Todo: Keep final product goals visible as the last section of the roadmap.
+- Done: Move roadmap data into `src/roadmap.rs` with workspace-local JSON state under `assets/generated/leetcode/roadmap.json`, while keeping `BACKLOG.md` as readable documentation and seed source.
+- Done: Add agent-callable tools to record milestones, start/current work, complete roadmap items, plan future stages, read snapshots, and export markdown.
+- Done: Link roadmap items to commits, changed files, agent history records, project memory ids, and validation results through structured link fields.
+- Done: Add UI controls for filtering roadmap by done/current/next, editing item status, and exporting roadmap snapshots.
+- Done: Keep final product goals visible as the last section of the roadmap.
 
 ## Этап 23 - Проводник истории агента
 

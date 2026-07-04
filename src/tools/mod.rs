@@ -20,6 +20,10 @@ use crate::memory::{
     UpdateTaskStatusArgs, UpsertTaskArgs,
 };
 use crate::provider_health;
+use crate::roadmap::{
+    ExportRoadmapArgs, PlanRoadmapItemArgs, RecordMilestoneArgs, RoadmapSnapshotArgs,
+    UpdateRoadmapItemArgs,
+};
 use crate::tools::asset_generation::{
     AttachAssetArgs, ExportAssetArgs, GenerateAudioAssetArgs, GenerateImageAssetArgs,
     GenerateSpritesheetAssetArgs, GenerateVideoAssetArgs, OpenAssetFolderArgs,
@@ -765,6 +769,74 @@ impl ToolDispatcher {
                             );
                         }
                         crate::memory::remove_memory_source(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RoadmapSnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<RoadmapSnapshotArgs>(request.args) {
+                    Ok(args) => crate::roadmap::roadmap_snapshot(workspace, args),
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::RecordMilestone => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<RecordMilestoneArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Record roadmap milestone", &args.title) {
+                            return ToolResult::error("record_milestone отклонён пользователем");
+                        }
+                        crate::roadmap::record_milestone(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::UpdateRoadmapItem => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<UpdateRoadmapItemArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Update roadmap item", &args.id) {
+                            return ToolResult::error("update_roadmap_item отклонён пользователем");
+                        }
+                        crate::roadmap::update_roadmap_item(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::PlanRoadmapItem => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<PlanRoadmapItemArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write("Plan roadmap item", &args.title) {
+                            return ToolResult::error("plan_roadmap_item отклонён пользователем");
+                        }
+                        crate::roadmap::plan_roadmap_item(workspace, args)
+                    }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::ExportRoadmap => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<ExportRoadmapArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write(
+                            "Export roadmap",
+                            "Записать markdown-снимок дорожной карты",
+                        ) {
+                            return ToolResult::error("export_roadmap отклонён пользователем");
+                        }
+                        crate::roadmap::export_roadmap(workspace, args)
                     }
                     Err(err) => ToolResult::error(err.to_string()),
                 }

@@ -948,6 +948,11 @@ pub fn act_tool_schema() -> Value {
                                 "record_project_goal",
                                 "record_memory_source",
                                 "remove_memory_source",
+                                "roadmap_snapshot",
+                                "record_milestone",
+                                "update_roadmap_item",
+                                "plan_roadmap_item",
+                                "export_roadmap",
                                 "asset_library_snapshot",
                                 "tag_asset",
                                 "favorite_asset",
@@ -1235,6 +1240,11 @@ pub fn gemini_act_function_declaration() -> Value {
                         "record_project_goal",
                         "record_memory_source",
                         "remove_memory_source",
+                        "roadmap_snapshot",
+                        "record_milestone",
+                        "update_roadmap_item",
+                        "plan_roadmap_item",
+                        "export_roadmap",
                         "asset_library_snapshot",
                         "tag_asset",
                         "favorite_asset",
@@ -1313,6 +1323,11 @@ fn act_compatible_parameters_schema() -> Value {
                     "record_project_goal",
                     "record_memory_source",
                     "remove_memory_source",
+                    "roadmap_snapshot",
+                    "record_milestone",
+                    "update_roadmap_item",
+                    "plan_roadmap_item",
+                    "export_roadmap",
                     "asset_library_snapshot",
                     "tag_asset",
                     "favorite_asset",
@@ -1580,6 +1595,11 @@ mod tests {
             assert!(schema.contains("record_project_goal"));
             assert!(schema.contains("record_memory_source"));
             assert!(schema.contains("remove_memory_source"));
+            assert!(schema.contains("roadmap_snapshot"));
+            assert!(schema.contains("record_milestone"));
+            assert!(schema.contains("update_roadmap_item"));
+            assert!(schema.contains("plan_roadmap_item"));
+            assert!(schema.contains("export_roadmap"));
             assert!(schema.contains("asset_library_snapshot"));
             assert!(schema.contains("tag_asset"));
             assert!(schema.contains("favorite_asset"));

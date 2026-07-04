@@ -54,6 +54,9 @@ use crate::provider_health::{
     load_provider_validation_history, provider_health_report, provider_validation_plan,
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
+use crate::roadmap::{
+    load_roadmap, roadmap_markdown_export, RoadmapItem, RoadmapStatus, UpdateRoadmapItemArgs,
+};
 use crate::run_timeline::{RunTimeline, RunTimelineStatus};
 use crate::self_modification::{
     is_leetcode_workspace, prepare_self_modification_guard, run_self_modification_validation,
@@ -196,6 +199,7 @@ pub struct LeetcodeApp {
     workspace_mode: WorkspaceMode,
     right_panel_view: RightPanelView,
     roadmap_filter: RoadmapFilter,
+    roadmap_status: String,
     active_center_tab: CenterTab,
     file_tabs: Vec<FilePreviewTab>,
 }
@@ -748,6 +752,7 @@ impl LeetcodeApp {
             workspace_mode: WorkspaceMode::Chat,
             right_panel_view: RightPanelView::Roadmap,
             roadmap_filter: RoadmapFilter::All,
+            roadmap_status: String::new(),
             active_center_tab: CenterTab::Agent,
             file_tabs: Vec::new(),
         }
@@ -6469,52 +6474,93 @@ impl LeetcodeApp {
     }
 
     fn show_roadmap_panel(&mut self, ui: &mut egui::Ui) {
-        let memory = self.workspace.as_ref().map(load_memory);
-        let completed_stages = self.roadmap_backlog_stage_count();
-        let current_stage_label = if completed_stages > 0 {
-            format!("Stage {}", completed_stages + 1)
+        let workspace = self.workspace.clone();
+        let roadmap = workspace.as_ref().map(load_roadmap);
+        let completed_stages = roadmap
+            .as_ref()
+            .map(|roadmap| {
+                roadmap
+                    .items
+                    .iter()
+                    .filter(|item| item.status == RoadmapStatus::Done)
+                    .count()
+            })
+            .unwrap_or(0);
+        let active_tasks = roadmap
+            .as_ref()
+            .map(|roadmap| {
+                roadmap
+                    .items
+                    .iter()
+                    .filter(|item| item.status == RoadmapStatus::Now)
+                    .count()
+            })
+            .unwrap_or(0);
+        let planned_tasks = roadmap
+            .as_ref()
+            .map(|roadmap| {
+                roadmap
+                    .items
+                    .iter()
+                    .filter(|item| item.status == RoadmapStatus::Next)
+                    .count()
+            })
+            .unwrap_or(0);
+        let total_items = roadmap
+            .as_ref()
+            .map(|roadmap| roadmap.items.len())
+            .unwrap_or(0);
+        let progress = if total_items == 0 {
+            0.0
         } else {
-            "Roadmap".to_string()
+            (completed_stages as f32 / total_items as f32).clamp(0.0, 1.0)
         };
-        let active_tasks = memory
+        let current_focus = roadmap
             .as_ref()
-            .map(|memory| {
-                memory
-                    .tasks
+            .and_then(|roadmap| {
+                roadmap
+                    .items
                     .iter()
-                    .filter(|task| task.status == "doing")
-                    .count()
+                    .find(|item| !roadmap.focus.is_empty() && item.id == roadmap.focus)
+                    .or_else(|| {
+                        roadmap
+                            .items
+                            .iter()
+                            .find(|item| item.status == RoadmapStatus::Now)
+                    })
             })
-            .unwrap_or(0)
-            .max(1);
-        let planned_tasks = memory
-            .as_ref()
-            .map(|memory| {
-                memory
-                    .tasks
-                    .iter()
-                    .filter(|task| task.status == "todo")
-                    .count()
-            })
-            .unwrap_or(0)
-            .max(4);
+            .map(|item| item.title.clone())
+            .unwrap_or_else(|| "Roadmap".to_string());
 
         ui.horizontal_wrapped(|ui| {
             if ui.button("Зафиксировать этап").clicked() {
-                self.input = "Зафиксируй текущий milestone в roadmap проекта: что сделано, какие файлы изменены, какие проверки пройдены, какие риски остались и что делать дальше.".to_string();
+                self.input = "Зафиксируй текущий milestone в roadmap проекта через record_milestone: что сделано, какие файлы изменены, какие проверки пройдены, какие риски остались и что делать дальше.".to_string();
                 self.active_center_tab = CenterTab::Agent;
             }
             if ui.button("+ Запись").clicked() {
                 self.input =
-                    "Добавь запись в roadmap проекта по текущему контексту.".to_string();
+                    "Добавь запись в roadmap проекта по текущему контексту через plan_roadmap_item или update_roadmap_item.".to_string();
                 self.active_center_tab = CenterTab::Agent;
             }
             if ui.button("Экспорт").clicked() {
-                self.input =
-                    "Экспортируй roadmap проекта в читаемый markdown-файл.".to_string();
-                self.active_center_tab = CenterTab::Agent;
+                if let Some(workspace) = &workspace {
+                    match roadmap_markdown_export(workspace, None) {
+                        Ok(path) => {
+                            self.roadmap_status = format!("Экспортировано: {path}");
+                        }
+                        Err(err) => {
+                            self.roadmap_status = format!("Ошибка экспорта: {err}");
+                        }
+                    }
+                } else {
+                    self.roadmap_status = "Выберите проект для экспорта roadmap.".to_string();
+                }
             }
         });
+        if !self.roadmap_status.trim().is_empty() {
+            ui.add_space(4.0);
+            full_width_wrapped_label(ui, RichText::new(&self.roadmap_status).weak().small());
+        }
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(8.0);
@@ -6528,23 +6574,39 @@ impl LeetcodeApp {
         flat_section(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Текущий фокус").strong());
-                chip(ui, &current_stage_label);
+                chip(ui, &compact_inline(&current_focus, 36));
             });
             ui.add_space(4.0);
-            ui.label(RichText::new("Project Roadmap").strong());
+            ui.label(
+                RichText::new(
+                    roadmap
+                        .as_ref()
+                        .map(|roadmap| roadmap.title.as_str())
+                        .unwrap_or("Project Roadmap"),
+                )
+                .strong(),
+            );
             full_width_wrapped_label(
                 ui,
                 RichText::new(
-                    "Единая история проекта: прошлое, текущая работа, будущие цели и финальное видение.",
+                    roadmap
+                        .as_ref()
+                        .map(|roadmap| roadmap.progress_note.as_str())
+                        .filter(|note| !note.trim().is_empty())
+                        .unwrap_or("Единая история проекта: прошлое, текущая работа, будущие цели и финальное видение."),
                 )
                 .weak()
                 .small(),
             );
             ui.add_space(6.0);
             ui.add(
-                egui::ProgressBar::new(0.64)
+                egui::ProgressBar::new(progress)
                     .desired_width(safe_available_width(ui, 120.0))
-                    .text("64% · модуль, UI, инструменты агента"),
+                    .text(format!(
+                        "{:.0}% · {} пунктов",
+                        progress * 100.0,
+                        total_items
+                    )),
             );
         });
 
@@ -6564,53 +6626,52 @@ impl LeetcodeApp {
                 }
             });
             ui.add_space(4.0);
-            self.show_roadmap_entry(
-                ui,
-                RoadmapEntryState::Now,
-                "Собрать Roadmap в единый модуль",
-                "JSON-состояние, импорт Git/Backlog, связь с памятью проекта.",
-                "сейчас",
-            );
-            self.show_roadmap_entry(
-                ui,
-                RoadmapEntryState::Done,
-                "Stage 18 · Run Timeline",
-                "Итоги задач, длительность, инструменты и проверка после запуска.",
-                "03.07",
-            );
-            self.show_roadmap_entry(
-                ui,
-                RoadmapEntryState::Done,
-                "Stage 14-16 · Project & Providers",
-                "Командный центр, диагностика, провайдеры и live validation.",
-                "03.07",
-            );
-            self.show_roadmap_entry(
-                ui,
-                RoadmapEntryState::Next,
-                "Stage 20 · Release cockpit",
-                "Чеклист релиза, сборки, версии, артефакты и публикация.",
-                "далее",
-            );
+            if let Some(roadmap) = &roadmap {
+                let filter = self.roadmap_filter;
+                let visible_items = roadmap
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        roadmap_entry_visible(filter, roadmap_status_to_entry(item.status))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut shown = 0usize;
+                for item in visible_items.iter() {
+                    self.show_roadmap_item(ui, item, workspace.as_ref());
+                    shown += 1;
+                    if shown >= 18 {
+                        full_width_wrapped_label(
+                            ui,
+                            RichText::new("Показаны первые 18 пунктов. Используйте фильтр, чтобы сузить ленту.")
+                                .weak()
+                                .small(),
+                        );
+                        break;
+                    }
+                }
+                if shown == 0 {
+                    full_width_wrapped_label(
+                        ui,
+                        RichText::new("В выбранном фильтре пока нет пунктов roadmap.")
+                            .weak()
+                            .small(),
+                    );
+                }
+            } else {
+                full_width_wrapped_label(
+                    ui,
+                    RichText::new("Выберите проект, чтобы открыть живую дорожную карту.")
+                        .weak()
+                        .small(),
+                );
+            }
         });
 
         ui.label(RichText::new("Финальные цели").strong());
-        if let Some(memory) = memory {
-            let goals = memory.goals.iter().rev().take(3).collect::<Vec<_>>();
-            if goals.is_empty() {
-                roadmap_goal(ui, "Локальный AI-агент для разработки игр и приложений.");
-                roadmap_goal(
-                    ui,
-                    "Мультипровайдерные модели: код, текст, изображения, звук, видео.",
-                );
-                roadmap_goal(
-                    ui,
-                    "Понятная история развития проекта и управляемые milestone.",
-                );
-            } else {
-                for goal in goals {
-                    roadmap_goal(ui, &goal.title);
-                }
+        if let Some(roadmap) = roadmap {
+            for goal in roadmap.goals.iter().take(6) {
+                roadmap_goal(ui, &goal.title);
             }
         } else {
             roadmap_goal(
@@ -6620,33 +6681,82 @@ impl LeetcodeApp {
         }
     }
 
-    fn show_roadmap_entry(
-        &self,
+    fn show_roadmap_item(
+        &mut self,
         ui: &mut egui::Ui,
-        state: RoadmapEntryState,
-        title: &str,
-        detail: &str,
-        time: &str,
+        item: &RoadmapItem,
+        workspace: Option<&Workspace>,
     ) {
-        if !roadmap_entry_visible(self.roadmap_filter, state) {
-            return;
+        let mut detail = item.detail.clone();
+        let links = roadmap_links_summary(item);
+        if !links.is_empty() {
+            if !detail.trim().is_empty() {
+                detail.push_str(" · ");
+            }
+            detail.push_str(&links);
         }
-        roadmap_entry_row(ui, state, title, detail, time);
+        let time = if item.date_label.trim().is_empty() {
+            match item.status {
+                RoadmapStatus::Done => "готово",
+                RoadmapStatus::Now => "сейчас",
+                RoadmapStatus::Next => "далее",
+            }
+        } else {
+            item.date_label.as_str()
+        };
+        roadmap_entry_row(
+            ui,
+            roadmap_status_to_entry(item.status),
+            &item.title,
+            &detail,
+            time,
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(18.0);
+            ui.label(RichText::new("Статус").weak().small());
+            if ui.small_button("Сейчас").clicked() {
+                self.set_roadmap_item_status(workspace, &item.id, "now");
+            }
+            if ui.small_button("Готово").clicked() {
+                self.set_roadmap_item_status(workspace, &item.id, "done");
+            }
+            if ui.small_button("Далее").clicked() {
+                self.set_roadmap_item_status(workspace, &item.id, "next");
+            }
+        });
+        ui.add_space(4.0);
     }
 
-    fn roadmap_backlog_stage_count(&self) -> usize {
-        let text = self
-            .workspace
-            .as_ref()
-            .and_then(|workspace| workspace.read_text("BACKLOG.md", 400_000).ok())
-            .or_else(|| fs::read_to_string("BACKLOG.md").ok())
-            .unwrap_or_default();
-        text.lines()
-            .filter(|line| {
-                let line = line.trim_start();
-                line.starts_with("## Stage ") || line.starts_with("## Этап ")
-            })
-            .count()
+    fn set_roadmap_item_status(
+        &mut self,
+        workspace: Option<&Workspace>,
+        item_id: &str,
+        status: &str,
+    ) {
+        let Some(workspace) = workspace else {
+            self.roadmap_status = "Выберите проект, чтобы изменить roadmap.".to_string();
+            return;
+        };
+        let result = crate::roadmap::update_roadmap_item(
+            workspace,
+            UpdateRoadmapItemArgs {
+                id: item_id.to_string(),
+                title: None,
+                detail: None,
+                status: Some(status.to_string()),
+                focus: Some(status == "now"),
+                commits: Vec::new(),
+                changed_files: Vec::new(),
+                agent_run_id: None,
+                validation: None,
+                memory_ids: Vec::new(),
+            },
+        );
+        self.roadmap_status = if result.ok {
+            format!("Roadmap обновлён: {item_id} -> {status}")
+        } else {
+            result.output
+        };
     }
 
     fn show_right_overview(&mut self, ui: &mut egui::Ui) {
@@ -9276,6 +9386,34 @@ fn roadmap_entry_visible(filter: RoadmapFilter, state: RoadmapEntryState) -> boo
         RoadmapFilter::Now => state == RoadmapEntryState::Now,
         RoadmapFilter::Next => state == RoadmapEntryState::Next,
     }
+}
+
+fn roadmap_status_to_entry(status: RoadmapStatus) -> RoadmapEntryState {
+    match status {
+        RoadmapStatus::Done => RoadmapEntryState::Done,
+        RoadmapStatus::Now => RoadmapEntryState::Now,
+        RoadmapStatus::Next => RoadmapEntryState::Next,
+    }
+}
+
+fn roadmap_links_summary(item: &RoadmapItem) -> String {
+    let mut parts = Vec::new();
+    if !item.links.commits.is_empty() {
+        parts.push(format!(
+            "commits {}",
+            compact_inline(&item.links.commits.join(", "), 44)
+        ));
+    }
+    if !item.links.files.is_empty() {
+        parts.push(format!("files {}", item.links.files.len()));
+    }
+    if !item.links.agent_runs.is_empty() {
+        parts.push(format!("runs {}", item.links.agent_runs.len()));
+    }
+    if !item.links.validations.is_empty() {
+        parts.push(format!("checks {}", item.links.validations.len()));
+    }
+    parts.join(" · ")
 }
 
 fn roadmap_entry_row(
