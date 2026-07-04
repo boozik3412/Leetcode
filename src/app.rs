@@ -46,8 +46,8 @@ use crate::memory::{
     UpdateTaskStatusArgs, UpsertTaskArgs,
 };
 use crate::orchestration::{
-    agent_role_specs, export_trace, load_orchestration_state, orchestration_snapshot,
-    parse_agent_role, record_handoff,
+    agent_role_specs, create_replay_eval, export_trace, load_orchestration_state,
+    orchestration_snapshot, parse_agent_role, record_handoff,
 };
 use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
 use crate::provider_health::{
@@ -55,7 +55,8 @@ use crate::provider_health::{
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
 use crate::roadmap::{
-    load_roadmap, roadmap_markdown_export, RoadmapItem, RoadmapStatus, UpdateRoadmapItemArgs,
+    load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
+    RoadmapStatus, UpdateRoadmapItemArgs,
 };
 use crate::run_timeline::{RunTimeline, RunTimelineStatus};
 use crate::self_modification::{
@@ -126,6 +127,11 @@ pub struct LeetcodeApp {
     journal_status: String,
     agent_history: Vec<AgentRunHistoryRecord>,
     agent_history_status: String,
+    agent_history_query: String,
+    agent_history_status_filter: AgentHistoryStatusFilter,
+    agent_history_duration_filter: AgentHistoryDurationFilter,
+    agent_history_date_filter: AgentHistoryDateFilter,
+    selected_agent_history_id: Option<String>,
     git_summary: String,
     git_action_status: String,
     git_commit_dialog_open: bool,
@@ -324,6 +330,28 @@ enum RoadmapEntryState {
     Next,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentHistoryStatusFilter {
+    All,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentHistoryDurationFilter {
+    All,
+    Fast,
+    Long,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentHistoryDateFilter {
+    All,
+    Today,
+    Week,
+}
+
 impl FileTreeFilter {
     const ALL: [FileTreeFilter; 4] = [
         FileTreeFilter::All,
@@ -356,6 +384,82 @@ impl RoadmapFilter {
             RoadmapFilter::Done => "Готово",
             RoadmapFilter::Now => "Сейчас",
             RoadmapFilter::Next => "Далее",
+        }
+    }
+}
+
+impl AgentHistoryStatusFilter {
+    const ALL: [AgentHistoryStatusFilter; 4] = [
+        AgentHistoryStatusFilter::All,
+        AgentHistoryStatusFilter::Succeeded,
+        AgentHistoryStatusFilter::Failed,
+        AgentHistoryStatusFilter::Cancelled,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "Все",
+            Self::Succeeded => "Готово",
+            Self::Failed => "Ошибки",
+            Self::Cancelled => "Отменено",
+        }
+    }
+
+    fn matches(self, status: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Succeeded => status == "succeeded",
+            Self::Failed => status == "failed",
+            Self::Cancelled => status == "cancelled",
+        }
+    }
+}
+
+impl AgentHistoryDurationFilter {
+    const ALL: [AgentHistoryDurationFilter; 3] = [
+        AgentHistoryDurationFilter::All,
+        AgentHistoryDurationFilter::Fast,
+        AgentHistoryDurationFilter::Long,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "Любая",
+            Self::Fast => "< 1 мин",
+            Self::Long => ">= 1 мин",
+        }
+    }
+
+    fn matches(self, duration_ms: u64) -> bool {
+        match self {
+            Self::All => true,
+            Self::Fast => duration_ms < 60_000,
+            Self::Long => duration_ms >= 60_000,
+        }
+    }
+}
+
+impl AgentHistoryDateFilter {
+    const ALL: [AgentHistoryDateFilter; 3] = [
+        AgentHistoryDateFilter::All,
+        AgentHistoryDateFilter::Today,
+        AgentHistoryDateFilter::Week,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "Всё время",
+            Self::Today => "Сегодня",
+            Self::Week => "7 дней",
+        }
+    }
+
+    fn matches(self, started_at: u64) -> bool {
+        let now = current_unix_timestamp();
+        match self {
+            Self::All => true,
+            Self::Today => started_at >= unix_day_start(now),
+            Self::Week => now.saturating_sub(started_at) <= 7 * 86_400,
         }
     }
 }
@@ -679,6 +783,11 @@ impl LeetcodeApp {
             journal_status: String::new(),
             agent_history,
             agent_history_status: String::new(),
+            agent_history_query: String::new(),
+            agent_history_status_filter: AgentHistoryStatusFilter::All,
+            agent_history_duration_filter: AgentHistoryDurationFilter::All,
+            agent_history_date_filter: AgentHistoryDateFilter::All,
+            selected_agent_history_id: None,
             git_summary: String::new(),
             git_action_status: String::new(),
             git_commit_dialog_open: false,
@@ -5678,6 +5787,488 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_agent_history_explorer(&mut self, ui: &mut egui::Ui) {
+        panel_header(
+            ui,
+            "История агента",
+            "Поиск по запускам, инструментам, файлам, моделям, ошибкам и итогам.",
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Обновить").clicked() {
+                self.refresh_agent_history();
+            }
+            if ui
+                .add_enabled(!self.agent_history.is_empty(), egui::Button::new("Экспорт"))
+                .clicked()
+            {
+                self.export_agent_history_markdown();
+            }
+        });
+        if !self.agent_history_status.trim().is_empty() {
+            full_width_wrapped_label(ui, RichText::new(&self.agent_history_status).weak().small());
+        }
+        ui.add_space(4.0);
+        ui.add(
+            TextEdit::singleline(&mut self.agent_history_query)
+                .desired_width(safe_available_width(ui, 120.0))
+                .hint_text("поиск: модель, провайдер, tool, файл, дата, текст"),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Статус").weak().small());
+            for filter in AgentHistoryStatusFilter::ALL {
+                if ui
+                    .selectable_label(self.agent_history_status_filter == filter, filter.label())
+                    .clicked()
+                {
+                    self.agent_history_status_filter = filter;
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Длительность").weak().small());
+            for filter in AgentHistoryDurationFilter::ALL {
+                if ui
+                    .selectable_label(self.agent_history_duration_filter == filter, filter.label())
+                    .clicked()
+                {
+                    self.agent_history_duration_filter = filter;
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Период").weak().small());
+            for filter in AgentHistoryDateFilter::ALL {
+                if ui
+                    .selectable_label(self.agent_history_date_filter == filter, filter.label())
+                    .clicked()
+                {
+                    self.agent_history_date_filter = filter;
+                }
+            }
+        });
+
+        let filtered = self.filtered_agent_history();
+        let total_duration = filtered
+            .iter()
+            .map(|record| record.duration_ms)
+            .sum::<u64>();
+        let failures = filtered
+            .iter()
+            .filter(|record| record.status == "failed")
+            .count();
+        let tool_calls = filtered
+            .iter()
+            .map(|record| record.tool_calls.len())
+            .sum::<usize>();
+        let succeeded = filtered
+            .iter()
+            .filter(|record| record.status == "succeeded")
+            .count();
+        let average_duration = if filtered.is_empty() {
+            0
+        } else {
+            total_duration / filtered.len() as u64
+        };
+        ui.add_space(6.0);
+        ui.columns(3, |columns| {
+            roadmap_metric(&mut columns[0], filtered.len(), "запусков");
+            roadmap_metric(
+                &mut columns[1],
+                format_history_duration_ms(total_duration),
+                "суммарно",
+            );
+            roadmap_metric(&mut columns[2], failures, "ошибок");
+        });
+        ui.columns(3, |columns| {
+            roadmap_metric(&mut columns[0], succeeded, "успешно");
+            roadmap_metric(
+                &mut columns[1],
+                format_history_duration_ms(average_duration),
+                "среднее",
+            );
+            roadmap_metric(&mut columns[2], tool_calls, "tools");
+        });
+
+        if filtered.is_empty() {
+            empty_state(
+                ui,
+                "История не найдена",
+                "Измените фильтры или выполните задачу агентом, чтобы появилась структурированная запись.",
+            );
+            return;
+        }
+
+        egui::CollapsingHeader::new("Надёжность провайдеров")
+            .default_open(false)
+            .show(ui, |ui| {
+                let mut provider_stats: BTreeMap<String, (usize, usize, u64)> = BTreeMap::new();
+                for record in &filtered {
+                    let key = format!("{} / {}", record.provider, record.model);
+                    let entry = provider_stats.entry(key).or_default();
+                    entry.0 += 1;
+                    if record.status == "succeeded" {
+                        entry.1 += 1;
+                    }
+                    entry.2 += record.duration_ms;
+                }
+                for (provider, (total, ok, duration)) in provider_stats.iter().take(8) {
+                    let ratio = if *total == 0 {
+                        0.0
+                    } else {
+                        *ok as f32 / *total as f32
+                    };
+                    let avg = if *total == 0 {
+                        0
+                    } else {
+                        duration / *total as u64
+                    };
+                    ui.label(RichText::new(provider).small().strong());
+                    ui.add(
+                        egui::ProgressBar::new(ratio)
+                            .desired_width(safe_available_width(ui, 80.0))
+                            .text(format!(
+                                "{} из {} · среднее {}",
+                                ok,
+                                total,
+                                format_history_duration_ms(avg)
+                            )),
+                    );
+                }
+            });
+
+        egui::CollapsingHeader::new("Использование инструментов")
+            .default_open(false)
+            .show(ui, |ui| {
+                let mut tool_stats: BTreeMap<String, usize> = BTreeMap::new();
+                for record in &filtered {
+                    for tool in &record.tool_calls {
+                        *tool_stats.entry(tool.name.clone()).or_default() += 1;
+                    }
+                }
+                let max = tool_stats.values().copied().max().unwrap_or(1) as f32;
+                for (tool, count) in tool_stats.iter().take(12) {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(compact_inline(tool, 24)).small());
+                        ui.add(
+                            egui::ProgressBar::new(*count as f32 / max)
+                                .desired_width(safe_available_width(ui, 80.0).min(180.0))
+                                .text(count.to_string()),
+                        );
+                    });
+                }
+            });
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        let mut select_run_id: Option<String> = None;
+        for record in filtered.iter().rev().take(20) {
+            let selected = self
+                .selected_agent_history_id
+                .as_deref()
+                .map(|id| id == record.id)
+                .unwrap_or(false);
+            let title = format!(
+                "{} · {} · {} / {}",
+                agent_history_status_label(&record.status),
+                format_history_duration_ms(record.duration_ms),
+                compact_inline(&record.provider, 20),
+                compact_inline(&record.model, 24)
+            );
+            let detail = format!(
+                "{}\n{} · tools {} · files {} · {}",
+                compact_inline(&record.user_request, 160),
+                agent_history_date_label(record.started_at),
+                record.tool_calls.len(),
+                record.changed_files.len(),
+                record.id
+            );
+            let response = ui.selectable_label(selected, title);
+            if response.clicked() {
+                select_run_id = Some(record.id.clone());
+            }
+            full_width_wrapped_label(ui, RichText::new(detail).weak().small());
+            ui.add_space(4.0);
+        }
+        if let Some(id) = select_run_id {
+            self.selected_agent_history_id = Some(id);
+        }
+
+        let selected = self.selected_agent_history();
+        if let Some(record) = selected {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+            self.show_agent_history_record(ui, &record);
+        }
+    }
+
+    fn show_agent_history_record(&mut self, ui: &mut egui::Ui, record: &AgentRunHistoryRecord) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Выбранный запуск").strong());
+            chip(ui, agent_history_status_label(&record.status));
+            chip(ui, &format_history_duration_ms(record.duration_ms));
+        });
+        full_width_wrapped_label(
+            ui,
+            RichText::new(format!(
+                "{} · {} · {}",
+                record.id,
+                agent_history_date_label(record.started_at),
+                record.route
+            ))
+            .weak()
+            .small(),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("В eval").clicked() {
+                self.create_eval_from_history_record(record);
+            }
+            if ui.button("В память").clicked() {
+                self.save_history_record_to_memory(record);
+            }
+            if ui.button("В roadmap").clicked() {
+                self.attach_history_record_to_roadmap(record);
+            }
+            if ui.button("Экспорт run").clicked() {
+                self.export_agent_history_record_markdown(record);
+            }
+        });
+
+        egui::CollapsingHeader::new("Запрос и план")
+            .default_open(true)
+            .show(ui, |ui| {
+                full_width_wrapped_label(ui, record.user_request.as_str());
+                if let Some(plan) = &record.confirmed_plan {
+                    ui.add_space(4.0);
+                    full_width_wrapped_label(
+                        ui,
+                        RichText::new(format!("{}: {}", plan.summary, plan.detail)).weak(),
+                    );
+                }
+            });
+        egui::CollapsingHeader::new("Инструменты и согласования")
+            .default_open(false)
+            .show(ui, |ui| {
+                if record.tool_calls.is_empty() {
+                    ui.label(RichText::new("Инструментов не было").weak());
+                } else {
+                    for tool in record.tool_calls.iter().take(40) {
+                        let title = format!(
+                            "{} · {}{}",
+                            tool.name,
+                            tool.status,
+                            tool.duration_ms
+                                .map(format_history_duration_ms)
+                                .map(|value| format!(" · {value}"))
+                                .unwrap_or_default()
+                        );
+                        inline_log_entry(ui, &title, &compact(&tool.summary, 700));
+                    }
+                }
+                if !record.approvals.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Согласования").strong().small());
+                    for approval in &record.approvals {
+                        inline_log_entry(ui, &approval.summary, &compact(&approval.detail, 500));
+                    }
+                }
+            });
+        egui::CollapsingHeader::new("Файлы, ошибки и итог")
+            .default_open(true)
+            .show(ui, |ui| {
+                if !record.changed_files.is_empty() {
+                    ui.label(RichText::new("Изменённые файлы").strong().small());
+                    for file in record.changed_files.iter().take(40) {
+                        full_width_wrapped_label(ui, RichText::new(file).monospace().small());
+                    }
+                }
+                if !record.errors.is_empty() {
+                    ui.separator();
+                    ui.label(RichText::new("Ошибки").strong().small());
+                    for error in &record.errors {
+                        full_width_wrapped_label(ui, RichText::new(error).weak().small());
+                    }
+                }
+                if let Some(report) = &record.final_report {
+                    ui.separator();
+                    ui.label(RichText::new("Итоговый отчёт").strong().small());
+                    full_width_wrapped_label(ui, report.as_str());
+                } else if let Some(response) = &record.final_response {
+                    ui.separator();
+                    ui.label(RichText::new("Ответ агента").strong().small());
+                    full_width_wrapped_label(ui, response.as_str());
+                }
+            });
+    }
+
+    fn filtered_agent_history(&self) -> Vec<AgentRunHistoryRecord> {
+        let query = self.agent_history_query.trim().to_ascii_lowercase();
+        self.agent_history
+            .iter()
+            .filter(|record| self.agent_history_status_filter.matches(&record.status))
+            .filter(|record| {
+                self.agent_history_duration_filter
+                    .matches(record.duration_ms)
+            })
+            .filter(|record| self.agent_history_date_filter.matches(record.started_at))
+            .filter(|record| {
+                if query.is_empty() {
+                    return true;
+                }
+                agent_history_search_blob(record).contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn selected_agent_history(&self) -> Option<AgentRunHistoryRecord> {
+        let selected_id = self.selected_agent_history_id.as_deref()?;
+        self.agent_history
+            .iter()
+            .find(|record| record.id == selected_id)
+            .cloned()
+    }
+
+    fn create_eval_from_history_record(&mut self, record: &AgentRunHistoryRecord) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.agent_history_status = "выберите проект, чтобы создать eval".to_string();
+            return;
+        };
+        let tools = record
+            .tool_calls
+            .iter()
+            .map(|tool| tool.name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .take(12)
+            .collect::<Vec<_>>();
+        let criteria = vec![
+            "Агент должен сохранить смысл исходного запроса.".to_string(),
+            "Агент должен завершить запуск без критической ошибки.".to_string(),
+        ];
+        match create_replay_eval(
+            &workspace,
+            format!("Replay {}", compact_inline(&record.user_request, 48)),
+            record.user_request.clone(),
+            tools,
+            criteria,
+        ) {
+            Ok(eval) => {
+                self.orchestration_status = format!("создан eval: {}", eval.id);
+                self.agent_history_status = self.orchestration_status.clone();
+            }
+            Err(err) => {
+                self.agent_history_status = format!("не удалось создать eval: {err}");
+            }
+        }
+    }
+
+    fn save_history_record_to_memory(&mut self, record: &AgentRunHistoryRecord) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.agent_history_status = "выберите проект, чтобы сохранить run в память".to_string();
+            return;
+        };
+        let content = agent_history_record_markdown(record);
+        let result = record_memory_source(
+            &workspace,
+            RecordMemorySourceArgs {
+                id: Some(format!("agent-history-{}", record.id)),
+                title: format!("Agent run {}", agent_history_date_label(record.started_at)),
+                kind: Some("agent_run".to_string()),
+                summary: Some(compact_inline(&record.user_request, 400)),
+                content: Some(content),
+                path: None,
+            },
+        );
+        self.agent_history_status = if result.ok {
+            "запуск сохранён в память проекта".to_string()
+        } else {
+            result.output
+        };
+    }
+
+    fn attach_history_record_to_roadmap(&mut self, record: &AgentRunHistoryRecord) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.agent_history_status =
+                "выберите проект, чтобы прикрепить run к roadmap".to_string();
+            return;
+        };
+        let validation = if record.errors.is_empty() {
+            Some("agent run succeeded".to_string())
+        } else {
+            Some(format!("{} ошибок", record.errors.len()))
+        };
+        let result = record_milestone(
+            &workspace,
+            RecordMilestoneArgs {
+                title: format!("Agent run · {}", compact_inline(&record.user_request, 64)),
+                detail: record
+                    .final_report
+                    .clone()
+                    .or_else(|| record.final_response.clone())
+                    .unwrap_or_else(|| "Запуск агента сохранён в истории.".to_string()),
+                item_id: Some(format!("run-{}", record.id)),
+                status: Some(if record.status == "succeeded" {
+                    "done".to_string()
+                } else {
+                    "now".to_string()
+                }),
+                commits: Vec::new(),
+                changed_files: record.changed_files.clone(),
+                agent_run_id: Some(record.id.clone()),
+                validation,
+                memory_ids: Vec::new(),
+            },
+        );
+        self.agent_history_status = if result.ok {
+            "запуск прикреплён к roadmap".to_string()
+        } else {
+            result.output
+        };
+    }
+
+    fn export_agent_history_record_markdown(&mut self, record: &AgentRunHistoryRecord) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.agent_history_status = "выберите проект, чтобы экспортировать run".to_string();
+            return;
+        };
+        let path = format!(
+            "assets/generated/leetcode/agent_history_exports/{}.md",
+            record.id
+        );
+        match workspace.write_text(&path, &agent_history_record_markdown(record)) {
+            Ok(()) => {
+                self.agent_history_status = format!("run экспортирован: {path}");
+            }
+            Err(err) => {
+                self.agent_history_status = format!("не удалось экспортировать run: {err}");
+            }
+        }
+    }
+
+    fn export_agent_history_markdown(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.agent_history_status = "выберите проект, чтобы экспортировать историю".to_string();
+            return;
+        };
+        let filtered = self.filtered_agent_history();
+        let mut markdown = String::from("# Agent History\n\n");
+        markdown.push_str(&format!("Экспортировано запусков: {}\n\n", filtered.len()));
+        for record in filtered.iter().rev() {
+            markdown.push_str(&agent_history_record_markdown(record));
+            markdown.push_str("\n\n---\n\n");
+        }
+        let path = "assets/generated/leetcode/agent_history_exports/history.md";
+        match workspace.write_text(path, &markdown) {
+            Ok(()) => {
+                self.agent_history_status = format!("история экспортирована: {path}");
+            }
+            Err(err) => {
+                self.agent_history_status = format!("не удалось экспортировать историю: {err}");
+            }
+        }
+    }
+
     fn show_governance_panel(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("Управление доступом", |ui| {
             let Some(workspace) = self.workspace.clone() else {
@@ -6466,6 +7057,7 @@ impl LeetcodeApp {
                         }
                         RightPanelView::Logs => {
                             flat_section(ui, |ui| self.show_orchestration_panel(ui));
+                            flat_section(ui, |ui| self.show_agent_history_explorer(ui));
                             self.show_git_section(ui);
                             self.show_tool_log_section(ui);
                         }
@@ -9708,6 +10300,195 @@ fn agent_history_status_label(status: &str) -> &'static str {
         "cancelled" => "отменено",
         _ => "запуск",
     }
+}
+
+fn agent_history_date_label(timestamp: u64) -> String {
+    if timestamp == 0 {
+        return "дата неизвестна".to_string();
+    }
+    let days = timestamp / 86_400;
+    let seconds = timestamp % 86_400;
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    format!("unix day {days} · {hours:02}:{minutes:02}")
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn unix_day_start(timestamp: u64) -> u64 {
+    timestamp - (timestamp % 86_400)
+}
+
+fn agent_history_search_blob(record: &AgentRunHistoryRecord) -> String {
+    let mut parts = vec![
+        record.id.clone(),
+        record.status.clone(),
+        record.provider.clone(),
+        record.model.clone(),
+        record.route.clone(),
+        record.policy_profile.clone(),
+        record.workspace_name.clone(),
+        record.workspace_root.clone(),
+        record.user_request.clone(),
+        agent_history_date_label(record.started_at),
+        format_history_duration_ms(record.duration_ms),
+    ];
+    if let Some(plan) = &record.confirmed_plan {
+        parts.push(plan.summary.clone());
+        parts.push(plan.detail.clone());
+    }
+    if let Some(response) = &record.final_response {
+        parts.push(response.clone());
+    }
+    if let Some(report) = &record.final_report {
+        parts.push(report.clone());
+    }
+    parts.extend(record.changed_files.iter().cloned());
+    parts.extend(record.errors.iter().cloned());
+    for approval in &record.approvals {
+        parts.push(approval.id.clone());
+        parts.push(approval.summary.clone());
+        parts.push(approval.detail.clone());
+        parts.push(approval.status.clone());
+    }
+    for tool in &record.tool_calls {
+        parts.push(tool.id.clone());
+        parts.push(tool.name.clone());
+        parts.push(tool.summary.clone());
+        parts.push(tool.status.clone());
+        parts.push(tool.output_preview.clone());
+    }
+    for step in &record.timeline_steps {
+        parts.push(step.id.clone());
+        parts.push(step.title.clone());
+        parts.push(step.detail.clone());
+        parts.push(step.status.clone());
+        parts.push(step.output_preview.clone());
+        if let Some(link) = &step.link {
+            parts.push(link.clone());
+        }
+    }
+    parts.join("\n").to_ascii_lowercase()
+}
+
+fn agent_history_record_markdown(record: &AgentRunHistoryRecord) -> String {
+    let mut markdown = String::new();
+    markdown.push_str(&format!("# Agent run {}\n\n", record.id));
+    markdown.push_str("## Сводка\n\n");
+    markdown.push_str(&format!(
+        "- Статус: {}\n- Дата: {}\n- Длительность: {}\n- Провайдер: {}\n- Модель: {}\n- Маршрут: {}\n- Доступ: {}\n- Проект: {}\n\n",
+        agent_history_status_label(&record.status),
+        agent_history_date_label(record.started_at),
+        format_history_duration_ms(record.duration_ms),
+        record.provider,
+        record.model,
+        record.route,
+        record.policy_profile,
+        record.workspace_name
+    ));
+    markdown.push_str("## Запрос\n\n");
+    markdown.push_str(record.user_request.trim());
+    markdown.push_str("\n\n");
+
+    if let Some(plan) = &record.confirmed_plan {
+        markdown.push_str("## Подтверждённый план\n\n");
+        markdown.push_str(&format!(
+            "**{}**\n\n{}\n\n",
+            plan.summary,
+            plan.detail.trim()
+        ));
+    }
+
+    if !record.changed_files.is_empty() {
+        markdown.push_str("## Изменённые файлы\n\n");
+        for file in &record.changed_files {
+            markdown.push_str(&format!("- `{file}`\n"));
+        }
+        markdown.push('\n');
+    }
+
+    if !record.tool_calls.is_empty() {
+        markdown.push_str("## Инструменты\n\n");
+        for tool in &record.tool_calls {
+            let duration = tool
+                .duration_ms
+                .map(format_history_duration_ms)
+                .unwrap_or_else(|| "без времени".to_string());
+            markdown.push_str(&format!(
+                "- `{}` · {} · {}\n  {}\n",
+                tool.name,
+                tool.status,
+                duration,
+                compact_inline(&tool.summary, 500)
+            ));
+            if !tool.output_preview.trim().is_empty() {
+                markdown.push_str(&format!(
+                    "  output: {}\n",
+                    compact_inline(&tool.output_preview, 500)
+                ));
+            }
+        }
+        markdown.push('\n');
+    }
+
+    if !record.approvals.is_empty() {
+        markdown.push_str("## Согласования\n\n");
+        for approval in &record.approvals {
+            markdown.push_str(&format!(
+                "- {} · {}\n  {}\n",
+                approval.summary,
+                approval.status,
+                compact_inline(&approval.detail, 500)
+            ));
+        }
+        markdown.push('\n');
+    }
+
+    if !record.errors.is_empty() {
+        markdown.push_str("## Ошибки\n\n");
+        for error in &record.errors {
+            markdown.push_str(&format!("- {}\n", compact_inline(error, 800)));
+        }
+        markdown.push('\n');
+    }
+
+    if let Some(report) = &record.final_report {
+        markdown.push_str("## Итоговый отчёт\n\n");
+        markdown.push_str(report.trim());
+        markdown.push_str("\n\n");
+    } else if let Some(response) = &record.final_response {
+        markdown.push_str("## Итоговый ответ\n\n");
+        markdown.push_str(response.trim());
+        markdown.push_str("\n\n");
+    }
+
+    if !record.timeline_steps.is_empty() {
+        markdown.push_str("## Timeline\n\n");
+        for step in record.timeline_steps.iter().take(120) {
+            let duration = step
+                .duration_ms
+                .map(format_history_duration_ms)
+                .unwrap_or_else(|| "без времени".to_string());
+            markdown.push_str(&format!(
+                "- {} · {} · {}\n  {}\n",
+                step.title,
+                step.status,
+                duration,
+                compact_inline(&step.detail, 500)
+            ));
+        }
+        if record.timeline_steps.len() > 120 {
+            markdown.push_str("- ... timeline truncated ...\n");
+        }
+        markdown.push('\n');
+    }
+
+    markdown
 }
 
 fn run_timeline_card(ui: &mut egui::Ui, timeline: &RunTimeline) {

@@ -229,11 +229,11 @@ Leetcode развивается из минимального локальног
 
 Цель: сделать историю действий агента полноценным инструментом анализа: пользователь должен быстро понимать, что агент делал, почему, какими инструментами пользовался, где ошибался и что изменил.
 
-- Todo: Add a searchable Agent History Explorer with filters by status, provider/model, tool, changed file, duration, and date.
-- Todo: Show each run as a readable report with confirmed plan, tool calls, approvals, changed files, validation, errors, and final response.
-- Todo: Add actions to replay a run as an eval case, turn run output into project memory, or attach it to a roadmap milestone.
-- Todo: Add compact charts for run duration, tool usage, failures, and provider reliability.
-- Todo: Add export for selected runs as JSON/Markdown for external review.
+- Done: Add a searchable Agent History Explorer with filters by status, free-text provider/model/tool/file search, duration, and date period.
+- Done: Show each run as a readable report with confirmed plan, tool calls, approvals, changed files, validation, errors, and final response.
+- Done: Add actions to replay a run as an eval case, turn run output into project memory, or attach it to a roadmap milestone.
+- Done: Add compact analytics for run duration, tool usage, failures, and provider/model reliability.
+- Done: Add Markdown export for selected runs and filtered history for external review.
 
 ## Постоянная планка качества
 
