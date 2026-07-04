@@ -32,7 +32,7 @@ use crate::conversation::{
     save_index as save_conversation_index, save_state as save_conversation_state,
     set_conversation_pinned, ContextBudget, ContextProfile, ConversationIndex, LoadedConversation,
 };
-use crate::diagnostics::environment_diagnostics;
+use crate::diagnostics::{environment_diagnostics, DiagnosticItem, EnvironmentDiagnostics};
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
 use crate::game_workflows::{
     parse_workflow_kind, run_game_workflow, workflow_specs, GameWorkflowRequest,
@@ -350,6 +350,7 @@ enum RightPanelView {
     Overview,
     Context,
     Roadmap,
+    Release,
     Project,
     Assets,
     Control,
@@ -621,6 +622,21 @@ struct ProjectFixRequestRecord {
     requested_at: u64,
 }
 
+#[derive(Clone, Debug)]
+struct ReleaseChecklistItem {
+    title: String,
+    detail: String,
+    ok: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ReleaseArtifact {
+    label: String,
+    path: String,
+    size_bytes: u64,
+    modified_at: Option<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProjectRunStatus {
     Running,
@@ -635,6 +651,7 @@ impl RightPanelView {
             RightPanelView::Overview => "Сводка",
             RightPanelView::Context => "Контекст",
             RightPanelView::Roadmap => "Roadmap",
+            RightPanelView::Release => "Релиз",
             RightPanelView::Project => "Проект",
             RightPanelView::Assets => "Ассеты",
             RightPanelView::Control => "Контроль",
@@ -652,6 +669,9 @@ impl RightPanelView {
             }
             RightPanelView::Roadmap => {
                 "Живая дорожная карта проекта: что сделано, что в работе и что запланировано."
+            }
+            RightPanelView::Release => {
+                "Release cockpit: версия, preflight-чеклист, сборки, артефакты и готовность публикации."
             }
             RightPanelView::Project => {
                 "Команды проекта, терминал, preview, рабочий стол и диагностика запусков."
@@ -700,7 +720,7 @@ impl WorkspaceMode {
             WorkspaceMode::Chat => RightPanelView::Context,
             WorkspaceMode::Code => RightPanelView::Project,
             WorkspaceMode::Assets => RightPanelView::Control,
-            WorkspaceMode::Project => RightPanelView::Roadmap,
+            WorkspaceMode::Project => RightPanelView::Release,
         }
     }
 
@@ -715,6 +735,7 @@ impl WorkspaceMode {
             ],
             WorkspaceMode::Code => &[
                 RightPanelView::Project,
+                RightPanelView::Release,
                 RightPanelView::Context,
                 RightPanelView::Roadmap,
                 RightPanelView::Control,
@@ -727,6 +748,7 @@ impl WorkspaceMode {
             ],
             WorkspaceMode::Project => &[
                 RightPanelView::Overview,
+                RightPanelView::Release,
                 RightPanelView::Context,
                 RightPanelView::Roadmap,
                 RightPanelView::Control,
@@ -7973,6 +7995,10 @@ impl LeetcodeApp {
                             "Roadmap",
                             "история проекта, текущий фокус и следующие этапы",
                         ),
+                        RightPanelView::Release => (
+                            "Релиз",
+                            "версии, сборки, артефакты и preflight перед публикацией",
+                        ),
                         RightPanelView::Logs => {
                             ("Журнал", "история запусков, инструменты, git и трассировка")
                         }
@@ -8024,6 +8050,7 @@ impl LeetcodeApp {
                         RightPanelView::Overview => self.show_right_overview(ui),
                         RightPanelView::Context => self.show_context_control_center(ui),
                         RightPanelView::Roadmap => self.show_roadmap_panel(ui),
+                        RightPanelView::Release => self.show_release_cockpit(ui),
                         RightPanelView::Project => {
                             flat_section(ui, |ui| self.show_project_panel(ui));
                             flat_section(ui, |ui| self.show_terminal_panel(ui));
@@ -8336,6 +8363,305 @@ impl LeetcodeApp {
         };
     }
 
+    fn show_release_cockpit(&mut self, ui: &mut egui::Ui) {
+        let workspace = self.workspace.clone();
+        let diagnostics = environment_diagnostics(&self.config, workspace.as_ref());
+        let version = workspace
+            .as_ref()
+            .and_then(|workspace| release_version_label(workspace.root()))
+            .unwrap_or_else(|| "версия не найдена".to_string());
+        let artifacts = workspace
+            .as_ref()
+            .map(|workspace| release_artifacts(workspace.root()))
+            .unwrap_or_default();
+        let package_script_present = workspace
+            .as_ref()
+            .map(|workspace| {
+                workspace
+                    .root()
+                    .join("scripts")
+                    .join("package-windows.ps1")
+                    .is_file()
+            })
+            .unwrap_or(false);
+        let checklist = release_checklist(
+            workspace.as_ref(),
+            &self.project_profiles,
+            &self.git_summary,
+            &self.project_runs,
+            &diagnostics,
+            package_script_present,
+            !artifacts.is_empty(),
+        );
+        let passed = checklist.iter().filter(|item| item.ok).count();
+        let readiness = if checklist.is_empty() {
+            0.0
+        } else {
+            (passed as f32 / checklist.len() as f32).clamp(0.0, 1.0)
+        };
+
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    workspace.is_some() && !self.project_is_running,
+                    egui::Button::new("Проверка"),
+                )
+                .on_hover_text(
+                    "Запустить check/typecheck/lint, если такая команда найдена в профиле проекта.",
+                )
+                .clicked()
+            {
+                self.start_release_command_by_ids(&["check", "typecheck", "lint"], "проверка");
+            }
+            if ui
+                .add_enabled(
+                    workspace.is_some() && !self.project_is_running,
+                    egui::Button::new("Тесты"),
+                )
+                .on_hover_text("Запустить тесты проекта перед релизом.")
+                .clicked()
+            {
+                self.start_release_command_by_ids(&["test"], "тесты");
+            }
+            if ui
+                .add_enabled(
+                    workspace.is_some() && !self.project_is_running,
+                    egui::Button::new("Release build"),
+                )
+                .on_hover_text("Собрать release-бинарник или production build.")
+                .clicked()
+            {
+                self.start_release_command_by_ids(&["release", "build"], "release build");
+            }
+            if ui
+                .add_enabled(
+                    workspace.is_some() && package_script_present && !self.project_is_running,
+                    egui::Button::new("Package"),
+                )
+                .on_hover_text(
+                    "Запустить scripts/package-windows.ps1 и создать portable-артефакты.",
+                )
+                .clicked()
+            {
+                self.start_release_command_by_ids(&["package"], "упаковка");
+            }
+            if ui
+                .add_enabled(workspace.is_some(), egui::Button::new("Git status"))
+                .on_hover_text("Обновить Git-сводку перед публикацией.")
+                .clicked()
+            {
+                self.show_git_status_from_ui();
+            }
+            if ui
+                .add_enabled(workspace.is_some(), egui::Button::new("Открыть dist"))
+                .on_hover_text("Открыть папку dist с portable build, zip и SHA256.")
+                .clicked()
+            {
+                self.open_release_dist_folder();
+            }
+        });
+
+        if self.project_is_running {
+            ui.horizontal_wrapped(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("идёт команда проекта").weak());
+                if ui.button("Стоп").clicked() {
+                    self.stop_project_command();
+                }
+            });
+        }
+
+        if !self.project_status.trim().is_empty() {
+            full_width_wrapped_label(ui, RichText::new(&self.project_status).weak().small());
+        }
+
+        if workspace.is_none() {
+            empty_state(
+                ui,
+                "Проект не выбран",
+                "Выберите рабочую папку, чтобы увидеть релизный чеклист, команды и артефакты.",
+            );
+            return;
+        }
+
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(8.0);
+
+        ui.columns(3, |columns| {
+            roadmap_metric(
+                &mut columns[0],
+                format!("{:.0}%", readiness * 100.0),
+                "готовность",
+            );
+            roadmap_metric(&mut columns[1], passed, "пунктов ok");
+            roadmap_metric(&mut columns[2], artifacts.len(), "артефактов");
+        });
+
+        flat_section(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Кандидат релиза").strong());
+                chip(ui, version);
+            });
+            ui.add_space(6.0);
+            ui.add(
+                egui::ProgressBar::new(readiness)
+                    .desired_width(safe_available_width(ui, 120.0))
+                    .text(format!(
+                        "{:.0}% · {} из {} пунктов",
+                        readiness * 100.0,
+                        passed,
+                        checklist.len()
+                    )),
+            );
+            ui.add_space(4.0);
+            full_width_wrapped_label(
+                ui,
+                RichText::new(
+                    "Перед публикацией пройдите проверку, тесты, release build, упаковку и убедитесь, что Git чистый.",
+                )
+                .weak()
+                .small(),
+            );
+        });
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Preflight-чеклист",
+                "Главные условия, которые стоит закрыть перед публикацией.",
+            );
+            for item in &checklist {
+                release_check_row(ui, item);
+            }
+        });
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Артефакты",
+                "Release-бинарник, portable-папка, zip и SHA256 manifest.",
+            );
+            if artifacts.is_empty() {
+                full_width_wrapped_label(
+                    ui,
+                    RichText::new(
+                        "Артефакты пока не найдены. Запустите Release build или Package.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            } else {
+                for artifact in artifacts.iter().take(10) {
+                    release_artifact_row(ui, artifact);
+                }
+            }
+        });
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Последние релизные запуски",
+                "Check, test, build, release и package из истории команд проекта.",
+            );
+            let runs = self
+                .project_runs
+                .iter()
+                .rev()
+                .filter(|run| release_command_kind(&run.command.id).is_some())
+                .take(6)
+                .cloned()
+                .collect::<Vec<_>>();
+            if runs.is_empty() {
+                full_width_wrapped_label(
+                    ui,
+                    RichText::new("Релизные команды ещё не запускались.")
+                        .weak()
+                        .small(),
+                );
+            }
+            for run in runs {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(&run.label).strong());
+                    chip(ui, run.status.label());
+                    if let Some(kind) = release_command_kind(&run.command.id) {
+                        chip(ui, kind);
+                    }
+                    if let Some(code) = run.exit_code {
+                        chip(ui, format!("exit {code}"));
+                    }
+                    if ui
+                        .add_enabled(!self.project_is_running, egui::Button::new("Повторить"))
+                        .clicked()
+                    {
+                        self.start_project_command(run.command.clone());
+                    }
+                    if ui
+                        .add_enabled(
+                            run.status == ProjectRunStatus::Failed,
+                            egui::Button::new("Исправить"),
+                        )
+                        .clicked()
+                    {
+                        self.prepare_fix_prompt_from_run(&run);
+                    }
+                });
+                if !run.error_summary.is_empty() {
+                    full_width_wrapped_label(
+                        ui,
+                        RichText::new(compact_inline(&run.error_summary.join("; "), 220))
+                            .color(egui::Color32::from_rgb(235, 154, 154))
+                            .small(),
+                    );
+                }
+                ui.add_space(4.0);
+            }
+        });
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Окружение публикации",
+                "Toolchain, proxy, config, журнал и crash reports.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                for item in &diagnostics.tools {
+                    metric_chip(ui, &item.name, &item.status);
+                }
+            });
+            ui.add_space(6.0);
+            for item in &diagnostics.release_notes {
+                release_diagnostic_row(ui, item);
+            }
+        });
+    }
+
+    fn start_release_command_by_ids(&mut self, ids: &[&str], label: &str) {
+        if self.project_is_running {
+            return;
+        }
+        if let Some(command) = find_command_by_ids(&self.project_profiles, ids) {
+            self.start_project_command(command);
+        } else {
+            self.project_status = format!("Команда для '{label}' не найдена в профиле проекта.");
+        }
+    }
+
+    fn open_release_dist_folder(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.project_status = "рабочая папка не выбрана".to_string();
+            return;
+        };
+        let dist = workspace.root().join("dist");
+        if !dist.exists() {
+            self.project_status =
+                "Папка dist пока не создана. Запустите Package или Release build.".to_string();
+            return;
+        }
+        self.open_project_folder(&dist);
+        self.project_status = format!("открыто: {}", dist.display());
+    }
+
     fn show_right_overview(&mut self, ui: &mut egui::Ui) {
         flat_section(ui, |ui| {
             panel_header(
@@ -8431,6 +8757,7 @@ impl LeetcodeApp {
                 for view in [
                     RightPanelView::Context,
                     RightPanelView::Roadmap,
+                    RightPanelView::Release,
                     RightPanelView::Project,
                     RightPanelView::Assets,
                     RightPanelView::Control,
@@ -11140,6 +11467,343 @@ fn roadmap_goal(ui: &mut egui::Ui, text: &str) {
         ui.colored_label(egui::Color32::from_rgb(105, 201, 143), "●");
         ui.add(egui::Label::new(RichText::new(text).small()).wrap());
     });
+}
+
+fn release_checklist(
+    workspace: Option<&Workspace>,
+    profiles: &[ProjectProfile],
+    git_summary: &str,
+    project_runs: &[ProjectRunRecord],
+    diagnostics: &EnvironmentDiagnostics,
+    package_script_present: bool,
+    artifacts_present: bool,
+) -> Vec<ReleaseChecklistItem> {
+    let toolchain_ok = diagnostics
+        .tools
+        .iter()
+        .filter(|item| matches!(item.name.as_str(), "cargo" | "rustup" | "git"))
+        .all(|item| item.status == "ok");
+    let release_policy_ok = diagnostics
+        .release_notes
+        .iter()
+        .all(|item| item.status == "ok");
+    let check_run = latest_project_run_for_ids(project_runs, &["check", "typecheck", "lint"]);
+    let test_run = latest_project_run_for_ids(project_runs, &["test"]);
+    let release_run = latest_project_run_for_ids(project_runs, &["release", "build"]);
+    let package_run = latest_project_run_for_ids(project_runs, &["package"]);
+    let has_release_command = find_command_by_ids(profiles, &["release", "build"]).is_some();
+    let has_test_command = find_command_by_ids(profiles, &["test"]).is_some();
+    let has_check_command =
+        find_command_by_ids(profiles, &["check", "typecheck", "lint"]).is_some();
+
+    vec![
+        ReleaseChecklistItem {
+            title: "Проект выбран".to_string(),
+            detail: workspace
+                .map(|workspace| workspace.root().display().to_string())
+                .unwrap_or_else(|| "рабочая папка не выбрана".to_string()),
+            ok: workspace.is_some(),
+        },
+        ReleaseChecklistItem {
+            title: "Профиль проекта".to_string(),
+            detail: if profiles.is_empty() {
+                "профили не распознаны".to_string()
+            } else {
+                profiles
+                    .iter()
+                    .map(|profile| format!("{} {}", profile.kind, profile.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+            ok: !profiles.is_empty(),
+        },
+        ReleaseChecklistItem {
+            title: "Git чистый".to_string(),
+            detail: if git_summary_clean(git_summary) {
+                "нет незакоммиченных изменений".to_string()
+            } else if git_summary.trim().is_empty() {
+                "git status пока не загружен".to_string()
+            } else {
+                compact_inline(git_summary, 180)
+            },
+            ok: git_summary_clean(git_summary),
+        },
+        ReleaseChecklistItem {
+            title: "Toolchain доступен".to_string(),
+            detail: diagnostics
+                .tools
+                .iter()
+                .map(|item| format!("{}: {}", item.name, item.status))
+                .collect::<Vec<_>>()
+                .join(", "),
+            ok: toolchain_ok,
+        },
+        ReleaseChecklistItem {
+            title: "Проверка пройдена".to_string(),
+            detail: release_run_detail(check_run, has_check_command, "check/typecheck/lint"),
+            ok: latest_run_passed(check_run),
+        },
+        ReleaseChecklistItem {
+            title: "Тесты пройдены".to_string(),
+            detail: release_run_detail(test_run, has_test_command, "test"),
+            ok: latest_run_passed(test_run),
+        },
+        ReleaseChecklistItem {
+            title: "Release build".to_string(),
+            detail: release_run_detail(release_run, has_release_command, "release/build"),
+            ok: latest_run_passed(release_run),
+        },
+        ReleaseChecklistItem {
+            title: "Packaging".to_string(),
+            detail: if package_script_present {
+                release_run_detail(package_run, true, "package")
+            } else {
+                "scripts/package-windows.ps1 не найден".to_string()
+            },
+            ok: package_script_present && latest_run_passed(package_run),
+        },
+        ReleaseChecklistItem {
+            title: "Артефакты найдены".to_string(),
+            detail: if artifacts_present {
+                "dist/target содержат release-файлы".to_string()
+            } else {
+                "zip, sha256 или release exe пока не найдены".to_string()
+            },
+            ok: artifacts_present,
+        },
+        ReleaseChecklistItem {
+            title: "Runtime policy".to_string(),
+            detail: diagnostics
+                .release_notes
+                .iter()
+                .map(|item| format!("{}: {}", item.name, item.status))
+                .collect::<Vec<_>>()
+                .join(", "),
+            ok: release_policy_ok,
+        },
+    ]
+}
+
+fn release_check_row(ui: &mut egui::Ui, item: &ReleaseChecklistItem) {
+    let color = if item.ok {
+        egui::Color32::from_rgb(105, 201, 143)
+    } else {
+        egui::Color32::from_rgb(216, 178, 95)
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(color, if item.ok { "●" } else { "○" });
+        ui.vertical(|ui| {
+            ui.label(RichText::new(&item.title).strong().small());
+            ui.add(
+                egui::Label::new(RichText::new(&item.detail).weak().small())
+                    .wrap()
+                    .halign(egui::Align::Min),
+            );
+        });
+    });
+    ui.add_space(5.0);
+}
+
+fn release_artifact_row(ui: &mut egui::Ui, artifact: &ReleaseArtifact) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&artifact.label).strong().small());
+        chip(ui, file_size_label(artifact.size_bytes));
+        if let Some(modified_at) = artifact.modified_at {
+            chip(ui, age_label(modified_at));
+        }
+    });
+    full_width_wrapped_label(
+        ui,
+        RichText::new(&artifact.path)
+            .text_style(egui::TextStyle::Monospace)
+            .weak()
+            .small(),
+    );
+    ui.add_space(5.0);
+}
+
+fn release_diagnostic_row(ui: &mut egui::Ui, item: &DiagnosticItem) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(&item.name).monospace().small());
+        chip(ui, &item.status);
+        ui.add(egui::Label::new(RichText::new(&item.detail).weak().small()).wrap());
+    });
+}
+
+fn release_artifacts(root: &Path) -> Vec<ReleaseArtifact> {
+    let candidates = [
+        (
+            "portable zip",
+            root.join("dist").join("leetcode-portable.zip"),
+        ),
+        (
+            "sha256",
+            root.join("dist").join("leetcode-portable.sha256.txt"),
+        ),
+        (
+            "portable exe",
+            root.join("dist")
+                .join("leetcode-portable")
+                .join("leetcode.exe"),
+        ),
+        (
+            "release exe",
+            root.join("target").join("release").join("leetcode.exe"),
+        ),
+    ];
+    let mut artifacts = Vec::new();
+    for (label, path) in candidates {
+        if let Some(artifact) = release_artifact_from_path(root, label, path) {
+            artifacts.push(artifact);
+        }
+    }
+    artifacts.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    artifacts
+}
+
+fn release_artifact_from_path(
+    root: &Path,
+    label: impl Into<String>,
+    path: PathBuf,
+) -> Option<ReleaseArtifact> {
+    let metadata = fs::metadata(&path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
+    Some(ReleaseArtifact {
+        label: label.into(),
+        path: path
+            .strip_prefix(root)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|_| path.display().to_string()),
+        size_bytes: metadata.len(),
+        modified_at,
+    })
+}
+
+fn release_version_label(root: &Path) -> Option<String> {
+    if let Some((name, version)) = cargo_package_name_version(root) {
+        return Some(format!("{name} v{version}"));
+    }
+    if let Some((name, version)) = package_json_name_version(root) {
+        return Some(format!("{name} v{version}"));
+    }
+    None
+}
+
+fn cargo_package_name_version(root: &Path) -> Option<(String, String)> {
+    let toml = fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    let mut name = None;
+    let mut version = None;
+    for raw_line in toml.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let value = value.trim().trim_matches('"').to_string();
+            match key.trim() {
+                "name" => name = Some(value),
+                "version" => version = Some(value),
+                _ => {}
+            }
+        }
+    }
+    Some((name?, version?))
+}
+
+fn package_json_name_version(root: &Path) -> Option<(String, String)> {
+    let package = fs::read_to_string(root.join("package.json")).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&package).ok()?;
+    let name = value.get("name")?.as_str()?.to_string();
+    let version = value.get("version")?.as_str()?.to_string();
+    Some((name, version))
+}
+
+fn find_command_by_ids(profiles: &[ProjectProfile], ids: &[&str]) -> Option<ProjectCommand> {
+    ids.iter().find_map(|wanted| {
+        profiles
+            .iter()
+            .flat_map(|profile| profile.commands.iter())
+            .find(|command| command.id == *wanted)
+            .cloned()
+    })
+}
+
+fn latest_project_run_for_ids<'a>(
+    runs: &'a [ProjectRunRecord],
+    ids: &[&str],
+) -> Option<&'a ProjectRunRecord> {
+    runs.iter()
+        .rev()
+        .find(|run| ids.iter().any(|id| run.command.id == *id))
+}
+
+fn latest_run_passed(run: Option<&ProjectRunRecord>) -> bool {
+    run.map(|run| run.status == ProjectRunStatus::Passed)
+        .unwrap_or(false)
+}
+
+fn release_run_detail(
+    run: Option<&ProjectRunRecord>,
+    command_present: bool,
+    command_name: &str,
+) -> String {
+    match run {
+        Some(run) => format!(
+            "{} · {}{}",
+            run.label,
+            run.status.label(),
+            run.exit_code
+                .map(|code| format!(" · exit {code}"))
+                .unwrap_or_default()
+        ),
+        None if command_present => format!("команда {command_name} готова, но ещё не запускалась"),
+        None => format!("команда {command_name} не найдена"),
+    }
+}
+
+fn release_command_kind(command_id: &str) -> Option<&'static str> {
+    match command_id {
+        "check" | "typecheck" | "lint" => Some("preflight"),
+        "test" => Some("test"),
+        "build" => Some("build"),
+        "release" => Some("release"),
+        "package" => Some("package"),
+        _ => None,
+    }
+}
+
+fn git_summary_clean(summary: &str) -> bool {
+    summary.contains("status: чисто") && summary.contains("diff: нет незакоммиченных изменений")
+}
+
+fn file_size_label(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    if bytes as f64 >= MB {
+        format!("{:.1} MB", bytes as f64 / MB)
+    } else if bytes as f64 >= KB {
+        format!("{:.1} KB", bytes as f64 / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn age_label(timestamp: u64) -> String {
+    let now = current_unix_timestamp();
+    let elapsed = Duration::from_secs(now.saturating_sub(timestamp));
+    format!("{} назад", format_duration(elapsed))
 }
 
 fn roadmap_entry_visible(filter: RoadmapFilter, state: RoadmapEntryState) -> bool {

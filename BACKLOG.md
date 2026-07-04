@@ -152,6 +152,8 @@ Leetcode развивается из минимального локальног
 - Done: Document current crash/log folder policy.
 - Done: Add signed portable archive path with zip output, SHA256 manifest, and optional SignTool support.
 - Done: Add optional crash report folder and panic hook.
+- Done: Add Release Cockpit in the right workspace panel with version summary, preflight checklist, release/package commands, artifact discovery, and publication diagnostics.
+- Done: Expose the Windows package script as a detected project command when `scripts/package-windows.ps1` is present.
 
 ## Этап 18 - Управляемая автономность и таймлайн запуска
 

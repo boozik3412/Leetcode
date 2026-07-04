@@ -203,6 +203,8 @@ The package script also creates `dist/leetcode-portable.zip` and `dist/leetcode-
 
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 
+Inside the app, open `Проект -> Релиз` to use the Release Cockpit. It shows the current version, release readiness, preflight checklist, recent check/test/build/package runs, local artifacts, and environment diagnostics. Its action buttons reuse project commands, so release runs are recorded in the same command history as normal development checks.
+
 Before packaging, open `Контроль -> Диагностика` inside the app. It reports the executable path, config path, journal path, selected workspace data path, proxy state, and local toolchain availability without exposing API keys. The agent can request the same read-only report with `environment_snapshot`.
 
 ## Notes

@@ -248,6 +248,14 @@ fn detect_rust_profile(root: &Path) -> ProjectProfile {
             "Собрать release-бинарник",
         ),
     ];
+    if root.join("scripts").join("package-windows.ps1").is_file() {
+        commands.push(ProjectCommand::new(
+            "package",
+            "Упаковка",
+            "powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1",
+            "Собрать portable-пакет, архив и SHA256-манифест",
+        ));
+    }
     if root.join("Trunk.toml").is_file() || root.join("index.html").is_file() {
         commands.push(ProjectCommand::new(
             "serve",
@@ -624,6 +632,28 @@ mod tests {
         assert_eq!(profiles[0].kind, "Rust");
         assert_eq!(profiles[0].name, "demo-game");
         assert!(find_project_command(&profiles, "check", None).is_some());
+    }
+
+    #[test]
+    fn detects_rust_package_script() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"demo-game\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("scripts")).unwrap();
+        fs::write(
+            temp.path().join("scripts/package-windows.ps1"),
+            "Write-Host package",
+        )
+        .unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+
+        let profiles = detect_project_profiles(&workspace);
+
+        let package = find_project_command(&profiles, "package", Some("rust")).unwrap();
+        assert!(package.command.contains("package-windows.ps1"));
     }
 
     #[test]
