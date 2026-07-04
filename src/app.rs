@@ -124,6 +124,7 @@ pub struct LeetcodeApp {
     context_note_suggestions: Vec<String>,
     context_profile_preview: Option<ContextProfilePreview>,
     context_health_status: String,
+    context_panel_tab: ContextPanelTab,
     tool_log: Vec<ToolLogLine>,
     journal_lines: Vec<String>,
     journal_status: String,
@@ -230,6 +231,58 @@ struct PendingRunGate {
 struct ContextProfilePreview {
     path: PathBuf,
     profile: ContextProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContextPanelTab {
+    Overview,
+    Memory,
+    Prompt,
+    Profiles,
+}
+
+impl ContextPanelTab {
+    const ALL: [ContextPanelTab; 4] = [
+        ContextPanelTab::Overview,
+        ContextPanelTab::Memory,
+        ContextPanelTab::Prompt,
+        ContextPanelTab::Profiles,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            ContextPanelTab::Overview => "Обзор",
+            ContextPanelTab::Memory => "Память",
+            ContextPanelTab::Prompt => "Prompt",
+            ContextPanelTab::Profiles => "Профили",
+        }
+    }
+
+    fn subtitle(self) -> &'static str {
+        match self {
+            ContextPanelTab::Overview => "что попадёт в следующий запуск и где есть риск шума",
+            ContextPanelTab::Memory => "закреплённые факты и источники проекта",
+            ContextPanelTab::Prompt => "бюджет, retrieval и технический предпросмотр",
+            ContextPanelTab::Profiles => "экспорт, импорт и перенос контекста между чатами",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            ContextPanelTab::Overview => {
+                "Краткая сводка контекста: здоровье, объём prompt, активный чат и быстрые закрепления."
+            }
+            ContextPanelTab::Memory => {
+                "Постоянные заметки и источники проекта, которые агент может учитывать в следующих задачах."
+            }
+            ContextPanelTab::Prompt => {
+                "Управление тем, сколько сообщений, найденного контекста и прошлых запусков попадёт в следующий запрос модели."
+            }
+            ContextPanelTab::Profiles => {
+                "Экспорт и импорт набора контекста, чтобы переносить память между чатами или проектами."
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -587,6 +640,32 @@ impl RightPanelView {
             RightPanelView::Logs => "Логи",
         }
     }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            RightPanelView::Overview => {
+                "Общая сводка состояния агента, проекта и быстрых переходов."
+            }
+            RightPanelView::Context => {
+                "Контекст, память и prompt, которые агент использует при следующем запуске."
+            }
+            RightPanelView::Roadmap => {
+                "Живая дорожная карта проекта: что сделано, что в работе и что запланировано."
+            }
+            RightPanelView::Project => {
+                "Команды проекта, терминал, preview, рабочий стол и диагностика запусков."
+            }
+            RightPanelView::Assets => {
+                "Генерация и библиотека ассетов: изображения, варианты, импорт и экспорт."
+            }
+            RightPanelView::Control => {
+                "Разрешения, провайдеры, проверки, память, окружение и безопасное самоизменение."
+            }
+            RightPanelView::Logs => {
+                "Журнал действий агента: инструменты, git, ошибки, трассировка и история запусков."
+            }
+        }
+    }
 }
 
 impl WorkspaceMode {
@@ -797,6 +876,7 @@ impl LeetcodeApp {
             context_note_suggestions: Vec::new(),
             context_profile_preview: None,
             context_health_status: String::new(),
+            context_panel_tab: ContextPanelTab::Overview,
             tool_log: Vec::new(),
             journal_lines,
             journal_status: String::new(),
@@ -6669,8 +6749,8 @@ impl LeetcodeApp {
 
         panel_header(
             ui,
-            "Центр контекста",
-            "Единое место для чатов, заметок, памяти проекта, профилей, бюджета и истории запусков.",
+            "Контекст агента",
+            "Разделённый центр: обзор, память проекта, prompt и переносимые профили.",
         );
 
         let memory = load_memory(&workspace);
@@ -6697,7 +6777,6 @@ impl LeetcodeApp {
             .count();
         let missing_goals = memory.goals.is_empty();
         let stale_summary = snapshot.rolling_summary.trim().is_empty() && self.chat.len() > 20;
-
         let health_score = context_health_score(
             prompt_chars,
             duplicate_notes,
@@ -6705,421 +6784,607 @@ impl LeetcodeApp {
             stale_summary,
             oversized_sources,
         );
-        context_overview_visual(
-            ui,
-            health_score,
-            prompt_chars,
-            self.chat.len(),
-            self.context_notes.len(),
-            memory.sources.len(),
-            self.agent_history.len(),
-            profiles.len(),
-            snapshot.recent_messages.len(),
-            snapshot.relevant_messages.len(),
-            snapshot.recent_runs.len(),
-        );
-        context_health_strip(
-            ui,
-            duplicate_notes,
-            missing_goals,
-            stale_summary,
-            oversized_sources,
-        );
-        if !self.context_health_status.trim().is_empty() {
-            full_width_wrapped_label(
-                ui,
-                RichText::new(&self.context_health_status).weak().small(),
-            );
-        }
 
+        context_panel_switcher(ui, &mut self.context_panel_tab);
         ui.add_space(8.0);
-        egui::CollapsingHeader::new("Чаты и активный диалог")
-            .default_open(false)
-            .show(ui, |ui| {
-                let active_id = self.active_conversation_id.clone();
-                let mut switch_to: Option<String> = None;
-                let mut pin_toggle: Option<String> = None;
-                for meta in self
-                    .conversation_index
-                    .conversations
-                    .iter()
-                    .filter(|meta| !meta.archived)
-                    .take(8)
-                {
-                    ui.horizontal_wrapped(|ui| {
-                        let active = active_id.as_deref() == Some(meta.id.as_str());
-                        if ui
-                            .selectable_label(active, compact_inline(&meta.title, 34))
-                            .clicked()
-                        {
-                            switch_to = Some(meta.id.clone());
-                        }
-                        status_line(ui, "сообщений", &meta.message_count.to_string());
-                        if meta.pinned {
-                            chip(ui, "закреплён");
-                        }
-                        if ui
-                            .small_button(if meta.pinned {
-                                "Открепить"
-                            } else {
-                                "Закрепить"
-                            })
-                            .clicked()
-                        {
-                            pin_toggle = Some(meta.id.clone());
-                        }
-                    });
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Новый чат").clicked() {
-                        self.create_new_chat();
-                    }
-                    if ui.button("Переименовать").clicked() {
-                        self.begin_rename_active_conversation();
-                    }
-                    if ui.button("Экспорт профиля").clicked() {
-                        self.export_active_context_profile();
-                    }
-                });
-                if let Some(id) = switch_to {
-                    self.switch_conversation(id);
-                }
-                if let Some(id) = pin_toggle {
-                    self.toggle_conversation_pin_by_id(id);
-                }
-            });
 
-        egui::CollapsingHeader::new("Бюджет контекста")
-            .default_open(true)
-            .show(ui, |ui| {
-                let mut budget_changed = false;
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Короткий").clicked() {
-                        self.apply_context_preset("короткий", 8, 4, 2);
-                    }
-                    if ui.button("Баланс").clicked() {
-                        self.apply_context_preset("баланс", 14, 8, 5);
-                    }
-                    if ui.button("Глубокий").clicked() {
-                        self.apply_context_preset("глубокий", 32, 16, 10);
+        match self.context_panel_tab {
+            ContextPanelTab::Overview => {
+                flat_section(ui, |ui| {
+                    context_overview_visual(
+                        ui,
+                        health_score,
+                        prompt_chars,
+                        self.chat.len(),
+                        self.context_notes.len(),
+                        memory.sources.len(),
+                        self.agent_history.len(),
+                        profiles.len(),
+                        snapshot.recent_messages.len(),
+                        snapshot.relevant_messages.len(),
+                        snapshot.recent_runs.len(),
+                    );
+                    context_health_strip(
+                        ui,
+                        duplicate_notes,
+                        missing_goals,
+                        stale_summary,
+                        oversized_sources,
+                    );
+                    if !self.context_health_status.trim().is_empty() {
+                        full_width_wrapped_label(
+                            ui,
+                            RichText::new(&self.context_health_status).weak().small(),
+                        );
                     }
                 });
-                budget_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.config.context_recent_messages, 0..=80)
-                            .text("последние сообщения"),
-                    )
-                    .changed();
-                budget_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.config.context_relevant_messages, 0..=40)
-                            .text("релевантные"),
-                    )
-                    .changed();
-                budget_changed |= ui
-                    .add(
-                        egui::Slider::new(&mut self.config.context_recent_runs, 0..=20)
-                            .text("запуски"),
-                    )
-                    .changed();
-                if budget_changed {
-                    let _ = self.config.save();
-                }
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Запрос").weak().small());
+
+                flat_section(ui, |ui| {
+                    ui.label(RichText::new("Активный диалог").strong())
+                        .on_hover_text(
+                            "Управление текущим чатом проекта: переключение, закрепление, переименование и экспорт профиля.",
+                        );
                     ui.add(
-                        TextEdit::singleline(&mut self.context_inspector_query)
-                            .desired_width(safe_available_width(ui, 220.0))
-                            .hint_text("пусто = поле ввода"),
+                        egui::Label::new(
+                            RichText::new(
+                                "Чаты и быстрые действия вынесены отдельно от prompt-бюджета.",
+                            )
+                            .weak()
+                            .small(),
+                        )
+                        .wrap(),
                     );
-                });
-                ui.horizontal_wrapped(|ui| {
-                    status_line(
-                        ui,
-                        "summary",
-                        &snapshot.rolling_summary.chars().count().to_string(),
-                    );
-                    status_line(ui, "последние", &snapshot.recent_messages.len().to_string());
-                    status_line(
-                        ui,
-                        "релевантные",
-                        &snapshot.relevant_messages.len().to_string(),
-                    );
-                    status_line(ui, "runs", &snapshot.recent_runs.len().to_string());
-                });
-                context_signal_row(
-                    ui,
-                    "последние сообщения",
-                    snapshot.recent_messages.len(),
-                    self.config.context_recent_messages.max(1),
-                    egui::Color32::from_rgb(96, 191, 143),
-                );
-                context_signal_row(
-                    ui,
-                    "релевантные",
-                    snapshot.relevant_messages.len(),
-                    self.config.context_relevant_messages.max(1),
-                    accent_color(),
-                );
-                context_signal_row(
-                    ui,
-                    "запуски",
-                    snapshot.recent_runs.len(),
-                    self.config.context_recent_runs.max(1),
-                    egui::Color32::from_rgb(220, 174, 92),
-                );
-                egui::CollapsingHeader::new("Технический prompt preview")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        let mut prompt_preview = prompt_block;
-                        ui.add(
-                            TextEdit::multiline(&mut prompt_preview)
-                                .font(egui::TextStyle::Monospace)
-                                .desired_width(safe_available_width(ui, 320.0))
-                                .desired_rows(10)
-                                .interactive(false),
+
+                    let active_id = self.active_conversation_id.clone();
+                    let mut switch_to: Option<String> = None;
+                    let mut pin_toggle: Option<String> = None;
+                    for meta in self
+                        .conversation_index
+                        .conversations
+                        .iter()
+                        .filter(|meta| !meta.archived)
+                        .take(5)
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            let active = active_id.as_deref() == Some(meta.id.as_str());
+                            let chat_response =
+                                ui.selectable_label(active, compact_inline(&meta.title, 34));
+                            if chat_response.clicked() {
+                                switch_to = Some(meta.id.clone());
+                            }
+                            chat_response.on_hover_text(
+                                "Переключает активный диалог. Именно его сообщения и заметки попадут в контекст агента.",
+                            );
+                            status_line(ui, "сообщений", &meta.message_count.to_string());
+                            if meta.pinned {
+                                chip(ui, "закреплён");
+                            }
+                            let pin_response = ui.small_button(if meta.pinned {
+                                    "Открепить"
+                                } else {
+                                    "Закрепить"
+                            });
+                            if pin_response.clicked() {
+                                pin_toggle = Some(meta.id.clone());
+                            }
+                            pin_response.on_hover_text(if meta.pinned {
+                                "Убрать чат из закреплённых. Сам чат не удаляется."
+                            } else {
+                                "Закрепить чат, чтобы он был проще доступен в списке и профилях контекста."
+                            });
+                        });
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        let new_chat_response = ui.button("Новый чат");
+                        if new_chat_response.clicked() {
+                            self.create_new_chat();
+                        }
+                        new_chat_response.on_hover_text(
+                            "Создаёт новый пустой диалог внутри текущего проекта.",
+                        );
+                        let rename_response = ui.button("Переименовать");
+                        if rename_response.clicked() {
+                            self.begin_rename_active_conversation();
+                        }
+                        rename_response.on_hover_text("Переименовать активный чат.");
+                        let export_response = ui.button("Экспорт профиля");
+                        if export_response.clicked() {
+                            self.export_active_context_profile();
+                        }
+                        export_response.on_hover_text(
+                            "Сохранить текущий контекст чата в профиль: заметки, бюджет и выбранные настройки.",
                         );
                     });
-            });
-
-        egui::CollapsingHeader::new("Закреплённые заметки")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let response = ui.add(
-                        TextEdit::singleline(&mut self.context_note_input)
-                            .desired_width(safe_available_width(ui, 220.0))
-                            .hint_text("важный факт для этого чата"),
-                    );
-                    let enter_pressed = response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if ui.button("Добавить").clicked() || enter_pressed {
-                        self.add_context_note_from_input();
+                    if let Some(id) = switch_to {
+                        self.switch_conversation(id);
+                    }
+                    if let Some(id) = pin_toggle {
+                        self.toggle_conversation_pin_by_id(id);
                     }
                 });
-                let notes = self.context_notes.clone();
-                let mut remove_index = None;
-                for (index, note) in notes.iter().enumerate() {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("•").weak());
-                        full_width_wrapped_label(ui, RichText::new(note).small());
-                        if ui.small_button("Убрать").clicked() {
-                            remove_index = Some(index);
-                        }
-                    });
-                }
-                if let Some(index) = remove_index {
-                    self.remove_context_note(index);
-                }
-                if self.context_notes.is_empty() {
-                    empty_state(
-                        ui,
-                        "Заметок нет",
-                        "Закрепите цель, ограничение или архитектурное решение, чтобы агент видел это в каждом следующем запросе.",
-                    );
-                }
-            });
 
-        egui::CollapsingHeader::new("Источники памяти проекта")
-            .default_open(false)
-            .show(ui, |ui| {
-                let mut pin_note: Option<String> = None;
-                for source in memory.sources.iter().rev().take(10) {
-                    ui.horizontal_wrapped(|ui| {
-                        chip(ui, &source.kind);
-                        ui.label(RichText::new(&source.title).strong());
-                        if ui.small_button("В заметки").clicked() {
-                            let body = if source.summary.trim().is_empty() {
-                                compact_inline(&source.content, 320)
-                            } else {
-                                compact_inline(&source.summary, 320)
-                            };
-                            pin_note = Some(format!("{}: {}", source.title, body));
-                        }
-                    });
-                    full_width_wrapped_label(
-                        ui,
-                        RichText::new(if source.summary.trim().is_empty() {
-                            compact_inline(&source.content, 220)
-                        } else {
-                            compact_inline(&source.summary, 220)
+                flat_section(ui, |ui| {
+                    ui.label(RichText::new("Быстро закрепить").strong())
+                        .on_hover_text(
+                            "Быстро превращает важную строку из истории, roadmap или run log в заметку для следующих запусков агента.",
+                        );
+                    ui.add(egui::Label::new(
+                        RichText::new("Добавьте важное из чата, roadmap или последнего запуска в память текущего диалога.")
+                            .weak()
+                            .small(),
+                    )
+                    .wrap());
+                    let mut pin_note: Option<String> = None;
+
+                    ui.label(RichText::new("Последние сообщения").small().strong());
+                    for line in self
+                        .chat
+                        .iter()
+                        .rev()
+                        .filter(|line| !line.content.trim().is_empty())
+                        .take(3)
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            chip(ui, chat_role_label(&line.role));
+                            ui.label(RichText::new(compact_inline(&line.content, 120)).small());
+                            let memory_response = ui.small_button("В память");
+                            if memory_response.clicked() {
+                                pin_note = Some(format!(
+                                    "{}: {}",
+                                    chat_role_label(&line.role),
+                                    compact_inline(&line.content, 360)
+                                ));
+                            }
+                            memory_response.on_hover_text(
+                                "Закрепить это сообщение как заметку текущего чата. Агент увидит её в следующих запросах.",
+                            );
+                        });
+                    }
+
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Roadmap").small().strong());
+                    let roadmap = load_roadmap(&workspace);
+                    for item in roadmap
+                        .items
+                        .iter()
+                        .filter(|item| {
+                            matches!(item.status, RoadmapStatus::Now | RoadmapStatus::Next)
                         })
-                        .weak()
-                        .small(),
-                    );
-                }
-                if memory.sources.is_empty() {
-                    empty_state(
-                        ui,
-                        "Источников нет",
-                        "Импортируйте файлы или сохраните заметку в памяти проекта.",
-                    );
-                }
-                if let Some(note) = pin_note {
-                    self.pin_context_note(note);
-                }
-            });
-
-        egui::CollapsingHeader::new("Профили контекста")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Экспорт текущего").clicked() {
-                        self.export_active_context_profile();
+                        .take(3)
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            chip(ui, item.status.as_str());
+                            ui.label(RichText::new(compact_inline(&item.title, 120)).small());
+                            let memory_response = ui.small_button("В память");
+                            if memory_response.clicked() {
+                                pin_note = Some(format!(
+                                    "Roadmap {}: {} - {}",
+                                    item.id,
+                                    item.title,
+                                    compact_inline(&item.detail, 260)
+                                ));
+                            }
+                            memory_response.on_hover_text(
+                                "Закрепить выбранный пункт roadmap как рабочий контекст для агента.",
+                            );
+                        });
                     }
-                    if ui.button("Предпросмотр файла").clicked() {
-                        self.pick_context_profile_for_preview();
+
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Последние запуски").small().strong());
+                    for record in self.agent_history.iter().rev().take(3) {
+                        ui.horizontal_wrapped(|ui| {
+                            chip(ui, agent_history_status_label(&record.status));
+                            ui.label(
+                                RichText::new(compact_inline(&record.user_request, 120)).small(),
+                            );
+                            let memory_response = ui.small_button("В память");
+                            if memory_response.clicked() {
+                                pin_note = Some(format!(
+                                    "Run {}: {}",
+                                    record.id,
+                                    compact_inline(
+                                        record
+                                            .final_report
+                                            .as_deref()
+                                            .or(record.final_response.as_deref())
+                                            .unwrap_or(&record.user_request),
+                                        360
+                                    )
+                                ));
+                            }
+                            memory_response.on_hover_text(
+                                "Закрепить итог прошлого запуска, чтобы агент учитывал его в следующих задачах.",
+                            );
+                        });
+                    }
+                    if let Some(note) = pin_note {
+                        self.pin_context_note(note);
                     }
                 });
-                if let Some(preview) = self.context_profile_preview.clone() {
-                    ui.separator();
-                    ui.label(RichText::new("Предпросмотр импорта").strong());
-                    full_width_wrapped_label(
-                        ui,
-                        RichText::new(format!(
-                            "{} · {} · {} заметок",
-                            preview.profile.title,
-                            agent_history_date_label(preview.profile.exported_at),
-                            preview.profile.context_notes.len()
-                        ))
-                        .weak()
-                        .small(),
+            }
+            ContextPanelTab::Memory => {
+                flat_section(ui, |ui| {
+                    ui.label(RichText::new("Закреплённые заметки").strong())
+                        .on_hover_text(
+                            "Ручная память текущего чата. Эти записи добавляются в контекст агента при следующих запросах.",
+                        );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Короткие факты, которые агент должен помнить в этом чате.",
+                            )
+                            .weak()
+                            .small(),
+                        )
+                        .wrap(),
                     );
-                    let new_notes =
-                        context_profile_new_notes(&preview.profile.context_notes, &self.context_notes);
-                    let duplicate_count =
-                        preview.profile.context_notes.len().saturating_sub(new_notes.len());
+                    ui.horizontal(|ui| {
+                        let response = ui.add(
+                            TextEdit::singleline(&mut self.context_note_input)
+                                .desired_width(safe_available_width(ui, 220.0))
+                                .hint_text("важный факт для этого чата"),
+                        );
+                        let enter_pressed = response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                        response.on_hover_text(
+                            "Короткая заметка для текущего чата: цель, ограничение, решение или важный факт.",
+                        );
+                        let add_response = ui.button("Добавить");
+                        if add_response.clicked() || enter_pressed {
+                            self.add_context_note_from_input();
+                        }
+                        add_response.on_hover_text(
+                            "Закрепить введённый факт в памяти текущего диалога.",
+                        );
+                    });
+                    let notes = self.context_notes.clone();
+                    let mut remove_index = None;
+                    for (index, note) in notes.iter().enumerate() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new("•").weak());
+                            full_width_wrapped_label(ui, RichText::new(note).small());
+                            let remove_response = ui.small_button("Убрать");
+                            if remove_response.clicked() {
+                                remove_index = Some(index);
+                            }
+                            remove_response
+                                .on_hover_text("Удалить эту заметку из контекста текущего чата.");
+                        });
+                    }
+                    if let Some(index) = remove_index {
+                        self.remove_context_note(index);
+                    }
+                    if self.context_notes.is_empty() {
+                        empty_state(
+                            ui,
+                            "Заметок нет",
+                            "Закрепите цель, ограничение или архитектурное решение, чтобы агент видел это в следующих запросах.",
+                        );
+                    }
+                });
+
+                flat_section(ui, |ui| {
+                    ui.label(RichText::new("Источники проекта").strong())
+                        .on_hover_text(
+                            "Долговременная память проекта: импортированные документы, заметки и материалы, которые агент может использовать как контекст.",
+                        );
+                    ui.add(egui::Label::new(
+                        RichText::new("Документы и сохранённая память, из которых агент может брать контекст.")
+                            .weak()
+                            .small(),
+                    )
+                    .wrap());
+                    let mut pin_note: Option<String> = None;
+                    for source in memory.sources.iter().rev().take(10) {
+                        ui.horizontal_wrapped(|ui| {
+                            chip(ui, &source.kind);
+                            ui.label(RichText::new(&source.title).strong());
+                            let note_response = ui.small_button("В заметки");
+                            if note_response.clicked() {
+                                let body = if source.summary.trim().is_empty() {
+                                    compact_inline(&source.content, 320)
+                                } else {
+                                    compact_inline(&source.summary, 320)
+                                };
+                                pin_note = Some(format!("{}: {}", source.title, body));
+                            }
+                            note_response.on_hover_text(
+                                "Скопировать краткое содержание источника в закреплённые заметки чата.",
+                            );
+                        });
+                        full_width_wrapped_label(
+                            ui,
+                            RichText::new(if source.summary.trim().is_empty() {
+                                compact_inline(&source.content, 220)
+                            } else {
+                                compact_inline(&source.summary, 220)
+                            })
+                            .weak()
+                            .small(),
+                        );
+                        ui.add_space(4.0);
+                    }
+                    if memory.sources.is_empty() {
+                        empty_state(
+                            ui,
+                            "Источников нет",
+                            "Импортируйте файлы или сохраните заметку в памяти проекта.",
+                        );
+                    }
+                    if let Some(note) = pin_note {
+                        self.pin_context_note(note);
+                    }
+                });
+            }
+            ContextPanelTab::Prompt => {
+                flat_section(ui, |ui| {
+                    ui.label(RichText::new("Бюджет prompt").strong())
+                        .on_hover_text(
+                            "Настройки объёма контекста. Чем больше значения, тем больше агент помнит, но тем выше стоимость и риск лишнего шума.",
+                        );
+                    ui.add(egui::Label::new(
+                        RichText::new("Настройте, сколько свежей переписки, retrieval и запусков попадёт в следующий запрос.")
+                            .weak()
+                            .small(),
+                    )
+                    .wrap());
+                    let mut budget_changed = false;
                     ui.horizontal_wrapped(|ui| {
-                        status_line(ui, "новых", &new_notes.len().to_string());
-                        status_line(ui, "дубликатов", &duplicate_count.to_string());
+                        let short_response = ui.button("Короткий");
+                        if short_response.clicked() {
+                            self.apply_context_preset("короткий", 8, 4, 2);
+                        }
+                        short_response.on_hover_text(
+                            "Минимальный контекст: дешевле и быстрее, но агент видит меньше истории.",
+                        );
+                        let balance_response = ui.button("Баланс");
+                        if balance_response.clicked() {
+                            self.apply_context_preset("баланс", 14, 8, 5);
+                        }
+                        balance_response.on_hover_text(
+                            "Средний режим: обычно хватает истории, retrieval и последних запусков без сильного шума.",
+                        );
+                        let deep_response = ui.button("Глубокий");
+                        if deep_response.clicked() {
+                            self.apply_context_preset("глубокий", 32, 16, 10);
+                        }
+                        deep_response.on_hover_text(
+                            "Больше контекста для сложных задач. Может быть дороже и иногда добавляет лишний шум.",
+                        );
+                    });
+                    budget_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.context_recent_messages, 0..=80)
+                                .text("последние сообщения"),
+                        )
+                        .on_hover_text(
+                            "Сколько последних сообщений текущего чата попадёт в следующий prompt.",
+                        )
+                        .changed();
+                    budget_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.context_relevant_messages, 0..=40)
+                                .text("релевантные"),
+                        )
+                        .on_hover_text(
+                            "Сколько старых сообщений будет найдено по смыслу текущего запроса и добавлено в prompt.",
+                        )
+                        .changed();
+                    budget_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.context_recent_runs, 0..=20)
+                                .text("запуски"),
+                        )
+                        .on_hover_text(
+                            "Сколько последних сохранённых запусков агента добавить как рабочую память.",
+                        )
+                        .changed();
+                    if budget_changed {
+                        let _ = self.config.save();
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Запрос").weak().small());
+                        ui.add(
+                            TextEdit::singleline(&mut self.context_inspector_query)
+                                .desired_width(safe_available_width(ui, 220.0))
+                                .hint_text("пусто = поле ввода"),
+                        )
+                        .on_hover_text(
+                            "Текст для предпросмотра retrieval. Если оставить пустым, используется текущий текст из нижнего поля ввода.",
+                        );
+                    });
+                });
+
+                flat_section(ui, |ui| {
+                    ui.label(RichText::new("Состав следующего prompt").strong())
+                        .on_hover_text(
+                            "Диагностика того, из каких источников будет собран следующий запрос к модели.",
+                        );
+                    ui.horizontal_wrapped(|ui| {
                         status_line(
                             ui,
-                            "бюджет",
-                            &context_profile_budget_diff(
-                                self.context_budget(),
-                                preview.profile.budget.bounded(),
-                            ),
+                            "summary",
+                            &snapshot.rolling_summary.chars().count().to_string(),
                         );
+                        status_line(ui, "последние", &snapshot.recent_messages.len().to_string());
+                        status_line(
+                            ui,
+                            "релевантные",
+                            &snapshot.relevant_messages.len().to_string(),
+                        );
+                        status_line(ui, "runs", &snapshot.recent_runs.len().to_string());
                     });
-                    for note in new_notes.iter().take(5) {
-                        full_width_wrapped_label(ui, RichText::new(format!("+ {note}")).small());
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        if ui.button("Применить профиль").clicked() {
-                            self.apply_context_profile_preview();
-                        }
-                        if ui.button("Закрыть preview").clicked() {
-                            self.context_profile_preview = None;
-                        }
-                    });
-                    ui.separator();
-                }
-                if profiles.is_empty() {
-                    empty_state(
+                    context_signal_row(
                         ui,
-                        "Экспортов пока нет",
-                        "Экспортируйте текущий профиль, чтобы переносить контекст между чатами и проектами.",
+                        "последние сообщения",
+                        snapshot.recent_messages.len(),
+                        self.config.context_recent_messages.max(1),
+                        egui::Color32::from_rgb(96, 191, 143),
                     );
-                }
-                for entry in profiles.iter().take(8) {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(compact_inline(&entry.profile.title, 32)).strong());
-                        ui.label(RichText::new(agent_history_date_label(entry.profile.exported_at)).weak().small());
-                        if ui.small_button("Preview").clicked() {
-                            self.context_profile_preview = Some(ContextProfilePreview {
-                                path: entry.abs_path.clone(),
-                                profile: entry.profile.clone(),
-                            });
-                        }
-                    });
-                    full_width_wrapped_label(
+                    context_signal_row(
                         ui,
-                        RichText::new(compact_inline(&entry.rel_path, 120)).weak().small(),
+                        "релевантные",
+                        snapshot.relevant_messages.len(),
+                        self.config.context_relevant_messages.max(1),
+                        accent_color(),
                     );
-                }
-            });
+                    context_signal_row(
+                        ui,
+                        "запуски",
+                        snapshot.recent_runs.len(),
+                        self.config.context_recent_runs.max(1),
+                        egui::Color32::from_rgb(220, 174, 92),
+                    );
+                });
 
-        egui::CollapsingHeader::new("Быстро закрепить из истории")
-            .default_open(false)
-            .show(ui, |ui| {
-                let mut pin_note: Option<String> = None;
-                ui.label(RichText::new("Последние сообщения").strong().small());
-                for line in self
-                    .chat
-                    .iter()
-                    .rev()
-                    .filter(|line| !line.content.trim().is_empty())
-                    .take(4)
-                {
+                flat_collapsing_section(ui, "Технический prompt preview", false, |ui| {
+                    let mut prompt_preview = prompt_block;
+                    ui.add(
+                        TextEdit::multiline(&mut prompt_preview)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(safe_available_width(ui, 320.0))
+                            .desired_rows(12)
+                            .interactive(false),
+                    );
+                });
+            }
+            ContextPanelTab::Profiles => {
+                flat_section(ui, |ui| {
+                    ui.label(RichText::new("Профили контекста").strong())
+                        .on_hover_text(
+                            "Снимки контекста можно экспортировать, проверить и затем применить в другом чате или проекте.",
+                        );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Снимки контекста для переноса между чатами и проектами.",
+                            )
+                            .weak()
+                            .small(),
+                        )
+                        .wrap(),
+                    );
                     ui.horizontal_wrapped(|ui| {
-                        chip(ui, chat_role_label(&line.role));
+                        let export_response = ui.button("Экспорт текущего");
+                        if export_response.clicked() {
+                            self.export_active_context_profile();
+                        }
+                        export_response.on_hover_text(
+                            "Сохранить текущий набор контекста в файл профиля: чат, заметки и настройки бюджета.",
+                        );
+                        let preview_response = ui.button("Предпросмотр файла");
+                        if preview_response.clicked() {
+                            self.pick_context_profile_for_preview();
+                        }
+                        preview_response.on_hover_text(
+                            "Выбрать файл профиля и посмотреть, что будет импортировано, без немедленного применения.",
+                        );
+                    });
+                });
+
+                if let Some(preview) = self.context_profile_preview.clone() {
+                    flat_section(ui, |ui| {
+                        ui.label(RichText::new("Предпросмотр импорта").strong())
+                            .on_hover_text(
+                                "Показывает, какие новые заметки и настройки будут добавлены при применении профиля.",
+                            );
                         full_width_wrapped_label(
                             ui,
-                            RichText::new(compact_inline(&line.content, 180)).small(),
+                            RichText::new(format!(
+                                "{} · {} · {} заметок",
+                                preview.profile.title,
+                                agent_history_date_label(preview.profile.exported_at),
+                                preview.profile.context_notes.len()
+                            ))
+                            .weak()
+                            .small(),
                         );
-                        if ui.small_button("В заметки").clicked() {
-                            pin_note = Some(format!(
-                                "{}: {}",
-                                chat_role_label(&line.role),
-                                compact_inline(&line.content, 360)
-                            ));
+                        let new_notes = context_profile_new_notes(
+                            &preview.profile.context_notes,
+                            &self.context_notes,
+                        );
+                        let duplicate_count = preview
+                            .profile
+                            .context_notes
+                            .len()
+                            .saturating_sub(new_notes.len());
+                        ui.horizontal_wrapped(|ui| {
+                            status_line(ui, "новых", &new_notes.len().to_string());
+                            status_line(ui, "дубликатов", &duplicate_count.to_string());
+                            status_line(
+                                ui,
+                                "бюджет",
+                                &context_profile_budget_diff(
+                                    self.context_budget(),
+                                    preview.profile.budget.bounded(),
+                                ),
+                            );
+                        });
+                        for note in new_notes.iter().take(5) {
+                            full_width_wrapped_label(
+                                ui,
+                                RichText::new(format!("+ {note}")).small(),
+                            );
                         }
+                        ui.horizontal_wrapped(|ui| {
+                            let apply_response = ui.button("Применить профиль");
+                            if apply_response.clicked() {
+                                self.apply_context_profile_preview();
+                            }
+                            apply_response.on_hover_text(
+                                "Добавить новые заметки и настройки выбранного профиля в текущий чат.",
+                            );
+                            let close_response = ui.button("Закрыть preview");
+                            if close_response.clicked() {
+                                self.context_profile_preview = None;
+                            }
+                            close_response.on_hover_text(
+                                "Закрыть предпросмотр. Профиль не будет применён.",
+                            );
+                        });
                     });
                 }
-                ui.separator();
-                ui.label(RichText::new("Roadmap").strong().small());
-                let roadmap = load_roadmap(&workspace);
-                for item in roadmap
-                    .items
-                    .iter()
-                    .filter(|item| matches!(item.status, RoadmapStatus::Now | RoadmapStatus::Next))
-                    .take(4)
-                {
-                    ui.horizontal_wrapped(|ui| {
-                        chip(ui, item.status.as_str());
+
+                flat_section(ui, |ui| {
+                    if profiles.is_empty() {
+                        empty_state(
+                            ui,
+                            "Экспортов пока нет",
+                            "Экспортируйте текущий профиль, чтобы переносить контекст между чатами и проектами.",
+                        );
+                    }
+                    for entry in profiles.iter().take(10) {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(compact_inline(&entry.profile.title, 32)).strong(),
+                            );
+                            ui.label(
+                                RichText::new(agent_history_date_label(entry.profile.exported_at))
+                                    .weak()
+                                    .small(),
+                            );
+                            let preview_response = ui.small_button("Предпросмотр");
+                            if preview_response.clicked() {
+                                self.context_profile_preview = Some(ContextProfilePreview {
+                                    path: entry.abs_path.clone(),
+                                    profile: entry.profile.clone(),
+                                });
+                            }
+                            preview_response.on_hover_text(
+                                "Открыть сравнение профиля с текущими заметками перед импортом.",
+                            );
+                        });
                         full_width_wrapped_label(
                             ui,
-                            RichText::new(compact_inline(&item.title, 160)).small(),
+                            RichText::new(compact_inline(&entry.rel_path, 120))
+                                .weak()
+                                .small(),
                         );
-                        if ui.small_button("В заметки").clicked() {
-                            pin_note = Some(format!(
-                                "Roadmap {}: {} - {}",
-                                item.id,
-                                item.title,
-                                compact_inline(&item.detail, 260)
-                            ));
-                        }
-                    });
-                }
-                ui.separator();
-                ui.label(RichText::new("История запусков").strong().small());
-                for record in self.agent_history.iter().rev().take(4) {
-                    ui.horizontal_wrapped(|ui| {
-                        chip(ui, agent_history_status_label(&record.status));
-                        full_width_wrapped_label(
-                            ui,
-                            RichText::new(compact_inline(&record.user_request, 160)).small(),
-                        );
-                        if ui.small_button("В заметки").clicked() {
-                            pin_note = Some(format!(
-                                "Run {}: {}",
-                                record.id,
-                                compact_inline(
-                                    record
-                                        .final_report
-                                        .as_deref()
-                                        .or(record.final_response.as_deref())
-                                        .unwrap_or(&record.user_request),
-                                    360
-                                )
-                            ));
-                        }
-                    });
-                }
-                if let Some(note) = pin_note {
-                    self.pin_context_note(note);
-                }
-            });
+                    }
+                });
+            }
+        }
     }
 
     fn pin_context_note(&mut self, note: String) {
@@ -7615,19 +7880,26 @@ impl LeetcodeApp {
                             ("Сводка", "состояние агента, проекта и быстрые переходы")
                         }
                     };
+                    let panel_tooltip = self.right_panel_view.tooltip();
                     ui.vertical(|ui| {
-                        ui.label(RichText::new(panel_title).strong().size(18.0));
-                        ui.label(RichText::new(panel_subtitle).weak().small());
+                        ui.label(RichText::new(panel_title).strong().size(18.0))
+                            .on_hover_text(panel_tooltip);
+                        ui.label(RichText::new(panel_subtitle).weak().small())
+                            .on_hover_text(panel_tooltip);
                     });
                     if self.is_running || self.project_is_running || self.asset_is_running {
                         ui.spinner();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Обновить").clicked() {
+                        let refresh_response = ui.button("Обновить");
+                        if refresh_response.clicked() {
                             self.refresh_file_rows();
                             self.refresh_git_summary();
                             self.refresh_project_profiles();
                         }
+                        refresh_response.on_hover_text(
+                            "Обновляет дерево файлов, Git-сводку и список профилей проекта.",
+                        );
                     });
                 });
                 ui.add_space(6.0);
@@ -10555,22 +10827,92 @@ fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView, views: &[Rig
             if response.clicked() {
                 *selected = view;
             }
+            response.on_hover_text(view.tooltip());
         }
     });
     ui.add_space(8.0);
     ui.separator();
 }
 
+fn context_panel_switcher(ui: &mut egui::Ui, selected: &mut ContextPanelTab) {
+    let available = safe_available_width(ui, 120.0);
+    let columns: usize = if available >= 420.0 { 4 } else { 2 };
+    let gap = 6.0;
+    let button_width =
+        ((available - gap * (columns.saturating_sub(1) as f32)) / columns.max(1) as f32).max(92.0);
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.spacing_mut().item_spacing.y = 6.0;
+        for tab in ContextPanelTab::ALL {
+            let is_selected = *selected == tab;
+            let response = ui.add_sized(
+                [button_width, 30.0],
+                egui::Button::new(RichText::new(tab.label()).small().strong().color(
+                    if is_selected {
+                        text_color()
+                    } else {
+                        muted_color()
+                    },
+                ))
+                .fill(if is_selected {
+                    egui::Color32::from_rgb(33, 96, 118)
+                } else {
+                    egui::Color32::TRANSPARENT
+                })
+                .stroke(if is_selected {
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 174, 205))
+                } else {
+                    egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
+                })
+                .rounding(egui::Rounding::same(6.0)),
+            );
+            if response.clicked() {
+                *selected = tab;
+            }
+            response.on_hover_text(tab.tooltip());
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.add(egui::Label::new(RichText::new(selected.subtitle()).weak().small()).wrap());
+    ui.add_space(8.0);
+    ui.separator();
+}
+
 fn status_line(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(label).weak().small());
+        ui.label(RichText::new(label).weak().small())
+            .on_hover_text(status_line_tooltip(label, value));
         ui.add_space(6.0);
         let shown = compact_inline(value, 72);
         let response = ui.label(RichText::new(&shown).small());
-        if shown != value {
-            response.on_hover_text(value);
-        }
+        response.on_hover_text(status_line_tooltip(label, value));
     });
+}
+
+fn status_line_tooltip(label: &str, value: &str) -> String {
+    match label {
+        "сообщений" => format!("Количество сообщений в этом чате: {value}."),
+        "summary" => format!("Размер сжатого summary старой переписки: {value} символов."),
+        "последние" => {
+            format!("Свежие сообщения, выбранные для следующего prompt: {value}.")
+        }
+        "релевантные" => {
+            format!("Старые сообщения, найденные как релевантные: {value}.")
+        }
+        "runs" => format!("Сохранённые прошлые запуски, выбранные в контекст: {value}."),
+        "новых" => {
+            format!("Новые заметки из профиля, которых ещё нет в текущем чате: {value}.")
+        }
+        "дубликатов" => {
+            format!("Заметки из профиля, которые уже есть в текущем чате: {value}.")
+        }
+        "бюджет" => {
+            format!("Разница бюджета профиля относительно текущих настроек: {value}.")
+        }
+        _ => format!("{label}: {value}"),
+    }
 }
 
 fn roadmap_metric(ui: &mut egui::Ui, value: impl std::fmt::Display, label: &str) {
@@ -11477,7 +11819,7 @@ fn context_overview_visual(
     recent_runs: usize,
 ) {
     let width = safe_available_width(ui, 1.0);
-    egui::Frame::none()
+    let card_response = egui::Frame::none()
         .fill(egui::Color32::from_rgb(18, 22, 28))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 55, 65)))
         .rounding(egui::Rounding::same(8.0))
@@ -11492,19 +11834,26 @@ fn context_overview_visual(
                             .strong()
                             .size(30.0)
                             .color(context_score_color(health_score)),
+                    )
+                    .on_hover_text(
+                        "Индекс качества контекста. Снижается, если prompt слишком большой, есть дубликаты заметок, устаревший summary или крупные источники памяти.",
                     );
                     ui.label(RichText::new("здоровье контекста").weak().small());
                 });
                 ui.add_space(14.0);
                 ui.vertical(|ui| {
                     ui.set_min_width((width - 120.0).max(1.0));
-                    ui.label(RichText::new("Состав следующего запуска").strong());
+                    ui.label(RichText::new("Состав следующего запуска").strong())
+                        .on_hover_text("Что примерно попадёт в следующий запрос агента к модели.");
                     ui.add(
                         egui::ProgressBar::new((prompt_chars as f32 / 24_000.0).clamp(0.0, 1.0))
                             .desired_width(safe_available_width(ui, 160.0))
                             .fill(context_score_color(health_score))
                             .text(format!("prompt ~{} символов", compact_number(prompt_chars))),
-                    );
+                    )
+                    .on_hover_text(format!(
+                        "Примерный размер системного контекста для следующего запуска: {prompt_chars} символов. Чем больше prompt, тем дороже и шумнее может быть задача."
+                    ));
                     ui.add_space(4.0);
                     ui.horizontal_wrapped(|ui| {
                         context_micro_stat(ui, "чат", messages);
@@ -11516,6 +11865,9 @@ fn context_overview_visual(
                 });
             });
         });
+    card_response.response.on_hover_text(
+        "Общая карточка контекста: насколько чистый контекст и из каких частей будет собран следующий запуск агента.",
+    );
     ui.add_space(8.0);
     context_signal_row(
         ui,
@@ -11540,12 +11892,39 @@ fn context_overview_visual(
     );
 }
 
+fn context_micro_stat_tooltip(label: &str, value: usize) -> String {
+    match label {
+        "чат" => format!("Всего сообщений в текущем диалоге: {value}."),
+        "заметки" => format!("Закреплённые заметки текущего чата: {value}."),
+        "память" => format!("Источники памяти проекта, доступные агенту: {value}."),
+        "runs" => format!("Сохранённые записи запусков агента: {value}."),
+        "профили" => format!("Экспортированные профили контекста: {value}."),
+        _ => format!("{label}: {value}"),
+    }
+}
+
 fn context_micro_stat(ui: &mut egui::Ui, label: &str, value: usize) {
     ui.label(
         RichText::new(format!("{label} {value}"))
             .small()
             .color(egui::Color32::from_rgb(197, 209, 219)),
-    );
+    )
+    .on_hover_text(context_micro_stat_tooltip(label, value));
+}
+
+fn context_signal_tooltip(label: &str, value: usize, total: usize) -> String {
+    match label {
+        "чат" | "последние сообщения" => format!(
+            "Свежие сообщения, которые попадут в следующий prompt: {value} из лимита {total}."
+        ),
+        "retrieval" | "релевантные" => format!(
+            "Старые сообщения, найденные как релевантные текущему запросу: {value} из лимита {total}."
+        ),
+        "история запусков" | "запуски" => format!(
+            "Недавние сохранённые запуски агента, добавляемые в контекст: {value} из лимита {total}."
+        ),
+        _ => format!("{label}: {value}/{total}"),
+    }
 }
 
 fn context_signal_row(
@@ -11559,13 +11938,16 @@ fn context_signal_row(
     let ratio = (value as f32 / total as f32).clamp(0.0, 1.0);
     ui.horizontal(|ui| {
         ui.set_min_width(safe_available_width(ui, 1.0));
-        ui.label(RichText::new(label).weak().small());
+        let tooltip = context_signal_tooltip(label, value, total);
+        ui.label(RichText::new(label).weak().small())
+            .on_hover_text(tooltip.clone());
         ui.add(
             egui::ProgressBar::new(ratio)
                 .desired_width((safe_available_width(ui, 120.0) * 0.56).max(80.0))
                 .fill(color)
                 .text(format!("{value}/{total}")),
-        );
+        )
+        .on_hover_text(tooltip);
     });
 }
 
@@ -11611,6 +11993,7 @@ fn context_health_strip(
 fn soft_badge(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) {
     let text = text.into();
     let shown = compact_inline(&text, 42);
+    let tooltip = health_badge_tooltip(&text);
     let fill = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 28);
     let stroke = egui::Stroke::new(
         1.0,
@@ -11625,8 +12008,22 @@ fn soft_badge(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) 
             ui.label(RichText::new(&shown).small().color(color));
         })
         .response;
-    if shown != text {
-        response.on_hover_text(text);
+    response.on_hover_text(tooltip);
+}
+
+fn health_badge_tooltip(text: &str) -> String {
+    if text == "контекст чистый" {
+        "Нет заметных проблем: дубликатов нет, цели проекта есть, summary актуален, источники памяти не выглядят слишком большими.".to_string()
+    } else if text.starts_with("дубликаты") {
+        "В закреплённых заметках есть похожие записи. Дубликаты увеличивают prompt и могут путать агента.".to_string()
+    } else if text == "нет целей проекта" {
+        "В памяти проекта не указаны финальные цели. Агенту сложнее выбирать правильное направление без них.".to_string()
+    } else if text == "summary устарел" {
+        "Диалог уже длинный, но сжатое summary ещё не создано. Часть старого контекста может потеряться.".to_string()
+    } else if text.starts_with("крупные источники") {
+        "Некоторые источники памяти очень большие. Их лучше сжать или разделить, чтобы не засорять prompt.".to_string()
+    } else {
+        text.to_string()
     }
 }
 
