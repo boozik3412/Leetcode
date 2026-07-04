@@ -35,6 +35,10 @@ pub struct ConversationMeta {
     pub message_count: usize,
     #[serde(default)]
     pub pinned: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub custom_title: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -128,7 +132,12 @@ pub fn load_active_conversation(workspace: &Workspace) -> LoadedConversation {
         .active_conversation_id
         .clone()
         .or_else(|| index.active_id.clone())
-        .filter(|id| index.conversations.iter().any(|meta| meta.id == *id))
+        .filter(|id| {
+            index
+                .conversations
+                .iter()
+                .any(|meta| meta.id == *id && !meta.archived)
+        })
         .unwrap_or_else(|| {
             let id = new_conversation_id();
             index.active_id = Some(id.clone());
@@ -140,6 +149,8 @@ pub fn load_active_conversation(workspace: &Workspace) -> LoadedConversation {
                 updated_at: now,
                 message_count: 0,
                 pinned: false,
+                archived: false,
+                custom_title: false,
             });
             id
         });
@@ -190,6 +201,8 @@ pub fn create_new_conversation(workspace: &Workspace) -> anyhow::Result<LoadedCo
         updated_at: now,
         message_count: chat.len(),
         pinned: false,
+        archived: false,
+        custom_title: false,
     });
     save_transcript(workspace, &id, &chat)?;
     save_index(workspace, &index)?;
@@ -225,6 +238,8 @@ pub fn save_conversation_snapshot(
             updated_at: now,
             message_count: chat.len(),
             pinned: false,
+            archived: false,
+            custom_title: false,
         });
     }
     index.active_id = Some(conversation_id.to_string());
@@ -240,6 +255,98 @@ pub fn save_conversation_snapshot(
     save_state(workspace, &state)?;
     save_state_for_conversation(workspace, conversation_id, &state)?;
     Ok(state)
+}
+
+pub fn rename_conversation(
+    workspace: &Workspace,
+    conversation_id: &str,
+    title: &str,
+) -> anyhow::Result<ConversationIndex> {
+    let title = compact_inline(title.trim(), 80);
+    if title.is_empty() {
+        anyhow::bail!("Название чата не может быть пустым");
+    }
+
+    let mut index = load_index(workspace);
+    let Some(meta) = index
+        .conversations
+        .iter_mut()
+        .find(|meta| meta.id == conversation_id)
+    else {
+        anyhow::bail!("Чат не найден: {conversation_id}");
+    };
+    meta.title = title;
+    meta.custom_title = true;
+    meta.updated_at = unix_timestamp();
+    sort_index(&mut index);
+    save_index(workspace, &index)?;
+    Ok(index)
+}
+
+pub fn set_conversation_pinned(
+    workspace: &Workspace,
+    conversation_id: &str,
+    pinned: bool,
+) -> anyhow::Result<ConversationIndex> {
+    let mut index = load_index(workspace);
+    let Some(meta) = index
+        .conversations
+        .iter_mut()
+        .find(|meta| meta.id == conversation_id)
+    else {
+        anyhow::bail!("Чат не найден: {conversation_id}");
+    };
+    meta.pinned = pinned;
+    meta.updated_at = unix_timestamp();
+    sort_index(&mut index);
+    save_index(workspace, &index)?;
+    Ok(index)
+}
+
+pub fn archive_conversation(
+    workspace: &Workspace,
+    conversation_id: &str,
+) -> anyhow::Result<LoadedConversation> {
+    let mut index = load_index(workspace);
+    let Some(meta) = index
+        .conversations
+        .iter_mut()
+        .find(|meta| meta.id == conversation_id)
+    else {
+        anyhow::bail!("Чат не найден: {conversation_id}");
+    };
+    meta.archived = true;
+    meta.pinned = false;
+    meta.updated_at = unix_timestamp();
+    if index.active_id.as_deref() == Some(conversation_id) {
+        index.active_id = next_available_conversation_id(&index);
+    }
+    sort_index(&mut index);
+    save_index(workspace, &index)?;
+    sync_active_state(workspace, index.active_id.clone())?;
+    Ok(load_active_conversation(workspace))
+}
+
+pub fn delete_conversation(
+    workspace: &Workspace,
+    conversation_id: &str,
+) -> anyhow::Result<LoadedConversation> {
+    let mut index = load_index(workspace);
+    let old_len = index.conversations.len();
+    index
+        .conversations
+        .retain(|meta| meta.id != conversation_id);
+    if index.conversations.len() == old_len {
+        anyhow::bail!("Чат не найден: {conversation_id}");
+    }
+    if index.active_id.as_deref() == Some(conversation_id) {
+        index.active_id = next_available_conversation_id(&index);
+    }
+    sort_index(&mut index);
+    save_index(workspace, &index)?;
+    sync_active_state(workspace, index.active_id.clone())?;
+    remove_conversation_files(workspace, conversation_id)?;
+    Ok(load_active_conversation(workspace))
 }
 
 pub fn compile_context_snapshot(
@@ -383,15 +490,56 @@ fn refresh_index_meta(index: &mut ConversationIndex, id: &str, chat: &[ChatLine]
     let now = unix_timestamp();
     let title = conversation_title(chat);
     if let Some(meta) = index.conversations.iter_mut().find(|meta| meta.id == id) {
-        meta.title = title;
+        if !meta.custom_title {
+            meta.title = title;
+        }
         meta.updated_at = now;
         meta.message_count = chat.len();
     }
+    sort_index(index);
+}
+
+fn sort_index(index: &mut ConversationIndex) {
     index.conversations.sort_by(|a, b| {
-        b.pinned
-            .cmp(&a.pinned)
+        a.archived
+            .cmp(&b.archived)
+            .then(b.pinned.cmp(&a.pinned))
             .then(b.updated_at.cmp(&a.updated_at))
     });
+}
+
+fn next_available_conversation_id(index: &ConversationIndex) -> Option<String> {
+    index
+        .conversations
+        .iter()
+        .filter(|meta| !meta.archived)
+        .max_by(|left, right| {
+            left.pinned
+                .cmp(&right.pinned)
+                .then(left.updated_at.cmp(&right.updated_at))
+        })
+        .map(|meta| meta.id.clone())
+}
+
+fn sync_active_state(workspace: &Workspace, active_id: Option<String>) -> anyhow::Result<()> {
+    let mut state = load_state(workspace);
+    state.active_conversation_id = active_id;
+    state.agent_state = None;
+    state.updated_at = unix_timestamp();
+    save_state(workspace, &state)
+}
+
+fn remove_conversation_files(workspace: &Workspace, conversation_id: &str) -> anyhow::Result<()> {
+    for rel_path in [
+        transcript_path(conversation_id),
+        conversation_state_path(conversation_id),
+    ] {
+        let path = workspace.resolve_for_write(&rel_path)?;
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 fn conversation_title(chat: &[ChatLine]) -> String {
@@ -563,5 +711,45 @@ mod tests {
             .iter()
             .any(|message| message.content.contains("transcript store")));
         assert!(!snapshot.rolling_summary.is_empty());
+    }
+
+    #[test]
+    fn renames_pins_archives_and_deletes_conversations() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
+        let first = create_new_conversation(&workspace).expect("first");
+        let second = create_new_conversation(&workspace).expect("second");
+
+        let index = rename_conversation(&workspace, &first.id, "Рабочий диалог").expect("rename");
+        let renamed = index
+            .conversations
+            .iter()
+            .find(|meta| meta.id == first.id)
+            .expect("renamed");
+        assert_eq!(renamed.title, "Рабочий диалог");
+        assert!(renamed.custom_title);
+
+        let index = set_conversation_pinned(&workspace, &first.id, true).expect("pin");
+        assert_eq!(index.conversations.first().unwrap().id, first.id);
+
+        let loaded = archive_conversation(&workspace, &first.id).expect("archive");
+        assert_ne!(loaded.id, first.id);
+        assert!(
+            loaded
+                .index
+                .conversations
+                .iter()
+                .find(|meta| meta.id == first.id)
+                .unwrap()
+                .archived
+        );
+
+        let loaded = delete_conversation(&workspace, &second.id).expect("delete");
+        assert!(loaded
+            .index
+            .conversations
+            .iter()
+            .all(|meta| meta.id != second.id));
+        assert!(loaded.index.conversations.iter().any(|meta| !meta.archived));
     }
 }

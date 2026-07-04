@@ -24,10 +24,11 @@ use crate::config::{
     read_journal_tail, AppConfig, ProjectUiState,
 };
 use crate::conversation::{
-    compile_context_snapshot, create_new_conversation, default_chat, load_active_conversation,
-    load_index as load_conversation_index, load_state as load_conversation_state,
-    save_conversation_snapshot, save_index as save_conversation_index,
-    save_state as save_conversation_state, ConversationIndex, LoadedConversation,
+    archive_conversation, compile_context_snapshot, create_new_conversation, default_chat,
+    delete_conversation, load_active_conversation, load_index as load_conversation_index,
+    load_state as load_conversation_state, rename_conversation, save_conversation_snapshot,
+    save_index as save_conversation_index, save_state as save_conversation_state,
+    set_conversation_pinned, ConversationIndex, LoadedConversation,
 };
 use crate::diagnostics::environment_diagnostics;
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
@@ -105,6 +106,9 @@ pub struct LeetcodeApp {
     active_conversation_id: Option<String>,
     conversation_index: ConversationIndex,
     conversation_status: String,
+    conversation_rename_target: Option<String>,
+    conversation_rename_input: String,
+    context_inspector_query: String,
     tool_log: Vec<ToolLogLine>,
     journal_lines: Vec<String>,
     journal_status: String,
@@ -646,6 +650,9 @@ impl LeetcodeApp {
             active_conversation_id,
             conversation_index,
             conversation_status,
+            conversation_rename_target: None,
+            conversation_rename_input: String::new(),
+            context_inspector_query: String::new(),
             tool_log: Vec::new(),
             journal_lines,
             journal_status: String::new(),
@@ -791,6 +798,8 @@ impl LeetcodeApp {
         self.conversation_index = loaded.index;
         self.conversation_status = loaded.status;
         self.chat = loaded.chat;
+        self.conversation_rename_target = None;
+        self.conversation_rename_input.clear();
         *self.agent_state.lock().expect("agent state poisoned") = restored_agent_state;
         self.agent_started_at = None;
         self.agent_user_message_index = None;
@@ -878,6 +887,95 @@ impl LeetcodeApp {
         let _ = save_conversation_state(&workspace, &state);
         let loaded = load_active_conversation(&workspace);
         self.apply_loaded_conversation(loaded);
+    }
+
+    fn begin_rename_active_conversation(&mut self) {
+        let Some(active_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        self.conversation_rename_target = Some(active_id);
+        self.conversation_rename_input = self.active_conversation_title();
+    }
+
+    fn save_active_conversation_title(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(active_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        let title = self.conversation_rename_input.trim().to_string();
+        match rename_conversation(&workspace, &active_id, &title) {
+            Ok(index) => {
+                self.conversation_index = index;
+                self.conversation_status = "чат переименован".to_string();
+                self.conversation_rename_target = None;
+                self.conversation_rename_input.clear();
+            }
+            Err(err) => {
+                self.conversation_status = format!("не удалось переименовать чат: {err}");
+            }
+        }
+    }
+
+    fn toggle_active_conversation_pin(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(active_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        let pinned = self
+            .conversation_index
+            .conversations
+            .iter()
+            .find(|meta| meta.id == active_id)
+            .map(|meta| !meta.pinned)
+            .unwrap_or(true);
+        match set_conversation_pinned(&workspace, &active_id, pinned) {
+            Ok(index) => {
+                self.conversation_index = index;
+                self.conversation_status = if pinned {
+                    "чат закреплён".to_string()
+                } else {
+                    "чат откреплён".to_string()
+                };
+            }
+            Err(err) => {
+                self.conversation_status = format!("не удалось изменить закрепление: {err}");
+            }
+        }
+    }
+
+    fn archive_active_conversation(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(active_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        self.persist_current_conversation();
+        match archive_conversation(&workspace, &active_id) {
+            Ok(loaded) => self.apply_loaded_conversation(loaded),
+            Err(err) => {
+                self.conversation_status = format!("не удалось архивировать чат: {err}");
+            }
+        }
+    }
+
+    fn delete_active_conversation(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(active_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        match delete_conversation(&workspace, &active_id) {
+            Ok(loaded) => self.apply_loaded_conversation(loaded),
+            Err(err) => {
+                self.conversation_status = format!("не удалось удалить чат: {err}");
+            }
+        }
     }
 
     fn set_workspace_mode(&mut self, mode: WorkspaceMode) {
@@ -1055,6 +1153,9 @@ impl LeetcodeApp {
         self.active_conversation_id = None;
         self.conversation_index = ConversationIndex::default();
         self.conversation_status.clear();
+        self.conversation_rename_target = None;
+        self.conversation_rename_input.clear();
+        self.context_inspector_query.clear();
         self.chat = default_chat();
         self.agent_state
             .lock()
@@ -7201,8 +7302,18 @@ impl LeetcodeApp {
                 .selected_text(current_title)
                 .width(260.0)
                 .show_ui(ui, |ui| {
-                    for meta in &self.conversation_index.conversations {
-                        let label = format!("{} · {}", meta.title, meta.message_count);
+                    for meta in self
+                        .conversation_index
+                        .conversations
+                        .iter()
+                        .filter(|meta| !meta.archived)
+                    {
+                        let pin = if meta.pinned {
+                            "закреплён · "
+                        } else {
+                            ""
+                        };
+                        let label = format!("{pin}{} · {}", meta.title, meta.message_count);
                         ui.selectable_value(&mut selected_id, meta.id.clone(), label);
                     }
                 });
@@ -7214,10 +7325,65 @@ impl LeetcodeApp {
             if ui.button("Новый чат").clicked() {
                 self.create_new_chat();
             }
+            if ui.button("Переименовать").clicked() {
+                self.begin_rename_active_conversation();
+            }
+            let active_pinned = self
+                .active_conversation_id
+                .as_deref()
+                .and_then(|id| {
+                    self.conversation_index
+                        .conversations
+                        .iter()
+                        .find(|meta| meta.id == id)
+                })
+                .map(|meta| meta.pinned)
+                .unwrap_or(false);
+            if ui
+                .button(if active_pinned {
+                    "Открепить"
+                } else {
+                    "Закрепить"
+                })
+                .clicked()
+            {
+                self.toggle_active_conversation_pin();
+            }
+            ui.menu_button("...", |ui| {
+                if ui.button("Архивировать чат").clicked() {
+                    self.archive_active_conversation();
+                    ui.close_menu();
+                }
+                if ui.button("Удалить чат").clicked() {
+                    self.delete_active_conversation();
+                    ui.close_menu();
+                }
+            });
             if !self.conversation_status.trim().is_empty() {
                 ui.label(RichText::new(&self.conversation_status).weak().small());
             }
         });
+        if self.conversation_rename_target == self.active_conversation_id {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Название").weak().small());
+                let response = ui.add(
+                    TextEdit::singleline(&mut self.conversation_rename_input)
+                        .desired_width(320.0)
+                        .hint_text("Название чата"),
+                );
+                let enter_pressed =
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if ui.button("Сохранить").clicked() || enter_pressed {
+                    self.save_active_conversation_title();
+                }
+                if ui.button("Отмена").clicked() {
+                    self.conversation_rename_target = None;
+                    self.conversation_rename_input.clear();
+                }
+            });
+        }
+        self.show_context_inspector(ui);
         ui.add_space(10.0);
 
         egui::ScrollArea::vertical()
@@ -7263,6 +7429,92 @@ impl LeetcodeApp {
                         }
                     },
                 );
+            });
+    }
+
+    fn show_context_inspector(&mut self, ui: &mut egui::Ui) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(conversation_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new("Инспектор контекста")
+            .id_salt("context_inspector")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Показывает компактную память, которую агент получит вместе со следующим запросом.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Запрос").weak().small());
+                    ui.add(
+                        TextEdit::singleline(&mut self.context_inspector_query)
+                            .desired_width(safe_available_width(ui, 240.0))
+                            .hint_text("Пусто = текущий текст в поле ввода"),
+                    );
+                });
+                let query = if self.context_inspector_query.trim().is_empty() {
+                    self.input.as_str()
+                } else {
+                    self.context_inspector_query.as_str()
+                };
+                let snapshot =
+                    compile_context_snapshot(&workspace, &conversation_id, &self.chat, query);
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "summary: {} символов",
+                            snapshot.rolling_summary.chars().count()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "последние: {}",
+                            snapshot.recent_messages.len()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!(
+                            "релевантные: {}",
+                            snapshot.relevant_messages.len()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!("запуски: {}", snapshot.recent_runs.len()))
+                            .weak()
+                            .small(),
+                    );
+                });
+                ui.add_space(6.0);
+                let mut prompt_block = snapshot.to_prompt_block();
+                egui::ScrollArea::vertical()
+                    .id_salt("context_inspector_scroll")
+                    .max_height(260.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add(
+                            TextEdit::multiline(&mut prompt_block)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(safe_available_width(ui, 320.0))
+                                .desired_rows(12)
+                                .interactive(false),
+                        );
+                    });
             });
     }
 

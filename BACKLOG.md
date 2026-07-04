@@ -185,8 +185,10 @@ Leetcode развивается из минимального локальног
 - Done: Add a context compiler that injects rolling summary, recent messages, relevant older messages, and recent run history into every agent turn.
 - Done: Keep provider `previous_response_id` as an optimization while falling back to local transcript/context when the provider-side id is unavailable.
 - Done: Add tests for transcript restore and relevant-message retrieval.
-- Todo: Add explicit chat rename, pin, archive, and delete controls.
-- Todo: Add a dedicated context inspector so the user can see exactly what summary/retrieval block will be sent to the model.
+- Done: Add explicit chat rename, pin, archive, and delete controls.
+- Done: Add a dedicated context inspector so the user can see exactly what summary/retrieval block will be sent to the model.
+- Todo: Add archived-chat browser and restore action.
+- Todo: Add manual context budget controls for recent messages, retrieved messages, and run-history count.
 
 ## Постоянная планка качества
 
