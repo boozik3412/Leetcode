@@ -1,10 +1,12 @@
 #![recursion_limit = "256"]
 
 mod agent;
+mod agent_history;
 mod app;
 mod asset_library;
 mod assets;
 mod config;
+mod conversation;
 mod crash;
 mod diagnostics;
 mod evals;

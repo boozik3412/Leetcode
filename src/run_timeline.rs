@@ -30,6 +30,7 @@ pub struct RunTimelineStep {
     pub started_at: Option<Instant>,
     pub finished_after: Option<Duration>,
     pub output: String,
+    pub link: Option<String>,
 }
 
 impl RunTimelineStep {
@@ -55,6 +56,7 @@ impl RunTimelineStep {
             started_at,
             finished_after: None,
             output: String::new(),
+            link: None,
         }
     }
 
@@ -95,6 +97,43 @@ impl RunTimeline {
             RunTimelineStatus::Running,
         ));
         timeline
+    }
+
+    pub fn set_plan_detail(&mut self, detail: impl Into<String>) {
+        let detail = detail.into();
+        if let Some(step) = self.steps.iter_mut().find(|step| step.id == "planning") {
+            step.detail = detail;
+        }
+    }
+
+    pub fn pre_run_gate_requested(
+        &mut self,
+        summary: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        if let Some(step) = self.steps.iter_mut().find(|step| step.id == "planning") {
+            step.title = "План и подтверждение".to_string();
+            step.detail = detail.into();
+            step.output = summary.into();
+            step.status = RunTimelineStatus::WaitingApproval;
+            if step.started_at.is_none() {
+                step.started_at = Some(Instant::now());
+            }
+        }
+    }
+
+    pub fn pre_run_gate_answered(&mut self, approved: bool, note: &str) {
+        if let Some(step) = self.steps.iter_mut().find(|step| step.id == "planning") {
+            finish_step(
+                step,
+                if approved {
+                    RunTimelineStatus::Succeeded
+                } else {
+                    RunTimelineStatus::Cancelled
+                },
+                note,
+            );
+        }
     }
 
     pub fn mark_assistant_text(&mut self) {
@@ -171,6 +210,32 @@ impl RunTimeline {
                 },
             );
         }
+    }
+
+    pub fn note(
+        &mut self,
+        id: impl Into<String>,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
+        self.steps.push(RunTimelineStep::new(
+            id,
+            title,
+            detail,
+            RunTimelineStatus::Succeeded,
+        ));
+    }
+
+    pub fn note_with_link(
+        &mut self,
+        id: impl Into<String>,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        link: impl Into<String>,
+    ) {
+        let mut step = RunTimelineStep::new(id, title, detail, RunTimelineStatus::Succeeded);
+        step.link = Some(link.into());
+        self.steps.push(step);
     }
 
     pub fn fail(&mut self, error: &str) {
@@ -268,6 +333,23 @@ impl RunTimeline {
         } else {
             validations.clone()
         };
+        let summaries = self
+            .steps
+            .iter()
+            .filter(|step| {
+                step.id.starts_with("journal-")
+                    || step.id.starts_with("project-run-")
+                    || step.id.starts_with("orchestration-")
+                    || step.id.starts_with("eval-")
+            })
+            .map(|step| format!("{} — {}", step.title, compact(&step.detail, 120)))
+            .take(6)
+            .collect::<Vec<_>>();
+        let summary_lines = if summaries.is_empty() {
+            vec!["агрегация журнала/команд/evals не зафиксировала новых записей".to_string()]
+        } else {
+            summaries
+        };
         let risks = if self.failed {
             "есть ошибка в ходе запуска; проверьте последние шаги timeline".to_string()
         } else if validations.is_empty() {
@@ -276,11 +358,12 @@ impl RunTimeline {
             "явных рисков не отмечено".to_string()
         };
         format!(
-            "Итог запуска: {status}\nВремя: {}\n\nИзменённые файлы:\n{}\n\nКоманды:\n{}\n\nВалидация:\n{}\n\nРиски:\n- {risks}\n\nNext steps:\n- при необходимости откройте детали шагов или запустите проверку\n\nRun summary id: не сохранялся автоматически",
+            "Итог запуска: {status}\nВремя: {}\n\nИзменённые файлы:\n{}\n\nКоманды:\n{}\n\nВалидация:\n{}\n\nСводка запуска:\n{}\n\nРиски:\n- {risks}\n\nNext steps:\n- при необходимости откройте детали шагов или запустите проверку\n\nRun summary id: не сохранялся автоматически",
             self.elapsed_label(),
             bullet_list(&changed),
             bullet_list(&command_lines),
             bullet_list(&validation_lines),
+            bullet_list(&summary_lines),
         )
     }
 }

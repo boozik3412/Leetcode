@@ -156,6 +156,8 @@ The `Governance` panel stores workspace-level tool rules under `assets/generated
 
 The `Memory` panel stores project goals, tasks, and decisions in `assets/generated/leetcode/memory.json`. The agent receives a compact memory summary at the start of each turn and can update memory through `memory_snapshot`, `record_project_goal`, `upsert_task`, `update_task_status`, and `record_decision`.
 
+Conversations are persisted per workspace under `assets/generated/leetcode/conversations`. Each chat is stored as JSONL plus a small state file, so the active dialogue, elapsed-response metadata, and provider response state can be restored after restarting the app. Before each agent turn, Leetcode compiles a compact context block from the rolling transcript summary, recent messages, relevant older messages, and recent structured run history. Provider-side `previous_response_id` is still reused when possible, but local transcript context is the durable fallback.
+
 The `Asset Library` panel indexes completed generated asset jobs into `assets/generated/leetcode/asset_library.json`. It supports filtering, favorites, tags through the agent, and exporting selected/favorite/tagged assets into an asset pack folder.
 
 The `Evals` panel runs local static checks for replay eval cases created by `create_replay_eval` and stores results in `assets/generated/leetcode/eval_results.json`. These checks validate prompt presence, expected tool names, and success criteria without calling external APIs.

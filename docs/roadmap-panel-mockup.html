@@ -1,0 +1,972 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Leetcode Roadmap Panel Mockup</title>
+  <style>
+    :root {
+      --bg: #0d1014;
+      --bg-2: #11161c;
+      --bg-3: #161d25;
+      --line: #26313b;
+      --line-soft: #1d2630;
+      --text: #d7dde6;
+      --muted: #89939f;
+      --muted-2: #66707c;
+      --accent: #37b8dc;
+      --accent-2: #1e82a0;
+      --good: #69c98f;
+      --warn: #d8b25f;
+      --bad: #e07171;
+      --radius: 6px;
+      --font: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      background: #050607;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 15px;
+      letter-spacing: 0;
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit;
+      color: inherit;
+    }
+
+    .window {
+      width: 100vw;
+      height: 100vh;
+      display: grid;
+      grid-template-rows: 30px 64px 1fr 172px;
+      background: var(--bg);
+      border-top: 1px solid #000;
+    }
+
+    .titlebar {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 0 10px;
+      background: #050607;
+      border-bottom: 1px solid #222a33;
+      color: #cbd2dc;
+      font-size: 14px;
+    }
+
+    .titlebar .app {
+      margin-right: 18px;
+      color: #e8edf3;
+      font-weight: 600;
+    }
+
+    .menubar button,
+    .topbar button,
+    .segment button,
+    .quick button,
+    .action {
+      border: 1px solid var(--line);
+      background: #18202a;
+      border-radius: var(--radius);
+      padding: 7px 12px;
+      cursor: pointer;
+    }
+
+    .menubar {
+      display: flex;
+      gap: 18px;
+    }
+
+    .menubar button {
+      border: 0;
+      background: transparent;
+      padding: 0;
+      color: #c8d0da;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 18px;
+      background: #10151b;
+      border-bottom: 1px solid var(--line);
+      min-width: 0;
+    }
+
+    .brand {
+      color: #43c6ec;
+      font-size: 20px;
+      font-weight: 650;
+      margin-right: 4px;
+      white-space: nowrap;
+    }
+
+    .subtle {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .mode-tabs {
+      display: flex;
+      height: 100%;
+      align-items: center;
+      gap: 8px;
+      border-left: 1px solid var(--line);
+      padding-left: 12px;
+    }
+
+    .mode-tabs button {
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      padding: 9px 12px;
+      color: #cbd3dd;
+      font-weight: 550;
+    }
+
+    .mode-tabs .active {
+      background: #248cac;
+      color: #eefaff;
+    }
+
+    .field {
+      height: 34px;
+      min-width: 96px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #0c1015;
+      color: #e2e8f0;
+      white-space: nowrap;
+    }
+
+    .field.wide {
+      width: 256px;
+    }
+
+    .main {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 300px 1fr 430px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .sidebar,
+    .right {
+      min-width: 0;
+      background: var(--bg-2);
+    }
+
+    .sidebar {
+      border-right: 1px solid var(--line);
+      padding: 16px 10px 18px;
+      overflow: hidden;
+    }
+
+    .sidebar-head,
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .sidebar-head {
+      align-items: flex-start;
+    }
+
+    .project-title-block {
+      min-width: 0;
+    }
+
+    .project-kicker {
+      color: var(--muted-2);
+      font-size: 12px;
+      margin-bottom: 3px;
+    }
+
+    .project-title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .project-title-row h2 {
+      font-size: 19px;
+    }
+
+    .project-badge {
+      color: #9fb0bf;
+      font-size: 12px;
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      padding: 2px 7px;
+      background: #121922;
+      white-space: nowrap;
+    }
+
+    .sidebar-actions {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 7px;
+      margin: 14px 0 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .sidebar-action {
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+      background: transparent;
+      color: #cbd4df;
+      padding: 0 9px;
+      cursor: pointer;
+    }
+
+    .sidebar-action.primary {
+      background: #172631;
+      border-color: #274b5b;
+      color: #dff7ff;
+      text-align: left;
+    }
+
+    .sidebar-action.icon {
+      width: 34px;
+      padding: 0;
+      color: #aeb8c3;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h2 {
+      font-size: 20px;
+      font-weight: 650;
+    }
+
+    h3 {
+      font-size: 16px;
+      font-weight: 650;
+    }
+
+    .mini-btn {
+      border: 1px solid var(--line);
+      background: #161e27;
+      color: #cbd4df;
+      border-radius: 5px;
+      padding: 6px 10px;
+      cursor: pointer;
+    }
+
+    .search {
+      width: 100%;
+      height: 26px;
+      margin: 12px 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: #070a0d;
+      padding: 0 8px;
+    }
+
+    .filter-row,
+    .segment {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .filter-row button,
+    .segment button {
+      border: 0;
+      background: transparent;
+      color: #c7d0dc;
+      padding: 7px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .filter-row .active,
+    .segment .active {
+      background: #2389a8;
+      color: #ecfbff;
+    }
+
+    .tree {
+      margin-top: 18px;
+      line-height: 1.85;
+      white-space: nowrap;
+      color: #d9e0e8;
+      font-size: 16px;
+    }
+
+    .tree .project {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #18202a;
+      border-radius: 5px;
+      padding: 2px 8px;
+      color: #eaf3f8;
+    }
+
+    .tree .child {
+      margin-left: 24px;
+      color: #cbd4dd;
+    }
+
+    .tree .muted {
+      color: var(--muted);
+    }
+
+    .center {
+      min-width: 0;
+      background: #0b0e12;
+      display: grid;
+      grid-template-rows: 52px 1fr;
+      border-right: 1px solid var(--line);
+    }
+
+    .center-tabs {
+      display: flex;
+      align-items: end;
+      gap: 8px;
+      padding: 0 12px 8px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .center-tabs .tab {
+      min-width: 82px;
+      padding: 8px 14px;
+      border: 1px solid var(--line);
+      border-bottom-color: var(--accent);
+      background: #111821;
+      border-radius: 4px 4px 0 0;
+      color: #e5edf5;
+    }
+
+    .chat {
+      padding: 22px 14px 0;
+      overflow: hidden;
+    }
+
+    .chat h1 {
+      font-size: 25px;
+      font-weight: 650;
+      margin-bottom: 4px;
+    }
+
+    .system-line {
+      margin-top: 28px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      padding: 18px 10px;
+      color: #cbd3dc;
+      text-align: left;
+    }
+
+    .right {
+      padding: 20px 16px;
+      overflow: hidden;
+    }
+
+    .right .caption {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+
+    .right-tabs {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin: 16px 0 16px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 12px;
+    }
+
+    .right-tabs button {
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--muted);
+      padding: 9px 6px;
+      cursor: pointer;
+    }
+
+    .right-tabs .active {
+      background: #2389a8;
+      color: #eefaff;
+    }
+
+    .roadmap-toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding-bottom: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .roadmap-toolbar .primary {
+      background: #2086a5;
+      border-color: #2ea9ca;
+      color: #f0fcff;
+    }
+
+    .roadmap-summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      padding: 16px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric {
+      min-width: 0;
+    }
+
+    .metric .value {
+      font-size: 22px;
+      font-weight: 700;
+      color: #edf6fb;
+    }
+
+    .metric .label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    .focus {
+      padding: 16px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .focus-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: #cbd6df;
+      background: #151c24;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--muted);
+      flex: 0 0 auto;
+    }
+
+    .dot.good {
+      background: var(--good);
+    }
+
+    .dot.warn {
+      background: var(--warn);
+    }
+
+    .dot.accent {
+      background: var(--accent);
+    }
+
+    .progress {
+      height: 6px;
+      background: #0a0d11;
+      border: 1px solid #1b252f;
+      border-radius: 999px;
+      overflow: hidden;
+      margin: 11px 0 8px;
+    }
+
+    .progress span {
+      display: block;
+      height: 100%;
+      width: 64%;
+      background: linear-gradient(90deg, #2b8da8, #6ccde5);
+    }
+
+    .timeline {
+      padding: 16px 0 6px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .timeline-filter {
+      display: flex;
+      gap: 8px;
+      margin: 12px 0;
+    }
+
+    .timeline-filter button {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 5px 7px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .timeline-filter .active {
+      color: #eaf8fc;
+      background: #182631;
+    }
+
+    .item {
+      display: grid;
+      grid-template-columns: 18px 1fr auto;
+      gap: 10px;
+      padding: 8px 0;
+      align-items: start;
+    }
+
+    .item:not(:last-child) {
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .item-title {
+      font-weight: 620;
+      color: #e1e8ef;
+      line-height: 1.25;
+    }
+
+    .item-detail {
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .item time {
+      color: var(--muted-2);
+      font-family: var(--mono);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .goals {
+      padding-top: 16px;
+    }
+
+    .goal {
+      display: grid;
+      grid-template-columns: 16px 1fr;
+      gap: 8px;
+      padding: 6px 0;
+      color: #d5dde7;
+    }
+
+    .bottom {
+      background: #11171f;
+      padding: 12px 300px 12px 312px;
+      display: grid;
+      grid-template-rows: 32px 1fr;
+      gap: 8px;
+    }
+
+    .prompt {
+      position: relative;
+      display: grid;
+      grid-template-columns: 44px 1fr 118px;
+      gap: 10px;
+    }
+
+    .attach-wrap {
+      position: relative;
+      min-width: 0;
+    }
+
+    .attach-btn {
+      width: 44px;
+      height: 100%;
+      min-height: 76px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      background: #0b1016;
+      color: #d8e5ee;
+      border-radius: 4px;
+      font-size: 24px;
+      cursor: pointer;
+    }
+
+    .attach-btn:hover,
+    .attach-btn.active {
+      border-color: #3c9fb9;
+      background: #132431;
+      color: #f0fbff;
+    }
+
+    .attach-menu {
+      position: absolute;
+      left: 0;
+      bottom: calc(100% + 10px);
+      width: 228px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #121922;
+      box-shadow: 0 14px 28px rgba(0, 0, 0, 0.35);
+      display: none;
+      z-index: 3;
+    }
+
+    .attach-menu.open {
+      display: block;
+    }
+
+    .attach-menu button {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: #d8e1eb;
+      border-radius: 4px;
+      padding: 8px 9px;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .attach-menu button:hover {
+      background: #1a2530;
+      color: #f3fbff;
+    }
+
+    .attach-menu .hint-line {
+      padding: 7px 9px 4px;
+      color: var(--muted);
+      font-size: 12px;
+      border-top: 1px solid var(--line-soft);
+      margin-top: 4px;
+    }
+
+    .prompt textarea {
+      resize: none;
+      border: 1px solid #3c9fb9;
+      background: #080b0e;
+      border-radius: 4px;
+      padding: 10px;
+      outline: none;
+    }
+
+    .send {
+      border: 0;
+      background: #43c1e6;
+      color: #06202a;
+      border-radius: 4px;
+      font-weight: 650;
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      align-self: end;
+    }
+
+    @media (max-width: 1300px) {
+      .main {
+        grid-template-columns: 280px 1fr 390px;
+      }
+
+      .topbar .subtle,
+      .field.wide {
+        display: none;
+      }
+
+      .bottom {
+        padding-left: 292px;
+        padding-right: 402px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="window">
+    <section class="titlebar">
+      <span class="app">Leetcode</span>
+      <nav class="menubar" aria-label="Главное меню">
+        <button>Файл</button>
+        <button>Инструменты</button>
+        <button>Настройка</button>
+        <button>Помощь</button>
+      </nav>
+    </section>
+
+    <section class="topbar">
+      <div class="brand">Leetcode</div>
+      <div class="subtle">AI-рабочий стол</div>
+      <nav class="mode-tabs" aria-label="Режим">
+        <button class="active">Чат</button>
+        <button>Код</button>
+        <button>Ассеты</button>
+        <button>Проект</button>
+      </nav>
+      <span class="subtle">Провайдер</span>
+      <div class="field">OpenAI</div>
+      <span class="subtle">Модель</span>
+      <div class="field">gpt-5.5</div>
+      <div class="field">модели</div>
+      <span class="subtle">Маршрут</span>
+      <div class="field">Авто</div>
+      <span class="subtle">API-ключ</span>
+      <div class="field wide">••••••••••••••••••••••••••••••••</div>
+      <button>Сохранить</button>
+      <button>Проект</button>
+      <span class="subtle">Проект: Agent</span>
+      <button>Сброс</button>
+    </section>
+
+    <section class="main">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <div class="project-title-block">
+            <div class="project-kicker">Рабочие папки</div>
+            <div class="project-title-row">
+              <h2>Проекты</h2>
+              <span class="project-badge">Agent</span>
+            </div>
+            <p class="subtle" style="margin-top: 5px;">1 проект · активный</p>
+          </div>
+        </div>
+        <div class="sidebar-actions">
+          <button class="sidebar-action primary">Новый проект</button>
+          <button class="sidebar-action icon" title="Обновить">↻</button>
+          <button class="sidebar-action icon" title="Ещё">•••</button>
+        </div>
+        <input class="search" value="Поиск" aria-label="Поиск" />
+        <div class="filter-row">
+          <button class="active">Все</button>
+          <button>Изменённые 0</button>
+          <button>Код</button>
+          <button>Ассеты</button>
+        </div>
+        <div class="tree">
+          <div class="project"><span style="color: var(--accent);">⌄</span><span>▣</span><span>Agent</span></div>
+          <div class="child">.gitignore</div>
+          <div class="child muted">› assets</div>
+          <div class="child">BACKLOG.md</div>
+          <div class="child">Cargo.lock</div>
+          <div class="child">Cargo.toml</div>
+          <div class="child">PACKAGING.md</div>
+          <div class="child">README.md</div>
+          <div class="child muted">› scripts</div>
+          <div class="child muted">› src</div>
+        </div>
+      </aside>
+
+      <section class="center">
+        <div class="center-tabs">
+          <div class="tab">Agent</div>
+        </div>
+        <div class="chat">
+          <h1>Leetcode</h1>
+          <p class="subtle">Локальный агент для кода, ассетов и рабочего стола</p>
+          <p class="subtle" style="margin-top: 4px;">Проект: Agent</p>
+          <div class="system-line">
+            <span class="subtle">Система</span>
+            <p style="margin-top: 12px;">Выберите проект, проверьте модель/API-ключ и отправьте задачу агенту.</p>
+          </div>
+        </div>
+      </section>
+
+      <aside class="right">
+        <div class="panel-head">
+          <div>
+            <h2>Рабочая панель</h2>
+            <p class="caption">состояние, roadmap и управление проектом</p>
+          </div>
+          <button class="mini-btn">Обновить</button>
+        </div>
+
+        <nav class="right-tabs" aria-label="Раздел рабочей панели">
+          <button>Сводка</button>
+          <button class="active">Roadmap</button>
+          <button>Контроль</button>
+          <button>Логи</button>
+        </nav>
+
+        <section class="roadmap-toolbar">
+          <button class="mini-btn primary">Зафиксировать этап</button>
+          <button class="mini-btn">+ Запись</button>
+          <button class="mini-btn">Экспорт</button>
+        </section>
+
+        <section class="roadmap-summary">
+          <div class="metric">
+            <div class="value">18</div>
+            <div class="label">этапов закрыто</div>
+          </div>
+          <div class="metric">
+            <div class="value">1</div>
+            <div class="label">в работе</div>
+          </div>
+          <div class="metric">
+            <div class="value">4</div>
+            <div class="label">запланировано</div>
+          </div>
+        </section>
+
+        <section class="focus">
+          <div class="focus-line">
+            <h3>Текущий фокус</h3>
+            <span class="pill"><span class="dot accent"></span>Stage 19</span>
+          </div>
+          <p class="item-title">Project Roadmap</p>
+          <p class="item-detail">Единая история проекта: прошлое, текущая работа, будущие цели и финальное видение.</p>
+          <div class="progress"><span></span></div>
+          <p class="caption">64% · модуль, UI, инструменты агента</p>
+        </section>
+
+        <section class="timeline">
+          <div class="focus-line">
+            <h3>Лента развития</h3>
+            <span class="pill">Agent</span>
+          </div>
+          <div class="timeline-filter">
+            <button class="active" data-filter="all">Все</button>
+            <button data-filter="done">Готово</button>
+            <button data-filter="now">Сейчас</button>
+            <button data-filter="next">Далее</button>
+          </div>
+
+          <div class="item" data-state="now">
+            <span class="dot accent"></span>
+            <div>
+              <div class="item-title">Собрать Roadmap в единый модуль</div>
+              <div class="item-detail">JSON-состояние, импорт Git/Backlog, связь с памятью проекта.</div>
+            </div>
+            <time>сейчас</time>
+          </div>
+
+          <div class="item" data-state="done">
+            <span class="dot good"></span>
+            <div>
+              <div class="item-title">Stage 18 · Run Timeline</div>
+              <div class="item-detail">Итоги задач, длительность, инструменты и проверка после запуска.</div>
+            </div>
+            <time>03.07</time>
+          </div>
+
+          <div class="item" data-state="done">
+            <span class="dot good"></span>
+            <div>
+              <div class="item-title">Stage 14-16 · Project & Providers</div>
+              <div class="item-detail">Командный центр, диагностика, провайдеры и live validation.</div>
+            </div>
+            <time>03.07</time>
+          </div>
+
+          <div class="item" data-state="next">
+            <span class="dot warn"></span>
+            <div>
+              <div class="item-title">Stage 20 · Release cockpit</div>
+              <div class="item-detail">Чеклист релиза, сборки, версии, артефакты и публикация.</div>
+            </div>
+            <time>далее</time>
+          </div>
+        </section>
+
+        <section class="goals">
+          <div class="focus-line">
+            <h3>Финальные цели</h3>
+            <button class="mini-btn">Изменить</button>
+          </div>
+          <div class="goal"><span class="dot good"></span><span>Локальный AI-агент для разработки игр и приложений.</span></div>
+          <div class="goal"><span class="dot accent"></span><span>Мультипровайдерные модели: код, текст, изображения, звук, видео.</span></div>
+          <div class="goal"><span class="dot warn"></span><span>Понятная история развития проекта и управляемые milestone.</span></div>
+        </section>
+      </aside>
+    </section>
+
+    <section class="bottom">
+      <div class="segment">
+        <span class="subtle">Доступ</span>
+        <button>Запрос</button>
+        <button>Авто</button>
+        <button class="active">Работа</button>
+        <button>Полный</button>
+        <span class="subtle">Автоматически менять проект и вызывать API ассетов; спрашивать для рабочего стола и внешних открытий.</span>
+      </div>
+      <div class="prompt">
+        <div class="attach-wrap">
+          <button class="attach-btn" type="button" aria-label="Добавить вложение">+</button>
+          <div class="attach-menu" role="menu" aria-label="Добавить в запрос">
+            <button type="button">Добавить файл</button>
+            <button type="button">Добавить изображение</button>
+            <button type="button">Добавить папку проекта</button>
+            <button type="button">Сделать снимок экрана</button>
+            <div class="hint-line">Файлы попадут в контекст текущего запроса.</div>
+          </div>
+        </div>
+        <textarea>Что сделать? Ctrl+Enter — отправить, Ctrl+V — вставить скриншот из буфера, Ctrl+Shift+S — снимок экрана</textarea>
+        <button class="send">Отправить</button>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const filters = document.querySelectorAll(".timeline-filter button");
+    const items = document.querySelectorAll(".timeline .item");
+    filters.forEach((button) => {
+      button.addEventListener("click", () => {
+        filters.forEach((item) => item.classList.remove("active"));
+        button.classList.add("active");
+        const filter = button.dataset.filter;
+        items.forEach((item) => {
+          item.style.display = filter === "all" || item.dataset.state === filter ? "grid" : "none";
+        });
+      });
+    });
+
+    const attachButton = document.querySelector(".attach-btn");
+    const attachMenu = document.querySelector(".attach-menu");
+    attachButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      attachButton.classList.toggle("active");
+      attachMenu.classList.toggle("open");
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest(".attach-wrap")) {
+        attachButton.classList.remove("active");
+        attachMenu.classList.remove("open");
+      }
+    });
+  </script>
+</body>
+</html>

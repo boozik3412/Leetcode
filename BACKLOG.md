@@ -1,8 +1,8 @@
-# Leetcode Development Backlog
+# Бэклог разработки Leetcode
 
-Leetcode is evolving from a minimal local coding assistant into a desktop AI studio for game and app development. The product should support multiple AI providers, coding workflows, generated assets, project-aware tooling, and eventually multi-agent orchestration.
+Leetcode развивается из минимального локального помощника для программирования в настольную AI-студию для разработки игр и приложений. Продукт должен поддерживать нескольких AI-провайдеров, сценарии кодинга, генерацию ассетов, инструменты с учётом структуры проекта и в перспективе — многоагентную оркестрацию.
 
-## Stage 1 - Reliable Coding Runtime
+## Этап 1 - Надёжный рантайм для программирования
 
 - Done: Stream Responses API events into the UI instead of waiting for full model turns.
 - Done: Tighten tool schemas and validation so model arguments fail clearly and safely.
@@ -14,7 +14,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add focused tests for workspace path safety, tool argument parsing, patch validation, and shell command construction.
 - Done: Add a persistent terminal session with start/write/read/stop tools, UI panel, and shared state across agent turns.
 
-## Stage 2 - Model Provider Layer
+## Этап 2 - Слой провайдеров моделей
 
 - Done: Replace the direct `OpenAiClient` dependency in the runtime with a provider trait.
 - Done: Add a model registry with capabilities: code, reasoning, tools, vision, image, audio, video, realtime, embeddings.
@@ -24,7 +24,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add task-based model routing: coding, planning, cheap/fast, vision, image generation, audio generation, video generation, and realtime.
 - Done: Add fallback model/provider chains and clear provider error reporting.
 
-## Stage 3 - Asset Generation Pipeline
+## Этап 3 - Конвейер генерации ассетов
 
 - Done: Introduce asynchronous image asset jobs with status, provider, model, prompt, parameters, output files, and metadata.
 - Done: Add image asset previews in the tool panel.
@@ -38,7 +38,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Extend the same job framework to spritesheets, audio, video, and generated UI/game assets.
 - Done: Expose spritesheet, audio, video, upscale, export, and attach workflows as agent-callable tools.
 
-## Stage 4 - Game/App Project Profiles
+## Этап 4 - Профили проектов игр и приложений
 
 - Done: Detect common project types: Rust, Node/package.json, React/Vite, Python, Godot, Unity, Unreal, and mixed repos.
 - Done: Add project commands for run, test, build, lint, package script, editor, preview, and release where the project exposes them.
@@ -47,7 +47,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add game-specific flows: prototype mechanic, generate spritesheet, generate UI sounds, create item icons, build vertical slice, run playtest checklist.
 - Done: Add browser/app preview hooks for web and game tooling where available.
 
-## Stage 5 - Multi-Agent Orchestration
+## Этап 5 - Многоагентная оркестрация
 
 - Done: Add specialist roles: Code Agent, Game Designer, Art Director, Audio Agent, QA Agent, Build Agent.
 - Done: Add handoff records and shared workspace context under `assets/generated/orchestration`.
@@ -57,7 +57,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add bounded subagent execution with role-specific tool allowlists, max-round limits, approval-gated tool execution, and traceable `SubagentRun` records.
 - Done: Instruct the manager agent to propose a subagent split for broad work before executing it, unless the user already approved using subagents.
 
-## Stage 6 - Desktop and Computer Control
+## Этап 6 - Управление рабочим столом и компьютером
 
 - Done: Add screenshot capture, click, type, hotkey, active-window inspection, and window focus tools.
 - Done: Add approval-gated screenshot capture into `assets/generated/screenshots`.
@@ -66,21 +66,21 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add a `Desktop` panel that shows the latest desktop step screenshot and active-window summary.
 - Keep allowlists and human approval for irreversible desktop actions.
 
-## Stage 7 - Permission Control UX
+## Этап 7 - UX управления разрешениями
 
 - Done: Add prompt-bar permission modes: Ask, Auto, Work, and Full.
 - Done: Apply the selected mode across shell, file writes, paid asset APIs, desktop control, external opens, and orchestration tools.
 - Done: Preserve backward compatibility for previous Safe/Normal/Strict/Custom saved configs.
 - Done: Show the effective permission matrix in the Runtime panel.
 
-## Stage 8 - Tool Governance Center
+## Этап 8 - Центр управления инструментами
 
 - Done: Add a tool registry with category, risk, and description metadata.
 - Done: Add workspace-level governance config for disabled tools, disabled categories, and shell deny patterns.
 - Done: Enforce governance before every agent tool execution.
 - Done: Add a Governance UI panel and agent-callable governance tools.
 
-## Stage 9 - Project Memory / Task Board
+## Этап 9 - Память проекта / доска задач
 
 - Done: Add persistent project memory under `assets/generated/leetcode/memory.json`.
 - Done: Add goals, tasks, decisions, and prompt-time memory summaries.
@@ -88,33 +88,33 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Expose memory snapshot and update tools to the agent.
 - Done: Add project memory sources for imported files and saved notes, including agent-callable source capture.
 
-## Stage 10 - Asset Library Manager
+## Этап 10 - Менеджер библиотеки ассетов
 
 - Done: Add an asset library index over generated asset jobs.
 - Done: Support tags, favorites, notes, source job metadata, and export packs.
 - Done: Add an Asset Library UI panel with filtering and favorite toggles.
 - Done: Expose asset library snapshot/tag/favorite/export tools to the agent.
 
-## Stage 11 - Validation & Evals
+## Этап 11 - Валидация и eval-сценарии
 
 - Done: Add static replay eval runner over existing orchestration eval cases.
 - Done: Persist eval run results under `assets/generated/leetcode/eval_results.json`.
 - Done: Add an Evals UI panel and agent-callable eval snapshot/run tools.
 
-## Stage 12 - Model/Provider Health Panel
+## Этап 12 - Панель состояния моделей и провайдеров
 
 - Done: Add offline provider health reporting for chat and asset providers.
 - Done: Check configured keys, selected models, registry coverage, and provider issues.
 - Done: Add a Providers UI panel and agent-callable provider health snapshot.
 
-## Stage 13 - UX Polish "Codex-style"
+## Этап 13 - Полировка UX в стиле "Codex"
 
 - Done: Add clear interface modes: Chat, Code, Assets, and Project.
 - Done: Scope the right sidebar by the selected mode so it does not show every tool group at once.
 - Done: Keep file tabs and agent chat as first-class central surfaces.
 - Todo: Continue visual simplification after real screenshots from daily usage.
 
-## Stage 14 - Project Command Center
+## Этап 14 - Центр команд проекта
 
 - Done: Promote project profiles, quick commands, preview hooks, terminal state, and recent command output into a command-center view.
 - Done: Add first-pass rerun and "ask agent to fix" actions for project command failures.
@@ -125,14 +125,14 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add structured diagnostics by compiler/test framework with file, line, column, type, targeted fix prompts, and fix-request history.
 - Done: Add richer task tree across project milestones and launch/game-development workstreams.
 
-## Stage 15 - Asset Studio
+## Этап 15 - Студия ассетов
 
 - Done: Promote asset generation and asset history into a dedicated workspace mode.
 - Done: Show generated asset history, variants, favorites, export, attach, and source metadata from one place.
 - Done: Add side-by-side comparison for multiple generated results.
 - Done: Add project import targets for common game/app asset folders.
 
-## Stage 16 - Real Provider Validation
+## Этап 16 - Проверка реальных провайдеров
 
 - Done: Add a validation checklist for OpenAI, Claude, DeepSeek, Gemini, image, audio, and video providers.
 - Done: Add safe manual live validation for chat providers through the real provider layer: model text response plus tool-call shape check.
@@ -141,7 +141,7 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Keep recent provider validation results visible in the Providers panel.
 - Done: Persist provider validation results under `assets/generated/leetcode/provider_validation_results.json`.
 
-## Stage 17 - Packaging
+## Этап 17 - Упаковка и дистрибуция
 
 - Done: Add Windows packaging docs and a portable build script.
 - Done: Add runtime environment diagnostics for executable/config/journal/workspace paths, proxy state, and local toolchain availability.
@@ -151,20 +151,21 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 - Done: Add signed portable archive path with zip output, SHA256 manifest, and optional SignTool support.
 - Done: Add optional crash report folder and panic hook.
 
-## Stage 18 - Guided Autonomy & Run Timeline
+## Этап 18 - Управляемая автономность и таймлайн запуска
 
 Цель: превратить богатый набор инструментов Leetcode в прозрачный управляемый рабочий процесс: пользователь видит план, текущий шаг, подтверждения, проверки и итоговый отчёт без необходимости собирать картину из разных панелей.
 
 - Done: Added an MVP compact run timeline under the current/last assistant message with planning, assistant output, tool calls, approvals, failure/cancellation, and completion states.
-- Todo: Add explicit pre-run plans for non-trivial tasks with user actions: approve plan, ask to revise, restrict tools, run analysis-only, or allow subagents.
-- Todo: Expand aggregation beyond live agent events to include richer journal, project command records, orchestration summaries, and eval result links in one readable run narrative.
+- Done: Added app-owned pre-run plans for non-trivial tasks: the UI shows the agent's understanding and intended approach before the model/tool loop starts.
+- Done: Added an enforced pre-run confirmation gate with a single `Подтверждаю` action; user clarifications in the input rebuild the plan without launching tools.
+- Done: Expanded aggregation beyond live agent events to include richer journal, project command records, orchestration summaries, and eval result links in one readable run narrative.
 - Done: Added expandable tool-call detail cards with action/status/duration/compact output for timeline steps.
 - Done: Added an automatic final run report with changed files, commands executed, validation results, risks, next steps, and saved run summary id placeholder.
 - Done: Added reusable `src/run_timeline.rs` module for timeline data structures and aggregation helpers.
 - Done: Added replay/static eval case for timeline-critical behaviours and ran static replay validation.
-- Todo: Add UI polish for daily use: default horizontal alignment should stay left-aligned, not centered; long content must remain constrained between side panels.
+- Done: Added UI polish for daily use: default horizontal alignment stays left-aligned and long content remains constrained between side panels.
 
-### Suggested MVP slice
+### Предлагаемый MVP-срез
 
 1. Done: Introduce `RunTimeline`, `RunTimelineStep`, `RunTimelineStatus`, and event mapping from existing agent/tool/project events.
 2. Done: Render a left-aligned collapsible timeline under the active assistant message.
@@ -172,7 +173,22 @@ Leetcode is evolving from a minimal local coding assistant into a desktop AI stu
 4. Done: Generate a final compact report when the agent run finishes.
 5. Done: Validate with `cargo check`, `cargo test`, and one replay eval case.
 
-## Ongoing Quality Bar
+## Этап 19 - Постоянная переписка и управляемый контекст
+
+Цель: сделать диалоги и рабочий контекст агента долговечными: пользователь должен продолжать работу после перезапуска приложения, а агент должен получать компактную, управляемую память предыдущей переписки без переполнения окна модели.
+
+- Done: Add workspace-local conversation storage under `assets/generated/leetcode/conversations`.
+- Done: Persist each chat as JSONL transcript plus per-chat runtime state, including provider/model response state when available.
+- Done: Restore the active conversation and agent state at app startup and when switching projects.
+- Done: Add central chat controls for creating a new chat and switching between saved chats.
+- Done: Save user messages, pre-run plans, confirmations, approval decisions, assistant responses, errors, and completion metadata as the chat changes.
+- Done: Add a context compiler that injects rolling summary, recent messages, relevant older messages, and recent run history into every agent turn.
+- Done: Keep provider `previous_response_id` as an optimization while falling back to local transcript/context when the provider-side id is unavailable.
+- Done: Add tests for transcript restore and relevant-message retrieval.
+- Todo: Add explicit chat rename, pin, archive, and delete controls.
+- Todo: Add a dedicated context inspector so the user can see exactly what summary/retrieval block will be sent to the model.
+
+## Постоянная планка качества
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.
 - Every provider integration must include a minimal mocked test and a documented manual validation path.
