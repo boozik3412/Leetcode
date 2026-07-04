@@ -27,9 +27,10 @@ use crate::conversation::{
     archive_conversation, compile_context_snapshot_with_budget, create_new_conversation,
     default_chat, delete_conversation, load_active_conversation,
     load_index as load_conversation_index, load_state as load_conversation_state,
-    rename_conversation, restore_conversation, save_conversation_snapshot,
-    save_index as save_conversation_index, save_state as save_conversation_state,
-    set_conversation_pinned, ContextBudget, ConversationIndex, LoadedConversation,
+    rename_conversation, restore_conversation, save_conversation_context_notes,
+    save_conversation_snapshot, save_index as save_conversation_index,
+    save_state as save_conversation_state, set_conversation_pinned, ContextBudget,
+    ConversationIndex, LoadedConversation,
 };
 use crate::diagnostics::environment_diagnostics;
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
@@ -110,6 +111,8 @@ pub struct LeetcodeApp {
     conversation_rename_target: Option<String>,
     conversation_rename_input: String,
     context_inspector_query: String,
+    context_notes: Vec<String>,
+    context_note_input: String,
     tool_log: Vec<ToolLogLine>,
     journal_lines: Vec<String>,
     journal_status: String,
@@ -654,6 +657,11 @@ impl LeetcodeApp {
             conversation_rename_target: None,
             conversation_rename_input: String::new(),
             context_inspector_query: String::new(),
+            context_notes: loaded_conversation
+                .as_ref()
+                .map(|conversation| conversation.state.context_notes.clone())
+                .unwrap_or_default(),
+            context_note_input: String::new(),
             tool_log: Vec::new(),
             journal_lines,
             journal_status: String::new(),
@@ -799,8 +807,10 @@ impl LeetcodeApp {
         self.conversation_index = loaded.index;
         self.conversation_status = loaded.status;
         self.chat = loaded.chat;
+        self.context_notes = loaded.state.context_notes;
         self.conversation_rename_target = None;
         self.conversation_rename_input.clear();
+        self.context_note_input.clear();
         *self.agent_state.lock().expect("agent state poisoned") = restored_agent_state;
         self.agent_started_at = None;
         self.agent_user_message_index = None;
@@ -1039,6 +1049,63 @@ impl LeetcodeApp {
         .bounded()
     }
 
+    fn apply_context_preset(
+        &mut self,
+        label: &str,
+        recent_messages: usize,
+        relevant_messages: usize,
+        recent_runs: usize,
+    ) {
+        self.config.context_recent_messages = recent_messages;
+        self.config.context_relevant_messages = relevant_messages;
+        self.config.context_recent_runs = recent_runs;
+        if let Err(err) = self.config.save() {
+            self.conversation_status = format!("не удалось сохранить пресет контекста: {err}");
+        } else {
+            self.conversation_status = format!("пресет контекста: {label}");
+        }
+    }
+
+    fn save_context_notes(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(conversation_id) = self.active_conversation_id.clone() else {
+            return;
+        };
+        match save_conversation_context_notes(
+            &workspace,
+            &conversation_id,
+            self.context_notes.clone(),
+        ) {
+            Ok(state) => {
+                self.context_notes = state.context_notes;
+                self.conversation_status =
+                    format!("заметки контекста: {}", self.context_notes.len());
+            }
+            Err(err) => {
+                self.conversation_status = format!("не удалось сохранить заметки контекста: {err}");
+            }
+        }
+    }
+
+    fn add_context_note_from_input(&mut self) {
+        let note = self.context_note_input.trim().to_string();
+        if note.is_empty() {
+            return;
+        }
+        self.context_notes.push(note);
+        self.context_note_input.clear();
+        self.save_context_notes();
+    }
+
+    fn remove_context_note(&mut self, index: usize) {
+        if index < self.context_notes.len() {
+            self.context_notes.remove(index);
+            self.save_context_notes();
+        }
+    }
+
     fn active_project_path(&self) -> Option<PathBuf> {
         self.workspace
             .as_ref()
@@ -1183,6 +1250,8 @@ impl LeetcodeApp {
         self.conversation_rename_target = None;
         self.conversation_rename_input.clear();
         self.context_inspector_query.clear();
+        self.context_notes.clear();
+        self.context_note_input.clear();
         self.chat = default_chat();
         self.agent_state
             .lock()
@@ -7490,6 +7559,19 @@ impl LeetcodeApp {
                 ui.add_space(6.0);
                 let mut budget_changed = false;
                 ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Пресет").weak().small());
+                    if ui.button("Короткий").clicked() {
+                        self.apply_context_preset("короткий", 8, 4, 2);
+                    }
+                    if ui.button("Баланс").clicked() {
+                        self.apply_context_preset("баланс", 14, 8, 5);
+                    }
+                    if ui.button("Глубокий").clicked() {
+                        self.apply_context_preset("глубокий", 32, 16, 10);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Бюджет").weak().small());
                     budget_changed |= ui
                         .add(
@@ -7513,6 +7595,46 @@ impl LeetcodeApp {
                 if budget_changed {
                     let _ = self.config.save();
                 }
+                ui.add_space(6.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(RichText::new("Закреплённые заметки").strong().small());
+                ui.label(
+                    RichText::new(
+                        "Эти факты всегда попадают в контекст именно этого чата, независимо от retrieval.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let response = ui.add(
+                        TextEdit::singleline(&mut self.context_note_input)
+                            .desired_width(safe_available_width(ui, 220.0))
+                            .hint_text("Например: архитектурное решение, ограничение, цель"),
+                    );
+                    let enter_pressed = response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if ui.button("Добавить").clicked() || enter_pressed {
+                        self.add_context_note_from_input();
+                    }
+                });
+                let notes = self.context_notes.clone();
+                for (index, note) in notes.iter().enumerate() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("•").weak());
+                        ui.add(
+                            egui::Label::new(RichText::new(note).small())
+                                .wrap()
+                                .halign(egui::Align::Min),
+                        );
+                        if ui.button("Убрать").clicked() {
+                            self.remove_context_note(index);
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+                ui.separator();
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Запрос").weak().small());
@@ -7562,6 +7684,11 @@ impl LeetcodeApp {
                     );
                     ui.label(
                         RichText::new(format!("запуски: {}", snapshot.recent_runs.len()))
+                            .weak()
+                            .small(),
+                    );
+                    ui.label(
+                        RichText::new(format!("заметки: {}", snapshot.pinned_notes.len()))
                             .weak()
                             .small(),
                     );

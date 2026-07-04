@@ -189,8 +189,10 @@ Leetcode развивается из минимального локальног
 - Done: Add a dedicated context inspector so the user can see exactly what summary/retrieval block will be sent to the model.
 - Done: Add archived-chat browser with restore and delete actions.
 - Done: Add manual context budget controls for recent messages, retrieved messages, and run-history count.
-- Todo: Add context presets like "short", "balanced", and "deep research".
-- Todo: Add per-chat context notes that can be pinned into every future prompt.
+- Done: Add context presets like "short", "balanced", and "deep research".
+- Done: Add per-chat context notes that can be pinned into every future prompt.
+- Todo: Add context profile export/import between projects.
+- Todo: Add automatic suggestions for new pinned notes after successful long agent runs.
 
 ## Постоянная планка качества
 

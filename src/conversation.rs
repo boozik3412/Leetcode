@@ -17,6 +17,8 @@ const DEFAULT_RELEVANT_MESSAGE_LIMIT: usize = 8;
 const DEFAULT_RECENT_RUN_LIMIT: usize = 5;
 const ROLLING_SUMMARY_CHARS: usize = 4_000;
 const CONTEXT_MESSAGE_CHARS: usize = 900;
+const CONTEXT_NOTE_LIMIT: usize = 20;
+const CONTEXT_NOTE_CHARS: usize = 500;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct ConversationIndex {
@@ -49,6 +51,8 @@ pub struct ConversationRuntimeState {
     #[serde(default)]
     pub rolling_summary: String,
     #[serde(default)]
+    pub context_notes: Vec<String>,
+    #[serde(default)]
     pub agent_state: Option<AgentState>,
     #[serde(default)]
     pub updated_at: u64,
@@ -67,6 +71,8 @@ pub struct LoadedConversation {
 pub struct AgentContextSnapshot {
     pub conversation_id: String,
     pub rolling_summary: String,
+    #[serde(default)]
+    pub pinned_notes: Vec<String>,
     pub recent_messages: Vec<ContextMessage>,
     pub relevant_messages: Vec<ContextMessage>,
     pub recent_runs: Vec<String>,
@@ -102,6 +108,7 @@ impl ContextBudget {
 impl AgentContextSnapshot {
     pub fn is_empty(&self) -> bool {
         self.rolling_summary.trim().is_empty()
+            && self.pinned_notes.is_empty()
             && self.recent_messages.is_empty()
             && self.relevant_messages.is_empty()
             && self.recent_runs.is_empty()
@@ -119,6 +126,15 @@ impl AgentContextSnapshot {
         };
         let recent = format_messages(&self.recent_messages);
         let relevant = format_messages(&self.relevant_messages);
+        let pinned_notes = if self.pinned_notes.is_empty() {
+            "нет".to_string()
+        } else {
+            self.pinned_notes
+                .iter()
+                .map(|note| format!("- {note}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
         let runs = if self.recent_runs.is_empty() {
             "нет".to_string()
         } else {
@@ -130,8 +146,9 @@ impl AgentContextSnapshot {
         };
 
         format!(
-            "Контекст переписки Leetcode:\nconversation_id: {}\n\nСжатая старая история:\n{}\n\nПоследние сообщения:\n{}\n\nРелевантные старые сообщения:\n{}\n\nПоследние сохранённые запуски:\n{}\n\nИспользуй этот блок как вспомогательную память. Если он конфликтует с текущим запросом пользователя, текущий запрос важнее.",
+            "Контекст переписки Leetcode:\nconversation_id: {}\n\nЗакреплённые заметки чата:\n{}\n\nСжатая старая история:\n{}\n\nПоследние сообщения:\n{}\n\nРелевантные старые сообщения:\n{}\n\nПоследние сохранённые запуски:\n{}\n\nИспользуй этот блок как вспомогательную память. Если он конфликтует с текущим запросом пользователя, текущий запрос важнее.",
             self.conversation_id,
+            pinned_notes,
             rolling,
             empty_label(&recent),
             empty_label(&relevant),
@@ -194,6 +211,7 @@ pub fn load_active_conversation(workspace: &Workspace) -> LoadedConversation {
     };
     refresh_index_meta(&mut index, &active_id, &chat);
     state.rolling_summary = build_rolling_summary(&chat);
+    state.context_notes = normalize_context_notes(state.context_notes);
     state.updated_at = now;
     let _ = save_index(workspace, &index);
     let _ = save_state(workspace, &state);
@@ -275,9 +293,11 @@ pub fn save_conversation_snapshot(
     save_transcript(workspace, conversation_id, chat)?;
     save_index(workspace, &index)?;
 
-    let mut state = load_state(workspace);
+    let mut state = load_state_for_conversation(workspace, conversation_id)
+        .unwrap_or_else(|| load_state(workspace));
     state.active_conversation_id = Some(conversation_id.to_string());
     state.rolling_summary = build_rolling_summary(chat);
+    state.context_notes = normalize_context_notes(state.context_notes);
     state.agent_state = agent_state;
     state.updated_at = now;
     save_state(workspace, &state)?;
@@ -398,6 +418,21 @@ pub fn delete_conversation(
     Ok(load_active_conversation(workspace))
 }
 
+pub fn save_conversation_context_notes(
+    workspace: &Workspace,
+    conversation_id: &str,
+    notes: Vec<String>,
+) -> anyhow::Result<ConversationRuntimeState> {
+    let mut state = load_state_for_conversation(workspace, conversation_id)
+        .unwrap_or_else(|| load_state(workspace));
+    state.active_conversation_id = Some(conversation_id.to_string());
+    state.context_notes = normalize_context_notes(notes);
+    state.updated_at = unix_timestamp();
+    save_state(workspace, &state)?;
+    save_state_for_conversation(workspace, conversation_id, &state)?;
+    Ok(state)
+}
+
 #[cfg(test)]
 pub fn compile_context_snapshot(
     workspace: &Workspace,
@@ -422,6 +457,9 @@ pub fn compile_context_snapshot_with_budget(
     budget: ContextBudget,
 ) -> AgentContextSnapshot {
     let budget = budget.bounded();
+    let pinned_notes = load_state_for_conversation(workspace, conversation_id)
+        .map(|state| normalize_context_notes(state.context_notes))
+        .unwrap_or_default();
     let rolling_summary = build_rolling_summary(chat);
     let recent_start = chat.len().saturating_sub(budget.recent_message_limit);
     let recent_messages = chat[recent_start..]
@@ -462,6 +500,7 @@ pub fn compile_context_snapshot_with_budget(
     AgentContextSnapshot {
         conversation_id: conversation_id.to_string(),
         rolling_summary,
+        pinned_notes,
         recent_messages,
         relevant_messages,
         recent_runs,
@@ -640,6 +679,21 @@ fn context_message_from_line(line: &ChatLine) -> ContextMessage {
         role: role_label(&line.role).to_string(),
         content: compact_inline(&line.content, CONTEXT_MESSAGE_CHARS),
     }
+}
+
+fn normalize_context_notes(notes: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for note in notes {
+        let note = compact_inline(note.trim(), CONTEXT_NOTE_CHARS);
+        if note.is_empty() || normalized.iter().any(|existing| existing == &note) {
+            continue;
+        }
+        normalized.push(note);
+        if normalized.len() >= CONTEXT_NOTE_LIMIT {
+            break;
+        }
+    }
+    normalized
 }
 
 fn format_messages(messages: &[ContextMessage]) -> String {
@@ -858,5 +912,35 @@ mod tests {
         assert_eq!(snapshot.recent_messages.len(), 3);
         assert!(snapshot.relevant_messages.len() <= 2);
         assert!(snapshot.recent_runs.is_empty());
+    }
+
+    #[test]
+    fn context_snapshot_includes_pinned_notes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
+        let loaded = create_new_conversation(&workspace).expect("create");
+        save_conversation_context_notes(
+            &workspace,
+            &loaded.id,
+            vec![
+                "Главная цель: самосовершенствующийся агент".to_string(),
+                "Главная цель: самосовершенствующийся агент".to_string(),
+                "Не ломать UX Codex-style".to_string(),
+            ],
+        )
+        .expect("save notes");
+
+        let snapshot = compile_context_snapshot_with_budget(
+            &workspace,
+            &loaded.id,
+            &loaded.chat,
+            "что помнить",
+            ContextBudget::default(),
+        );
+
+        assert_eq!(snapshot.pinned_notes.len(), 2);
+        assert!(snapshot
+            .to_prompt_block()
+            .contains("самосовершенствующийся агент"));
     }
 }
