@@ -5,7 +5,7 @@ use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CONVERSATION_DIR: &str = "assets/generated/leetcode/conversations";
@@ -69,6 +69,13 @@ pub struct ContextProfile {
     pub title: String,
     pub context_notes: Vec<String>,
     pub budget: ContextBudget,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextProfileEntry {
+    pub rel_path: String,
+    pub abs_path: PathBuf,
+    pub profile: ContextProfile,
 }
 
 #[derive(Clone, Debug)]
@@ -475,6 +482,17 @@ pub fn import_context_profile_file(
     path: &Path,
     conversation_id: &str,
 ) -> anyhow::Result<(ConversationRuntimeState, ContextBudget)> {
+    let profile = read_context_profile_file(path)?;
+    let budget = profile.budget.bounded();
+    let state = save_conversation_context_notes(
+        workspace,
+        conversation_id,
+        normalize_context_notes(profile.context_notes),
+    )?;
+    Ok((state, budget))
+}
+
+pub fn read_context_profile_file(path: &Path) -> anyhow::Result<ContextProfile> {
     let metadata = fs::metadata(path)?;
     if metadata.len() > MAX_CONTEXT_PROFILE_BYTES {
         anyhow::bail!(
@@ -484,14 +502,43 @@ pub fn import_context_profile_file(
         );
     }
     let text = fs::read_to_string(path)?;
-    let profile: ContextProfile = serde_json::from_str(&text)?;
-    let budget = profile.budget.bounded();
-    let state = save_conversation_context_notes(
-        workspace,
-        conversation_id,
-        normalize_context_notes(profile.context_notes),
-    )?;
-    Ok((state, budget))
+    Ok(serde_json::from_str(&text)?)
+}
+
+pub fn list_context_profiles(workspace: &Workspace) -> Vec<ContextProfileEntry> {
+    let Ok(dir) = workspace.resolve_for_write(CONTEXT_PROFILE_DIR) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut profiles = entries
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+        })
+        .filter_map(|entry| {
+            let abs_path = entry.path();
+            let profile = read_context_profile_file(&abs_path).ok()?;
+            let rel_path = abs_path
+                .strip_prefix(workspace.root())
+                .ok()?
+                .to_string_lossy()
+                .replace('\\', "/");
+            Some(ContextProfileEntry {
+                rel_path,
+                abs_path,
+                profile,
+            })
+        })
+        .collect::<Vec<_>>();
+    profiles.sort_by(|left, right| right.profile.exported_at.cmp(&left.profile.exported_at));
+    profiles
 }
 
 #[cfg(test)]
@@ -1036,6 +1083,34 @@ mod tests {
             .pinned_notes
             .iter()
             .any(|note| note.contains("self-improving")));
+    }
+
+    #[test]
+    fn lists_exported_context_profiles() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
+        let source = create_new_conversation(&workspace).expect("source");
+
+        let rel_path = export_context_profile(
+            &workspace,
+            &source.id,
+            "Portable context",
+            &["Use project memory carefully".to_string()],
+            ContextBudget {
+                recent_message_limit: 10,
+                relevant_message_limit: 5,
+                recent_run_limit: 2,
+            },
+        )
+        .expect("export");
+
+        let profiles = list_context_profiles(&workspace);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].rel_path, rel_path);
+        assert_eq!(profiles[0].profile.title, "Portable context");
+
+        let profile = read_context_profile_file(&profiles[0].abs_path).expect("read profile");
+        assert_eq!(profile.context_notes, vec!["Use project memory carefully"]);
     }
 
     #[test]

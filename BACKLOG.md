@@ -198,11 +198,11 @@ Leetcode развивается из минимального локальног
 
 Цель: собрать все механики долговременного контекста в один понятный модуль, чтобы пользователь видел, что именно агент помнит, какие источники подключены и какой профиль контекста будет использоваться в следующем запуске.
 
-- Todo: Add a dedicated Context Control Center surface that unifies chats, pinned notes, imported memory sources, context profiles, context budgets, and recent run history.
-- Todo: Show profile import/export history and make exported profiles easy to reuse across projects.
-- Todo: Add preview/diff for context profile import before applying it to the active chat.
-- Todo: Add quick actions for pinning notes from selected chat messages, run summaries, roadmap items, and project memory sources.
-- Todo: Add context health indicators: approximate prompt size, stale notes, duplicate facts, missing project goals, and oversized sources.
+- Done: Add a dedicated Context Control Center surface that unifies chats, pinned notes, imported memory sources, context profiles, context budgets, and recent run history.
+- Done: Show profile import/export history and make exported profiles easy to reuse across projects.
+- Done: Add preview/diff for context profile import before applying it to the active chat.
+- Done: Add quick actions for pinning notes from selected chat messages, run summaries, roadmap items, and project memory sources.
+- Done: Add context health indicators: approximate prompt size, stale notes, duplicate facts, missing project goals, and oversized sources.
 
 ## Этап 21 - Безопасное самоизменение агента
 
