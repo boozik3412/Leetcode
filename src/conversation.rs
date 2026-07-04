@@ -5,13 +5,16 @@ use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const CONVERSATION_DIR: &str = "assets/generated/leetcode/conversations";
 pub const CONVERSATION_INDEX_PATH: &str = "assets/generated/leetcode/conversations/index.json";
 pub const CONVERSATION_STATE_PATH: &str = "assets/generated/leetcode/conversation_state.json";
+pub const CONTEXT_PROFILE_DIR: &str = "assets/generated/leetcode/context_profiles";
 
 const MAX_TRANSCRIPT_BYTES: usize = 8_000_000;
+const MAX_CONTEXT_PROFILE_BYTES: u64 = 1_000_000;
 const DEFAULT_RECENT_MESSAGE_LIMIT: usize = 14;
 const DEFAULT_RELEVANT_MESSAGE_LIMIT: usize = 8;
 const DEFAULT_RECENT_RUN_LIMIT: usize = 5;
@@ -56,6 +59,16 @@ pub struct ConversationRuntimeState {
     pub agent_state: Option<AgentState>,
     #[serde(default)]
     pub updated_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ContextProfile {
+    pub schema_version: u32,
+    pub exported_at: u64,
+    pub source_conversation_id: String,
+    pub title: String,
+    pub context_notes: Vec<String>,
+    pub budget: ContextBudget,
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +446,54 @@ pub fn save_conversation_context_notes(
     Ok(state)
 }
 
+pub fn export_context_profile(
+    workspace: &Workspace,
+    conversation_id: &str,
+    title: &str,
+    notes: &[String],
+    budget: ContextBudget,
+) -> anyhow::Result<String> {
+    let exported_at = unix_timestamp();
+    let profile = ContextProfile {
+        schema_version: 1,
+        exported_at,
+        source_conversation_id: conversation_id.to_string(),
+        title: compact_inline(title.trim(), 120),
+        context_notes: normalize_context_notes(notes.to_vec()),
+        budget: budget.bounded(),
+    };
+    let rel_path = format!(
+        "{CONTEXT_PROFILE_DIR}/context-profile-{exported_at}-{}.json",
+        safe_identifier(conversation_id)
+    );
+    workspace.write_text(&rel_path, &serde_json::to_string_pretty(&profile)?)?;
+    Ok(rel_path)
+}
+
+pub fn import_context_profile_file(
+    workspace: &Workspace,
+    path: &Path,
+    conversation_id: &str,
+) -> anyhow::Result<(ConversationRuntimeState, ContextBudget)> {
+    let metadata = fs::metadata(path)?;
+    if metadata.len() > MAX_CONTEXT_PROFILE_BYTES {
+        anyhow::bail!(
+            "Context profile is too large: {} bytes, limit is {} bytes",
+            metadata.len(),
+            MAX_CONTEXT_PROFILE_BYTES
+        );
+    }
+    let text = fs::read_to_string(path)?;
+    let profile: ContextProfile = serde_json::from_str(&text)?;
+    let budget = profile.budget.bounded();
+    let state = save_conversation_context_notes(
+        workspace,
+        conversation_id,
+        normalize_context_notes(profile.context_notes),
+    )?;
+    Ok((state, budget))
+}
+
 #[cfg(test)]
 pub fn compile_context_snapshot(
     workspace: &Workspace,
@@ -754,6 +815,28 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn safe_identifier(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .chars()
+        .take(64)
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "profile".to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn empty_label(value: &str) -> String {
     if value.trim().is_empty() {
         "нет".to_string()
@@ -912,6 +995,47 @@ mod tests {
         assert_eq!(snapshot.recent_messages.len(), 3);
         assert!(snapshot.relevant_messages.len() <= 2);
         assert!(snapshot.recent_runs.is_empty());
+    }
+
+    #[test]
+    fn exports_and_imports_context_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
+        let source = create_new_conversation(&workspace).expect("source");
+        let target = create_new_conversation(&workspace).expect("target");
+        let notes = vec![
+            "Primary goal: self-improving coding agent".to_string(),
+            "UX preference: Codex-like layout".to_string(),
+        ];
+        let budget = ContextBudget {
+            recent_message_limit: 22,
+            relevant_message_limit: 11,
+            recent_run_limit: 7,
+        };
+
+        let rel_path =
+            export_context_profile(&workspace, &source.id, "Agent context", &notes, budget)
+                .expect("export");
+        let abs_path = workspace.root().join(rel_path);
+        let (state, imported_budget) =
+            import_context_profile_file(&workspace, &abs_path, &target.id).expect("import");
+
+        assert_eq!(imported_budget.recent_message_limit, 22);
+        assert_eq!(imported_budget.relevant_message_limit, 11);
+        assert_eq!(imported_budget.recent_run_limit, 7);
+        assert_eq!(state.context_notes, notes);
+
+        let snapshot = compile_context_snapshot_with_budget(
+            &workspace,
+            &target.id,
+            &target.chat,
+            "context",
+            ContextBudget::default(),
+        );
+        assert!(snapshot
+            .pinned_notes
+            .iter()
+            .any(|note| note.contains("self-improving")));
     }
 
     #[test]

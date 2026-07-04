@@ -25,12 +25,12 @@ use crate::config::{
 };
 use crate::conversation::{
     archive_conversation, compile_context_snapshot_with_budget, create_new_conversation,
-    default_chat, delete_conversation, load_active_conversation,
-    load_index as load_conversation_index, load_state as load_conversation_state,
-    rename_conversation, restore_conversation, save_conversation_context_notes,
-    save_conversation_snapshot, save_index as save_conversation_index,
-    save_state as save_conversation_state, set_conversation_pinned, ContextBudget,
-    ConversationIndex, LoadedConversation,
+    default_chat, delete_conversation, export_context_profile, import_context_profile_file,
+    load_active_conversation, load_index as load_conversation_index,
+    load_state as load_conversation_state, rename_conversation, restore_conversation,
+    save_conversation_context_notes, save_conversation_snapshot,
+    save_index as save_conversation_index, save_state as save_conversation_state,
+    set_conversation_pinned, ContextBudget, ConversationIndex, LoadedConversation,
 };
 use crate::diagnostics::environment_diagnostics;
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
@@ -113,6 +113,7 @@ pub struct LeetcodeApp {
     context_inspector_query: String,
     context_notes: Vec<String>,
     context_note_input: String,
+    context_note_suggestions: Vec<String>,
     tool_log: Vec<ToolLogLine>,
     journal_lines: Vec<String>,
     journal_status: String,
@@ -662,6 +663,7 @@ impl LeetcodeApp {
                 .map(|conversation| conversation.state.context_notes.clone())
                 .unwrap_or_default(),
             context_note_input: String::new(),
+            context_note_suggestions: Vec::new(),
             tool_log: Vec::new(),
             journal_lines,
             journal_status: String::new(),
@@ -811,6 +813,7 @@ impl LeetcodeApp {
         self.conversation_rename_target = None;
         self.conversation_rename_input.clear();
         self.context_note_input.clear();
+        self.context_note_suggestions.clear();
         *self.agent_state.lock().expect("agent state poisoned") = restored_agent_state;
         self.agent_started_at = None;
         self.agent_user_message_index = None;
@@ -1103,6 +1106,158 @@ impl LeetcodeApp {
         if index < self.context_notes.len() {
             self.context_notes.remove(index);
             self.save_context_notes();
+        }
+    }
+
+    fn export_active_context_profile(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(conversation_id) = self.active_conversation_id.clone() else {
+            self.conversation_status = "нет активного чата для экспорта".to_string();
+            return;
+        };
+        let title = self.active_conversation_title();
+        match export_context_profile(
+            &workspace,
+            &conversation_id,
+            &title,
+            &self.context_notes,
+            self.context_budget(),
+        ) {
+            Ok(rel_path) => {
+                self.conversation_status = format!("профиль контекста экспортирован: {rel_path}");
+                self.refresh_file_rows();
+            }
+            Err(err) => {
+                self.conversation_status =
+                    format!("не удалось экспортировать профиль контекста: {err}");
+            }
+        }
+    }
+
+    fn import_context_profile_for_active_chat(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(conversation_id) = self.active_conversation_id.clone() else {
+            self.conversation_status = "нет активного чата для импорта".to_string();
+            return;
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Context profile", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        match import_context_profile_file(&workspace, &path, &conversation_id) {
+            Ok((state, budget)) => {
+                self.context_notes = state.context_notes;
+                self.config.context_recent_messages = budget.recent_message_limit;
+                self.config.context_relevant_messages = budget.relevant_message_limit;
+                self.config.context_recent_runs = budget.recent_run_limit;
+                let _ = self.config.save();
+                self.context_note_suggestions.clear();
+                self.conversation_status =
+                    format!("профиль контекста импортирован: {}", path.display());
+            }
+            Err(err) => {
+                self.conversation_status =
+                    format!("не удалось импортировать профиль контекста: {err}");
+            }
+        }
+    }
+
+    fn accept_context_note_suggestion(&mut self, index: usize) {
+        if index >= self.context_note_suggestions.len() {
+            return;
+        }
+        let note = self.context_note_suggestions.remove(index);
+        self.context_notes.push(note);
+        self.save_context_notes();
+    }
+
+    fn accept_all_context_note_suggestions(&mut self) {
+        if self.context_note_suggestions.is_empty() {
+            return;
+        }
+        self.context_notes
+            .extend(self.context_note_suggestions.drain(..));
+        self.save_context_notes();
+    }
+
+    fn suggest_context_notes_after_run(
+        &mut self,
+        context: Option<&AgentRunHistoryContext>,
+        final_response: Option<&str>,
+        changed_files: &[String],
+        elapsed: Option<Duration>,
+    ) {
+        let long_enough = elapsed.is_some_and(|duration| duration >= Duration::from_secs(45));
+        let broad_change = changed_files.len() >= 2;
+        let substantial_response = final_response
+            .map(|response| response.chars().count() >= 1_200)
+            .unwrap_or(false);
+        if !(long_enough || broad_change || substantial_response) {
+            return;
+        }
+
+        let mut candidates = Vec::new();
+        if let Some(context) = context {
+            if let Some(plan) = &context.confirmed_plan {
+                candidates.push(format!(
+                    "Согласованный подход: {}",
+                    compact_inline(&plan.summary, 240)
+                ));
+            } else {
+                candidates.push(format!(
+                    "Текущая задача проекта: {}",
+                    compact_inline(&context.user_request, 240)
+                ));
+            }
+        }
+        if !changed_files.is_empty() {
+            candidates.push(format!(
+                "Важные файлы после последней задачи: {}",
+                changed_files
+                    .iter()
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if let Some(line) = final_response.and_then(first_useful_response_line) {
+            candidates.push(format!("Итог последней задачи: {line}"));
+        }
+
+        let mut suggestions = Vec::new();
+        for candidate in candidates {
+            let note = compact_inline(candidate.trim(), 500);
+            if note.is_empty()
+                || self
+                    .context_notes
+                    .iter()
+                    .any(|existing| existing.trim().eq_ignore_ascii_case(note.trim()))
+                || suggestions
+                    .iter()
+                    .any(|existing: &String| existing.trim().eq_ignore_ascii_case(note.trim()))
+            {
+                continue;
+            }
+            suggestions.push(note);
+            if suggestions.len() >= 3 {
+                break;
+            }
+        }
+
+        if !suggestions.is_empty() {
+            self.context_note_suggestions = suggestions;
+            self.conversation_status = format!(
+                "есть предложения для памяти: {}",
+                self.context_note_suggestions.len()
+            );
         }
     }
 
@@ -3591,10 +3746,12 @@ impl LeetcodeApp {
                 }
                 AppEvent::Done => {
                     let final_response = self.latest_agent_response_for_active_run();
-                    if let Some(started_at) = self.agent_started_at.take() {
-                        self.mark_latest_agent_message_elapsed(format_duration(
-                            started_at.elapsed(),
-                        ));
+                    let elapsed = self
+                        .agent_started_at
+                        .take()
+                        .map(|started_at| started_at.elapsed());
+                    if let Some(elapsed) = elapsed {
+                        self.mark_latest_agent_message_elapsed(format_duration(elapsed));
                     }
                     let history_context = self.active_run_history.take();
                     self.agent_user_message_index = None;
@@ -3620,6 +3777,12 @@ impl LeetcodeApp {
                     if let Some(timeline) = &mut self.run_timeline {
                         timeline.finish(&changed_files);
                     }
+                    self.suggest_context_notes_after_run(
+                        history_context.as_ref(),
+                        final_response.as_deref(),
+                        &changed_files,
+                        elapsed,
+                    );
                     self.persist_agent_history(history_context, final_response);
                     chat_changed = true;
                 }
@@ -7487,6 +7650,7 @@ impl LeetcodeApp {
             });
         }
         self.show_context_inspector(ui);
+        self.show_context_note_suggestions(ui);
         self.show_archived_conversations(ui);
         ui.add_space(10.0);
 
@@ -7536,6 +7700,46 @@ impl LeetcodeApp {
             });
     }
 
+    fn show_context_note_suggestions(&mut self, ui: &mut egui::Ui) {
+        if self.context_note_suggestions.is_empty() {
+            return;
+        }
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Предложения для памяти").strong());
+            ui.label(RichText::new("после последней задачи").weak().small());
+            if ui.button("Сохранить все").clicked() {
+                self.accept_all_context_note_suggestions();
+            }
+            if ui.button("Скрыть").clicked() {
+                self.context_note_suggestions.clear();
+            }
+        });
+
+        let suggestions = self.context_note_suggestions.clone();
+        let mut accept_index = None;
+        for (index, suggestion) in suggestions.iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("•").weak());
+                ui.add(
+                    egui::Label::new(RichText::new(suggestion).small())
+                        .wrap()
+                        .halign(egui::Align::Min),
+                );
+                if ui.button("Сохранить").clicked() {
+                    accept_index = Some(index);
+                }
+            });
+        }
+
+        if let Some(index) = accept_index {
+            self.accept_context_note_suggestion(index);
+        }
+    }
+
     fn show_context_inspector(&mut self, ui: &mut egui::Ui) {
         let Some(workspace) = self.workspace.clone() else {
             return;
@@ -7558,6 +7762,15 @@ impl LeetcodeApp {
                 );
                 ui.add_space(6.0);
                 let mut budget_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Экспорт профиля").clicked() {
+                        self.export_active_context_profile();
+                    }
+                    if ui.button("Импорт профиля").clicked() {
+                        self.import_context_profile_for_active_chat();
+                    }
+                });
+                ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Пресет").weak().small());
                     if ui.button("Короткий").clicked() {
@@ -11006,6 +11219,19 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
         compacted.push_str("...");
     }
     compacted
+}
+
+fn first_useful_response_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("```")
+                && !line.starts_with('#')
+                && line.chars().count() >= 24
+        })
+        .next()
+        .map(|line| compact_inline(line, 240))
 }
 
 fn unix_timestamp() -> u64 {

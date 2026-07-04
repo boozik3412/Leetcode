@@ -191,8 +191,48 @@ Leetcode развивается из минимального локальног
 - Done: Add manual context budget controls for recent messages, retrieved messages, and run-history count.
 - Done: Add context presets like "short", "balanced", and "deep research".
 - Done: Add per-chat context notes that can be pinned into every future prompt.
-- Todo: Add context profile export/import between projects.
-- Todo: Add automatic suggestions for new pinned notes after successful long agent runs.
+- Done: Add context profile export/import between projects.
+- Done: Add automatic suggestions for new pinned notes after successful long agent runs.
+
+## Этап 20 - Центр управления контекстом
+
+Цель: собрать все механики долговременного контекста в один понятный модуль, чтобы пользователь видел, что именно агент помнит, какие источники подключены и какой профиль контекста будет использоваться в следующем запуске.
+
+- Todo: Add a dedicated Context Control Center surface that unifies chats, pinned notes, imported memory sources, context profiles, context budgets, and recent run history.
+- Todo: Show profile import/export history and make exported profiles easy to reuse across projects.
+- Todo: Add preview/diff for context profile import before applying it to the active chat.
+- Todo: Add quick actions for pinning notes from selected chat messages, run summaries, roadmap items, and project memory sources.
+- Todo: Add context health indicators: approximate prompt size, stale notes, duplicate facts, missing project goals, and oversized sources.
+
+## Этап 21 - Безопасное самоизменение агента
+
+Цель: сделать самоулучшение Leetcode управляемым и обратимым: перед изменением собственного кода агент должен фиксировать намерение, точку восстановления, проверки и понятный итог.
+
+- Todo: Add a self-modification workflow that creates a restore snapshot before changing files in the Leetcode project itself.
+- Todo: Require a confirmed implementation plan before self-modification starts, with affected files and expected validation commands.
+- Todo: Run `cargo fmt`, `cargo check`, and `cargo test` automatically after self-modification changes.
+- Todo: Detect startup-breaking changes and offer rollback or targeted repair instead of leaving the app in a broken state.
+- Todo: Save self-modification runs into agent history and roadmap milestones with changed files, validation output, and final decision.
+
+## Этап 22 - Живая дорожная карта проекта
+
+Цель: превратить roadmap в живую историю развития проекта: прошлые изменения, текущая работа, будущие этапы и финальное видение должны быть связаны с коммитами, агентными запусками и памятью проекта.
+
+- Todo: Move roadmap data into a structured module/state file while keeping `BACKLOG.md` as readable documentation.
+- Todo: Add agent-callable tools to record milestones, start/current work, complete roadmap items, and plan future stages.
+- Todo: Link roadmap items to commits, changed files, agent history records, project memory, and validation results.
+- Todo: Add UI controls for filtering roadmap by done/current/next, editing item status, and exporting roadmap snapshots.
+- Todo: Keep final product goals visible as the last section of the roadmap.
+
+## Этап 23 - Проводник истории агента
+
+Цель: сделать историю действий агента полноценным инструментом анализа: пользователь должен быстро понимать, что агент делал, почему, какими инструментами пользовался, где ошибался и что изменил.
+
+- Todo: Add a searchable Agent History Explorer with filters by status, provider/model, tool, changed file, duration, and date.
+- Todo: Show each run as a readable report with confirmed plan, tool calls, approvals, changed files, validation, errors, and final response.
+- Todo: Add actions to replay a run as an eval case, turn run output into project memory, or attach it to a roadmap milestone.
+- Todo: Add compact charts for run duration, tool usage, failures, and provider reliability.
+- Todo: Add export for selected runs as JSON/Markdown for external review.
 
 ## Постоянная планка качества
 
