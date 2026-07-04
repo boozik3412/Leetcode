@@ -207,6 +207,7 @@ pub struct LeetcodeApp {
     pending_run_gate: Option<PendingRunGate>,
     workspace_mode: WorkspaceMode,
     right_panel_view: RightPanelView,
+    file_panel_collapsed: bool,
     roadmap_filter: RoadmapFilter,
     roadmap_status: String,
     active_center_tab: CenterTab,
@@ -959,6 +960,7 @@ impl LeetcodeApp {
             pending_run_gate: None,
             workspace_mode: WorkspaceMode::Chat,
             right_panel_view: RightPanelView::Roadmap,
+            file_panel_collapsed: false,
             roadmap_filter: RoadmapFilter::All,
             roadmap_status: String::new(),
             active_center_tab: CenterTab::Agent,
@@ -4950,8 +4952,9 @@ impl LeetcodeApp {
     }
 
     fn show_file_panel(&mut self, ctx: &egui::Context) {
-        let keyboard_shortcuts_enabled =
-            self.file_rename_target.is_none() && !ctx.wants_keyboard_input();
+        let keyboard_shortcuts_enabled = !self.file_panel_collapsed
+            && self.file_rename_target.is_none()
+            && !ctx.wants_keyboard_input();
         if keyboard_shortcuts_enabled && ctx.input(|input| input.key_pressed(egui::Key::F2)) {
             if let Some(path) = self.selected_tree_path.clone() {
                 self.start_tree_rename(&path);
@@ -4963,10 +4966,15 @@ impl LeetcodeApp {
             }
         }
 
+        if self.file_panel_collapsed {
+            self.show_collapsed_file_panel(ctx);
+            return;
+        }
+
         egui::SidePanel::left("files")
             .resizable(true)
-            .default_width(300.0)
-            .width_range(220.0..=560.0)
+            .default_width(280.0)
+            .width_range(180.0..=720.0)
             .frame(side_panel_frame())
             .show(ctx, |ui| {
                 ui.add_space(8.0);
@@ -4976,14 +4984,27 @@ impl LeetcodeApp {
                     .len()
                     .max(usize::from(self.workspace.is_some()));
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Рабочие папки").weak().small());
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("Проекты").strong().size(18.0));
-                        if let Some(workspace) = &self.workspace {
-                            chip(ui, workspace.display_name());
-                        }
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("Рабочие папки").weak().small());
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new("Проекты").strong().size(18.0));
+                                if let Some(workspace) = &self.workspace {
+                                    chip(ui, workspace.display_name());
+                                }
+                            });
+                            ui.label(RichText::new(project_count_label(project_count)).weak().small());
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button("‹")
+                                .on_hover_text("Свернуть левую панель проекта")
+                                .clicked()
+                            {
+                                self.file_panel_collapsed = true;
+                            }
+                        });
                     });
-                    ui.label(RichText::new(project_count_label(project_count)).weak().small());
                 });
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -5011,6 +5032,10 @@ impl LeetcodeApp {
                         if ui.button("Обновить").clicked() {
                             self.refresh_file_rows();
                             self.refresh_git_summary();
+                            ui.close_menu();
+                        }
+                        if ui.button("Свернуть панель").clicked() {
+                            self.file_panel_collapsed = true;
                             ui.close_menu();
                         }
                     });
@@ -5447,6 +5472,59 @@ impl LeetcodeApp {
                     ui.add_space(4.0);
                     ui.label(RichText::new(&self.file_operation_status).weak().small());
                 }
+            });
+    }
+
+    fn show_collapsed_file_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::left("files_collapsed")
+            .resizable(false)
+            .default_width(52.0)
+            .width_range(52.0..=52.0)
+            .frame(side_panel_frame())
+            .show(ctx, |ui| {
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    if ui
+                        .add_sized([34.0, 30.0], egui::Button::new("›"))
+                        .on_hover_text("Развернуть проекты и файловое дерево")
+                        .clicked()
+                    {
+                        self.file_panel_collapsed = false;
+                    }
+
+                    ui.add_space(6.0);
+                    if ui
+                        .add_sized([34.0, 30.0], egui::Button::new("+"))
+                        .on_hover_text("Открыть или добавить проект")
+                        .clicked()
+                    {
+                        self.choose_workspace();
+                    }
+
+                    if ui
+                        .add_sized([34.0, 30.0], egui::Button::new("↻"))
+                        .on_hover_text("Обновить дерево проекта")
+                        .clicked()
+                    {
+                        self.refresh_file_rows();
+                        self.refresh_git_summary();
+                    }
+                });
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.vertical_centered(|ui| {
+                    if let Some(workspace) = &self.workspace {
+                        let display_name = workspace.display_name();
+                        let name = compact_inline(&display_name, 4);
+                        ui.label(RichText::new(name).strong())
+                            .on_hover_text(display_name);
+                    } else {
+                        ui.label(RichText::new("нет").weak().small());
+                    }
+                });
             });
     }
 
@@ -7880,8 +7958,8 @@ impl LeetcodeApp {
 
         egui::SidePanel::right("tools")
             .resizable(true)
-            .default_width(370.0)
-            .width_range(300.0..=680.0)
+            .default_width(360.0)
+            .width_range(260.0..=760.0)
             .frame(side_panel_frame())
             .show(ctx, |ui| {
                 ui.add_space(6.0);
