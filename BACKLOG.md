@@ -208,11 +208,12 @@ Leetcode развивается из минимального локальног
 
 Цель: сделать самоулучшение Leetcode управляемым и обратимым: перед изменением собственного кода агент должен фиксировать намерение, точку восстановления, проверки и понятный итог.
 
-- Todo: Add a self-modification workflow that creates a restore snapshot before changing files in the Leetcode project itself.
-- Todo: Require a confirmed implementation plan before self-modification starts, with affected files and expected validation commands.
-- Todo: Run `cargo fmt`, `cargo check`, and `cargo test` automatically after self-modification changes.
-- Todo: Detect startup-breaking changes and offer rollback or targeted repair instead of leaving the app in a broken state.
-- Todo: Save self-modification runs into agent history and roadmap milestones with changed files, validation output, and final decision.
+- Done: Add a self-modification workflow that creates a restore snapshot before changing files in the Leetcode project itself.
+- Done: Reuse the confirmed pre-run implementation plan as the self-modification gate before the agent starts editing Leetcode.
+- Done: Run `cargo fmt`, `cargo check`, and `cargo test` automatically after self-modification changes.
+- Done: Detect validation-breaking changes and show rollback/targeted-repair guidance with the restore snapshot path.
+- Done: Save self-modification snapshots and validation output into the run timeline and agent history.
+- Todo: Link self-modification runs to structured roadmap milestones after Stage 22 introduces the roadmap state module.
 
 ## Этап 22 - Живая дорожная карта проекта
 

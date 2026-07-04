@@ -18,6 +18,7 @@ mod orchestration;
 mod project;
 mod provider_health;
 mod run_timeline;
+mod self_modification;
 mod terminal;
 mod tools;
 mod workspace;

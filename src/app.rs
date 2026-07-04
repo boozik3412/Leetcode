@@ -55,6 +55,10 @@ use crate::provider_health::{
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
 use crate::run_timeline::{RunTimeline, RunTimelineStatus};
+use crate::self_modification::{
+    is_leetcode_workspace, prepare_self_modification_guard, run_self_modification_validation,
+    SelfModificationGuard,
+};
 use crate::terminal::{
     clear_terminal_output, read_terminal_snapshot, start_terminal_session, stop_terminal_session,
     write_terminal_input,
@@ -183,6 +187,8 @@ pub struct LeetcodeApp {
     run_timeline: Option<RunTimeline>,
     run_timeline_anchor_index: Option<usize>,
     active_run_history: Option<AgentRunHistoryContext>,
+    self_modification_guard: Option<SelfModificationGuard>,
+    self_modification_status: String,
     agent_state: Arc<Mutex<AgentState>>,
     approvals: ApprovalMap,
     pending_approval: Option<PendingApproval>,
@@ -733,6 +739,8 @@ impl LeetcodeApp {
             run_timeline: None,
             run_timeline_anchor_index: None,
             active_run_history: None,
+            self_modification_guard: None,
+            self_modification_status: String::new(),
             agent_state: Arc::new(Mutex::new(restored_agent_state)),
             approvals,
             pending_approval: None,
@@ -822,6 +830,8 @@ impl LeetcodeApp {
         self.run_timeline = None;
         self.run_timeline_anchor_index = None;
         self.active_run_history = None;
+        self.self_modification_guard = None;
+        self.self_modification_status.clear();
         self.pending_run_gate = None;
         self.pending_approval = None;
         self.is_running = false;
@@ -3572,6 +3582,8 @@ impl LeetcodeApp {
         self.run_timeline = None;
         self.run_timeline_anchor_index = None;
         self.active_run_history = None;
+        self.self_modification_guard = None;
+        self.self_modification_status.clear();
         self.pending_run_gate = None;
         self.tool_log.clear();
         self.persist_current_conversation();
@@ -3640,6 +3652,119 @@ impl LeetcodeApp {
                 append_journal(format!("agent_history\terror\t{err}"));
             }
         }
+    }
+
+    fn prepare_self_modification_guard_for_run(&mut self, user_request: &str) -> bool {
+        self.self_modification_guard = None;
+        let Some(workspace) = self.workspace.clone() else {
+            return true;
+        };
+        if !is_leetcode_workspace(&workspace) {
+            self.self_modification_status.clear();
+            return true;
+        }
+
+        self.refresh_git_summary();
+        match prepare_self_modification_guard(
+            &workspace,
+            user_request,
+            self.git_changed_files.clone(),
+        ) {
+            Ok(Some(guard)) => {
+                let snapshot = guard.snapshot.clone();
+                self.self_modification_status = format!(
+                    "self-mod snapshot: {} · файлов: {}",
+                    snapshot.id, snapshot.files_copied
+                );
+                self.tool_log.push(ToolLogLine {
+                    title: "self-mod snapshot".to_string(),
+                    content: format!(
+                        "{}\nRestore path: {}/files",
+                        self.self_modification_status, snapshot.rel_path
+                    ),
+                });
+                if let Some(timeline) = &mut self.run_timeline {
+                    timeline.note_with_link(
+                        format!("selfmod-snapshot-{}", snapshot.id),
+                        "Self-mod snapshot",
+                        format!(
+                            "Перед изменением Leetcode создан restore snapshot: {} · файлов: {}",
+                            snapshot.rel_path, snapshot.files_copied
+                        ),
+                        snapshot.rel_path.clone(),
+                    );
+                }
+                append_journal(format!(
+                    "self_modification\tsnapshot\t{}\t{}",
+                    snapshot.id, snapshot.rel_path
+                ));
+                self.self_modification_guard = Some(guard);
+                true
+            }
+            Ok(None) => {
+                self.self_modification_status.clear();
+                true
+            }
+            Err(err) => {
+                let message = format!(
+                    "Self-modification остановлен: не удалось создать restore snapshot перед изменением Leetcode: {err}"
+                );
+                self.self_modification_status = message.clone();
+                self.chat.push(ChatLine::system(message.clone()));
+                self.tool_log.push(ToolLogLine {
+                    title: "self-mod snapshot error".to_string(),
+                    content: message.clone(),
+                });
+                if let Some(timeline) = &mut self.run_timeline {
+                    timeline.fail(&message);
+                    timeline.finish(&self.git_changed_files);
+                }
+                self.agent_live_status.clear();
+                self.is_running = false;
+                self.cancel = None;
+                false
+            }
+        }
+    }
+
+    fn finish_self_modification_guard(&mut self) {
+        let Some(guard) = self.self_modification_guard.take() else {
+            return;
+        };
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+
+        self.refresh_git_summary();
+        let validation =
+            run_self_modification_validation(&workspace, guard, &self.git_changed_files);
+        self.self_modification_status = validation.short_status();
+        let report = validation.report();
+        if let Some(timeline) = &mut self.run_timeline {
+            timeline.validation_result(
+                format!("selfmod-validation-{}", validation.snapshot.id),
+                "Self-mod validation",
+                report.clone(),
+                validation.success,
+            );
+        }
+        self.tool_log.push(ToolLogLine {
+            title: "self-mod validation".to_string(),
+            content: report.clone(),
+        });
+        append_journal(format!(
+            "self_modification\tvalidation\t{}\t{}\t{}",
+            validation.snapshot.id,
+            if validation.success { "ok" } else { "failed" },
+            validation.snapshot.rel_path
+        ));
+        if validation.ran && !validation.success {
+            self.chat.push(ChatLine::system(format!(
+                "Self-check не прошёл. Snapshot для восстановления: {}/files. Можно попросить агента исправить ошибку по отчёту self-mod validation или восстановить файлы из snapshot.",
+                validation.snapshot.rel_path
+            )));
+        }
+        self.refresh_git_summary();
     }
 
     fn drain_events(&mut self) {
@@ -3772,6 +3897,7 @@ impl LeetcodeApp {
                         title: "запуск".to_string(),
                         content: "Запуск агента завершён".to_string(),
                     });
+                    self.finish_self_modification_guard();
                     let changed_files = self.git_changed_files.clone();
                     self.append_run_timeline_context();
                     if let Some(timeline) = &mut self.run_timeline {
@@ -4055,6 +4181,11 @@ impl LeetcodeApp {
         user_request: String,
         confirmed_plan: Option<AgentRunConfirmedPlan>,
     ) {
+        if !self.prepare_self_modification_guard_for_run(&user_request) {
+            self.persist_current_conversation();
+            return;
+        }
+
         let (tx, rx) = mpsc::channel();
         let config = self.config.clone();
         let workspace = self.workspace.clone();
@@ -6568,6 +6699,10 @@ impl LeetcodeApp {
                 .map(|(_, label)| *label)
                 .unwrap_or("Обычный");
             status_line(ui, "Доступ", policy_label);
+
+            if !self.self_modification_status.trim().is_empty() {
+                status_line(ui, "Self-mod", &self.self_modification_status);
+            }
 
             if let Some(prompt) = &self.pending_approval {
                 ui.add_space(6.0);

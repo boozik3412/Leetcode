@@ -238,6 +238,23 @@ impl RunTimeline {
         self.steps.push(step);
     }
 
+    pub fn validation_result(
+        &mut self,
+        id: impl Into<String>,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        success: bool,
+    ) {
+        let status = if success {
+            RunTimelineStatus::Succeeded
+        } else {
+            self.failed = true;
+            RunTimelineStatus::Failed
+        };
+        self.steps
+            .push(RunTimelineStep::new(id, title, detail, status));
+    }
+
     pub fn fail(&mut self, error: &str) {
         self.failed = true;
         if let Some(step) = self.steps.iter_mut().rev().find(|step| {
