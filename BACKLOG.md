@@ -154,6 +154,7 @@ Leetcode развивается из минимального локальног
 - Done: Add optional crash report folder and panic hook.
 - Done: Add Release Cockpit in the right workspace panel with version summary, preflight checklist, release/package commands, artifact discovery, and publication diagnostics.
 - Done: Expose the Windows package script as a detected project command when `scripts/package-windows.ps1` is present.
+- Done: Add Release Cockpit action that records the current release candidate, readiness checklist, artifacts, validations, Git context, and release command history into Roadmap as a milestone.
 
 ## Этап 18 - Управляемая автономность и таймлайн запуска
 
@@ -228,6 +229,7 @@ Leetcode развивается из минимального локальног
 - Done: Link roadmap items to commits, changed files, agent history records, project memory ids, and validation results through structured link fields.
 - Done: Add UI controls for filtering roadmap by done/current/next, editing item status, and exporting roadmap snapshots.
 - Done: Keep final product goals visible as the last section of the roadmap.
+- Done: Link Release Cockpit checkpoints into Roadmap milestones so releases become part of the living project history.
 
 ## Этап 23 - Проводник истории агента
 

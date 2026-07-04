@@ -8459,6 +8459,15 @@ impl LeetcodeApp {
             {
                 self.open_release_dist_folder();
             }
+            if ui
+                .add_enabled(workspace.is_some(), egui::Button::new("В Roadmap"))
+                .on_hover_text(
+                    "Зафиксировать текущую версию, готовность, проверки и артефакты как milestone Roadmap.",
+                )
+                .clicked()
+            {
+                self.record_release_milestone_from_ui(&version, &checklist, &artifacts, readiness, passed);
+            }
         });
 
         if self.project_is_running {
@@ -8660,6 +8669,63 @@ impl LeetcodeApp {
         }
         self.open_project_folder(&dist);
         self.project_status = format!("открыто: {}", dist.display());
+    }
+
+    fn record_release_milestone_from_ui(
+        &mut self,
+        version: &str,
+        checklist: &[ReleaseChecklistItem],
+        artifacts: &[ReleaseArtifact],
+        readiness: f32,
+        passed: usize,
+    ) {
+        let Some(workspace) = self.workspace.clone() else {
+            self.roadmap_status = "Выберите проект, чтобы зафиксировать релиз.".to_string();
+            return;
+        };
+
+        self.refresh_git_summary();
+        let validation = release_validation_summary(checklist, passed);
+        let detail = release_milestone_detail(
+            readiness,
+            passed,
+            checklist,
+            artifacts,
+            &self.project_runs,
+            &self.git_summary,
+        );
+        let changed_files = artifacts
+            .iter()
+            .map(|artifact| artifact.path.clone())
+            .collect::<Vec<_>>();
+        let result = record_milestone(
+            &workspace,
+            RecordMilestoneArgs {
+                title: format!("Release checkpoint: {version}"),
+                detail,
+                item_id: Some(format!("release-{}", current_unix_timestamp())),
+                status: Some("done".to_string()),
+                commits: Vec::new(),
+                changed_files,
+                agent_run_id: None,
+                validation: Some(validation),
+                memory_ids: Vec::new(),
+            },
+        );
+
+        if result.ok {
+            self.roadmap_status = format!("Релиз зафиксирован в Roadmap: {version}");
+            self.project_status = self.roadmap_status.clone();
+            self.tool_log.push(ToolLogLine {
+                title: "roadmap release".to_string(),
+                content: result.output,
+            });
+            self.refresh_file_rows();
+            self.refresh_git_summary();
+        } else {
+            self.roadmap_status = format!("Не удалось зафиксировать релиз: {}", result.output);
+            self.project_status = self.roadmap_status.clone();
+        }
     }
 
     fn show_right_overview(&mut self, ui: &mut egui::Ui) {
@@ -11628,6 +11694,88 @@ fn release_diagnostic_row(ui: &mut egui::Ui, item: &DiagnosticItem) {
         chip(ui, &item.status);
         ui.add(egui::Label::new(RichText::new(&item.detail).weak().small()).wrap());
     });
+}
+
+fn release_validation_summary(checklist: &[ReleaseChecklistItem], passed: usize) -> String {
+    let failed = checklist
+        .iter()
+        .filter(|item| !item.ok)
+        .map(|item| item.title.as_str())
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        format!("release preflight: {passed}/{} ok", checklist.len())
+    } else {
+        format!(
+            "release preflight: {passed}/{} ok; требует внимания: {}",
+            checklist.len(),
+            failed.join(", ")
+        )
+    }
+}
+
+fn release_milestone_detail(
+    readiness: f32,
+    passed: usize,
+    checklist: &[ReleaseChecklistItem],
+    artifacts: &[ReleaseArtifact],
+    project_runs: &[ProjectRunRecord],
+    git_summary: &str,
+) -> String {
+    let checklist_lines = checklist
+        .iter()
+        .map(|item| {
+            format!(
+                "- [{}] {}: {}",
+                if item.ok { "x" } else { " " },
+                item.title,
+                compact_inline(&item.detail, 160)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let artifact_lines = if artifacts.is_empty() {
+        "- артефакты не найдены".to_string()
+    } else {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                format!(
+                    "- {}: {} ({})",
+                    artifact.label,
+                    artifact.path,
+                    file_size_label(artifact.size_bytes)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let run_lines = project_runs
+        .iter()
+        .rev()
+        .filter(|run| release_command_kind(&run.command.id).is_some())
+        .take(6)
+        .map(|run| {
+            format!(
+                "- {}: {}{}",
+                run.label,
+                run.status.label(),
+                run.exit_code
+                    .map(|code| format!(" (exit {code})"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>();
+    let run_lines = if run_lines.is_empty() {
+        "- релизные команды ещё не запускались".to_string()
+    } else {
+        run_lines.join("\n")
+    };
+    format!(
+        "Готовность релиза: {:.0}% ({passed}/{} пунктов).\n\nЧеклист:\n{checklist_lines}\n\nАртефакты:\n{artifact_lines}\n\nПоследние релизные запуски:\n{run_lines}\n\nGit:\n{}",
+        readiness * 100.0,
+        checklist.len(),
+        compact_inline(git_summary, 500)
+    )
 }
 
 fn release_artifacts(root: &Path) -> Vec<ReleaseArtifact> {
