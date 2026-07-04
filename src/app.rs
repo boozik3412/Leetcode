@@ -6698,42 +6698,33 @@ impl LeetcodeApp {
         let missing_goals = memory.goals.is_empty();
         let stale_summary = snapshot.rolling_summary.trim().is_empty() && self.chat.len() > 20;
 
-        ui.columns(3, |columns| {
-            roadmap_metric(&mut columns[0], self.context_notes.len(), "заметок");
-            roadmap_metric(&mut columns[1], memory.sources.len(), "источников");
-            roadmap_metric(&mut columns[2], profiles.len(), "профилей");
-        });
-        ui.columns(3, |columns| {
-            roadmap_metric(&mut columns[0], self.chat.len(), "сообщений");
-            roadmap_metric(&mut columns[1], self.agent_history.len(), "runs");
-            roadmap_metric(&mut columns[2], prompt_chars, "символов");
-        });
-        ui.add_space(6.0);
-        let ratio = (prompt_chars as f32 / 24_000.0).clamp(0.0, 1.0);
-        ui.add(
-            egui::ProgressBar::new(ratio)
-                .desired_width(safe_available_width(ui, 120.0))
-                .text(format!(
-                    "примерный prompt: {}",
-                    compact_number(prompt_chars)
-                )),
+        let health_score = context_health_score(
+            prompt_chars,
+            duplicate_notes,
+            missing_goals,
+            stale_summary,
+            oversized_sources,
         );
-        ui.horizontal_wrapped(|ui| {
-            if duplicate_notes == 0 {
-                chip(ui, "дубликатов нет");
-            } else {
-                chip(ui, format!("дубликатов: {duplicate_notes}"));
-            }
-            if missing_goals {
-                chip(ui, "нет целей проекта");
-            }
-            if stale_summary {
-                chip(ui, "summary нужно обновить");
-            }
-            if oversized_sources > 0 {
-                chip(ui, format!("крупных источников: {oversized_sources}"));
-            }
-        });
+        context_overview_visual(
+            ui,
+            health_score,
+            prompt_chars,
+            self.chat.len(),
+            self.context_notes.len(),
+            memory.sources.len(),
+            self.agent_history.len(),
+            profiles.len(),
+            snapshot.recent_messages.len(),
+            snapshot.relevant_messages.len(),
+            snapshot.recent_runs.len(),
+        );
+        context_health_strip(
+            ui,
+            duplicate_notes,
+            missing_goals,
+            stale_summary,
+            oversized_sources,
+        );
         if !self.context_health_status.trim().is_empty() {
             full_width_wrapped_label(
                 ui,
@@ -6743,7 +6734,7 @@ impl LeetcodeApp {
 
         ui.add_space(8.0);
         egui::CollapsingHeader::new("Чаты и активный диалог")
-            .default_open(true)
+            .default_open(false)
             .show(ui, |ui| {
                 let active_id = self.active_conversation_id.clone();
                 let mut switch_to: Option<String> = None;
@@ -6798,7 +6789,7 @@ impl LeetcodeApp {
                 }
             });
 
-        egui::CollapsingHeader::new("Бюджет и предпросмотр prompt")
+        egui::CollapsingHeader::new("Бюджет контекста")
             .default_open(true)
             .show(ui, |ui| {
                 let mut budget_changed = false;
@@ -6856,14 +6847,39 @@ impl LeetcodeApp {
                     );
                     status_line(ui, "runs", &snapshot.recent_runs.len().to_string());
                 });
-                let mut prompt_preview = prompt_block;
-                ui.add(
-                    TextEdit::multiline(&mut prompt_preview)
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(safe_available_width(ui, 320.0))
-                        .desired_rows(10)
-                        .interactive(false),
+                context_signal_row(
+                    ui,
+                    "последние сообщения",
+                    snapshot.recent_messages.len(),
+                    self.config.context_recent_messages.max(1),
+                    egui::Color32::from_rgb(96, 191, 143),
                 );
+                context_signal_row(
+                    ui,
+                    "релевантные",
+                    snapshot.relevant_messages.len(),
+                    self.config.context_relevant_messages.max(1),
+                    accent_color(),
+                );
+                context_signal_row(
+                    ui,
+                    "запуски",
+                    snapshot.recent_runs.len(),
+                    self.config.context_recent_runs.max(1),
+                    egui::Color32::from_rgb(220, 174, 92),
+                );
+                egui::CollapsingHeader::new("Технический prompt preview")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        let mut prompt_preview = prompt_block;
+                        ui.add(
+                            TextEdit::multiline(&mut prompt_preview)
+                                .font(egui::TextStyle::Monospace)
+                                .desired_width(safe_available_width(ui, 320.0))
+                                .desired_rows(10)
+                                .interactive(false),
+                        );
+                    });
             });
 
         egui::CollapsingHeader::new("Закреплённые заметки")
@@ -7573,13 +7589,35 @@ impl LeetcodeApp {
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
+                    let (panel_title, panel_subtitle) = match self.right_panel_view {
+                        RightPanelView::Context => (
+                            "Контекст агента",
+                            "что агент помнит, что попадёт в prompt и где есть риск шума",
+                        ),
+                        RightPanelView::Roadmap => (
+                            "Roadmap",
+                            "история проекта, текущий фокус и следующие этапы",
+                        ),
+                        RightPanelView::Logs => {
+                            ("Журнал", "история запусков, инструменты, git и трассировка")
+                        }
+                        RightPanelView::Project => {
+                            ("Проект", "команды, терминал, preview и рабочий стол")
+                        }
+                        RightPanelView::Assets => {
+                            ("Ассеты", "генерация, библиотека, экспорт и варианты")
+                        }
+                        RightPanelView::Control => (
+                            "Контроль",
+                            "доступ, память, провайдеры, проверки и окружение",
+                        ),
+                        RightPanelView::Overview => {
+                            ("Сводка", "состояние агента, проекта и быстрые переходы")
+                        }
+                    };
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Рабочая панель").strong().size(18.0));
-                        ui.label(
-                            RichText::new("состояние, roadmap и управление проектом")
-                                .weak()
-                                .small(),
-                        );
+                        ui.label(RichText::new(panel_title).strong().size(18.0));
+                        ui.label(RichText::new(panel_subtitle).weak().small());
                     });
                     if self.is_running || self.project_is_running || self.asset_is_running {
                         ui.spinner();
@@ -10360,19 +10398,19 @@ fn apply_app_theme(ctx: &egui::Context) {
 }
 
 fn app_bg() -> egui::Color32 {
-    egui::Color32::from_rgb(15, 17, 21)
+    egui::Color32::from_rgb(12, 14, 18)
 }
 
 fn panel_bg() -> egui::Color32 {
-    egui::Color32::from_rgb(20, 23, 28)
+    egui::Color32::from_rgb(16, 19, 24)
 }
 
 fn surface_bg() -> egui::Color32 {
-    egui::Color32::from_rgb(25, 29, 35)
+    egui::Color32::from_rgb(21, 25, 31)
 }
 
 fn surface_alt_bg() -> egui::Color32 {
-    egui::Color32::from_rgb(31, 36, 44)
+    egui::Color32::from_rgb(27, 32, 39)
 }
 
 fn text_color() -> egui::Color32 {
@@ -10384,36 +10422,36 @@ fn muted_color() -> egui::Color32 {
 }
 
 fn accent_color() -> egui::Color32 {
-    egui::Color32::from_rgb(59, 190, 225)
+    egui::Color32::from_rgb(75, 184, 217)
 }
 
 fn subtle_accent() -> egui::Color32 {
-    egui::Color32::from_rgb(72, 112, 128)
+    egui::Color32::from_rgb(66, 104, 122)
 }
 
 fn border_color() -> egui::Color32 {
-    egui::Color32::from_rgb(47, 54, 64)
+    egui::Color32::from_rgb(38, 45, 54)
 }
 
 fn top_bar_frame() -> egui::Frame {
     egui::Frame::none()
-        .fill(egui::Color32::from_rgb(18, 21, 26))
-        .stroke(egui::Stroke::new(1.0, border_color()))
-        .inner_margin(egui::Margin::symmetric(10.0, 4.0))
+        .fill(egui::Color32::from_rgb(15, 18, 23))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 36, 44)))
+        .inner_margin(egui::Margin::symmetric(12.0, 5.0))
 }
 
 fn menu_bar_frame() -> egui::Frame {
     egui::Frame::none()
-        .fill(egui::Color32::from_rgb(12, 14, 18))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(31, 36, 44)))
+        .fill(egui::Color32::from_rgb(9, 11, 14))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(26, 31, 38)))
         .inner_margin(egui::Margin::symmetric(8.0, 2.0))
 }
 
 fn side_panel_frame() -> egui::Frame {
     egui::Frame::none()
         .fill(panel_bg())
-        .stroke(egui::Stroke::new(1.0, border_color()))
-        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(31, 37, 45)))
+        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
 }
 
 fn central_frame() -> egui::Frame {
@@ -10424,9 +10462,10 @@ fn central_frame() -> egui::Frame {
 
 fn input_bar_frame() -> egui::Frame {
     egui::Frame::none()
-        .fill(egui::Color32::from_rgb(13, 15, 19))
+        .fill(egui::Color32::from_rgb(17, 20, 25))
         .stroke(egui::Stroke::new(1.0, border_color()))
-        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+        .rounding(egui::Rounding::same(7.0))
+        .inner_margin(egui::Margin::symmetric(12.0, 7.0))
 }
 
 fn card_frame() -> egui::Frame {
@@ -10486,23 +10525,39 @@ fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView, views: &[Rig
         ui.spacing_mut().item_spacing.y = 6.0;
         for view in views.iter().copied() {
             let is_selected = *selected == view;
+            let text_color = if is_selected {
+                text_color()
+            } else {
+                muted_color()
+            };
+            let fill = if is_selected {
+                egui::Color32::from_rgb(33, 96, 118)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            let stroke = if is_selected {
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 174, 205))
+            } else {
+                egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
+            };
             let response = ui.add_sized(
-                [button_width, 28.0],
-                egui::SelectableLabel::new(
-                    is_selected,
-                    RichText::new(view.label()).small().color(if is_selected {
-                        accent_color()
-                    } else {
-                        muted_color()
-                    }),
-                ),
+                [button_width, 30.0],
+                egui::Button::new(
+                    RichText::new(view.label())
+                        .small()
+                        .strong()
+                        .color(text_color),
+                )
+                .fill(fill)
+                .stroke(stroke)
+                .rounding(egui::Rounding::same(6.0)),
             );
             if response.clicked() {
                 *selected = view;
             }
         }
     });
-    ui.add_space(4.0);
+    ui.add_space(8.0);
     ui.separator();
 }
 
@@ -11381,6 +11436,207 @@ fn compact_number(value: usize) -> String {
         format!("{:.1}K", value as f32 / 1_000.0)
     } else {
         value.to_string()
+    }
+}
+
+fn context_health_score(
+    prompt_chars: usize,
+    duplicate_notes: usize,
+    missing_goals: bool,
+    stale_summary: bool,
+    oversized_sources: usize,
+) -> usize {
+    let mut score = 100usize;
+    if prompt_chars > 24_000 {
+        score = score.saturating_sub(22);
+    } else if prompt_chars > 14_000 {
+        score = score.saturating_sub(10);
+    }
+    score = score.saturating_sub(duplicate_notes.min(5) * 6);
+    score = score.saturating_sub(oversized_sources.min(4) * 8);
+    if missing_goals {
+        score = score.saturating_sub(12);
+    }
+    if stale_summary {
+        score = score.saturating_sub(10);
+    }
+    score.clamp(0, 100)
+}
+
+fn context_overview_visual(
+    ui: &mut egui::Ui,
+    health_score: usize,
+    prompt_chars: usize,
+    messages: usize,
+    notes: usize,
+    sources: usize,
+    runs: usize,
+    profiles: usize,
+    recent_messages: usize,
+    relevant_messages: usize,
+    recent_runs: usize,
+) {
+    let width = safe_available_width(ui, 1.0);
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(18, 22, 28))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 55, 65)))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+        .show(ui, |ui| {
+            ui.set_min_width(width);
+            ui.set_max_width(width);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(format!("{health_score}%"))
+                            .strong()
+                            .size(30.0)
+                            .color(context_score_color(health_score)),
+                    );
+                    ui.label(RichText::new("здоровье контекста").weak().small());
+                });
+                ui.add_space(14.0);
+                ui.vertical(|ui| {
+                    ui.set_min_width((width - 120.0).max(1.0));
+                    ui.label(RichText::new("Состав следующего запуска").strong());
+                    ui.add(
+                        egui::ProgressBar::new((prompt_chars as f32 / 24_000.0).clamp(0.0, 1.0))
+                            .desired_width(safe_available_width(ui, 160.0))
+                            .fill(context_score_color(health_score))
+                            .text(format!("prompt ~{} символов", compact_number(prompt_chars))),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        context_micro_stat(ui, "чат", messages);
+                        context_micro_stat(ui, "заметки", notes);
+                        context_micro_stat(ui, "память", sources);
+                        context_micro_stat(ui, "runs", runs);
+                        context_micro_stat(ui, "профили", profiles);
+                    });
+                });
+            });
+        });
+    ui.add_space(8.0);
+    context_signal_row(
+        ui,
+        "чат",
+        recent_messages,
+        messages.max(1),
+        egui::Color32::from_rgb(96, 191, 143),
+    );
+    context_signal_row(
+        ui,
+        "retrieval",
+        relevant_messages,
+        messages.max(1),
+        accent_color(),
+    );
+    context_signal_row(
+        ui,
+        "история запусков",
+        recent_runs,
+        runs.max(1),
+        egui::Color32::from_rgb(220, 174, 92),
+    );
+}
+
+fn context_micro_stat(ui: &mut egui::Ui, label: &str, value: usize) {
+    ui.label(
+        RichText::new(format!("{label} {value}"))
+            .small()
+            .color(egui::Color32::from_rgb(197, 209, 219)),
+    );
+}
+
+fn context_signal_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: usize,
+    total: usize,
+    color: egui::Color32,
+) {
+    let total = total.max(1);
+    let ratio = (value as f32 / total as f32).clamp(0.0, 1.0);
+    ui.horizontal(|ui| {
+        ui.set_min_width(safe_available_width(ui, 1.0));
+        ui.label(RichText::new(label).weak().small());
+        ui.add(
+            egui::ProgressBar::new(ratio)
+                .desired_width((safe_available_width(ui, 120.0) * 0.56).max(80.0))
+                .fill(color)
+                .text(format!("{value}/{total}")),
+        );
+    });
+}
+
+fn context_health_strip(
+    ui: &mut egui::Ui,
+    duplicate_notes: usize,
+    missing_goals: bool,
+    stale_summary: bool,
+    oversized_sources: usize,
+) {
+    ui.horizontal_wrapped(|ui| {
+        if duplicate_notes == 0 && !missing_goals && !stale_summary && oversized_sources == 0 {
+            soft_badge(ui, "контекст чистый", egui::Color32::from_rgb(91, 178, 126));
+            return;
+        }
+        if duplicate_notes > 0 {
+            soft_badge(
+                ui,
+                format!("дубликаты: {duplicate_notes}"),
+                egui::Color32::from_rgb(220, 174, 92),
+            );
+        }
+        if missing_goals {
+            soft_badge(
+                ui,
+                "нет целей проекта",
+                egui::Color32::from_rgb(220, 174, 92),
+            );
+        }
+        if stale_summary {
+            soft_badge(ui, "summary устарел", egui::Color32::from_rgb(220, 174, 92));
+        }
+        if oversized_sources > 0 {
+            soft_badge(
+                ui,
+                format!("крупные источники: {oversized_sources}"),
+                egui::Color32::from_rgb(220, 112, 112),
+            );
+        }
+    });
+}
+
+fn soft_badge(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) {
+    let text = text.into();
+    let shown = compact_inline(&text, 42);
+    let fill = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 28);
+    let stroke = egui::Stroke::new(
+        1.0,
+        egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 110),
+    );
+    let response = egui::Frame::none()
+        .fill(fill)
+        .stroke(stroke)
+        .rounding(egui::Rounding::same(999.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(&shown).small().color(color));
+        })
+        .response;
+    if shown != text {
+        response.on_hover_text(text);
+    }
+}
+
+fn context_score_color(score: usize) -> egui::Color32 {
+    if score >= 80 {
+        egui::Color32::from_rgb(105, 201, 143)
+    } else if score >= 55 {
+        egui::Color32::from_rgb(220, 174, 92)
+    } else {
+        egui::Color32::from_rgb(220, 112, 112)
     }
 }
 
