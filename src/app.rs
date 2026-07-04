@@ -24,11 +24,12 @@ use crate::config::{
     read_journal_tail, AppConfig, ProjectUiState,
 };
 use crate::conversation::{
-    archive_conversation, compile_context_snapshot, create_new_conversation, default_chat,
-    delete_conversation, load_active_conversation, load_index as load_conversation_index,
-    load_state as load_conversation_state, rename_conversation, save_conversation_snapshot,
+    archive_conversation, compile_context_snapshot_with_budget, create_new_conversation,
+    default_chat, delete_conversation, load_active_conversation,
+    load_index as load_conversation_index, load_state as load_conversation_state,
+    rename_conversation, restore_conversation, save_conversation_snapshot,
     save_index as save_conversation_index, save_state as save_conversation_state,
-    set_conversation_pinned, ConversationIndex, LoadedConversation,
+    set_conversation_pinned, ContextBudget, ConversationIndex, LoadedConversation,
 };
 use crate::diagnostics::environment_diagnostics;
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
@@ -963,14 +964,31 @@ impl LeetcodeApp {
         }
     }
 
-    fn delete_active_conversation(&mut self) {
+    fn restore_conversation_from_archive(&mut self, conversation_id: String) {
         let Some(workspace) = self.workspace.clone() else {
             return;
         };
+        self.persist_current_conversation();
+        match restore_conversation(&workspace, &conversation_id) {
+            Ok(loaded) => self.apply_loaded_conversation(loaded),
+            Err(err) => {
+                self.conversation_status = format!("не удалось восстановить чат: {err}");
+            }
+        }
+    }
+
+    fn delete_active_conversation(&mut self) {
         let Some(active_id) = self.active_conversation_id.clone() else {
             return;
         };
-        match delete_conversation(&workspace, &active_id) {
+        self.delete_conversation_by_id(active_id);
+    }
+
+    fn delete_conversation_by_id(&mut self, conversation_id: String) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        match delete_conversation(&workspace, &conversation_id) {
             Ok(loaded) => self.apply_loaded_conversation(loaded),
             Err(err) => {
                 self.conversation_status = format!("не удалось удалить чат: {err}");
@@ -1010,6 +1028,15 @@ impl LeetcodeApp {
             .find(|meta| meta.id == active_id)
             .map(|meta| meta.title.clone())
             .unwrap_or_else(|| "Новый чат".to_string())
+    }
+
+    fn context_budget(&self) -> ContextBudget {
+        ContextBudget {
+            recent_message_limit: self.config.context_recent_messages,
+            relevant_message_limit: self.config.context_relevant_messages,
+            recent_run_limit: self.config.context_recent_runs,
+        }
+        .bounded()
     }
 
     fn active_project_path(&self) -> Option<PathBuf> {
@@ -3803,11 +3830,18 @@ impl LeetcodeApp {
         let approvals = self.approvals.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
+        let context_budget = self.context_budget();
         let context_snapshot = self.workspace.as_ref().and_then(|workspace| {
             self.active_conversation_id
                 .as_deref()
                 .map(|conversation_id| {
-                    compile_context_snapshot(workspace, conversation_id, &self.chat, &user_request)
+                    compile_context_snapshot_with_budget(
+                        workspace,
+                        conversation_id,
+                        &self.chat,
+                        &user_request,
+                        context_budget,
+                    )
                 })
         });
 
@@ -7384,6 +7418,7 @@ impl LeetcodeApp {
             });
         }
         self.show_context_inspector(ui);
+        self.show_archived_conversations(ui);
         ui.add_space(10.0);
 
         egui::ScrollArea::vertical()
@@ -7453,6 +7488,32 @@ impl LeetcodeApp {
                     .small(),
                 );
                 ui.add_space(6.0);
+                let mut budget_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Бюджет").weak().small());
+                    budget_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.context_recent_messages, 0..=80)
+                                .text("последние сообщения"),
+                        )
+                        .changed();
+                    budget_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.context_relevant_messages, 0..=40)
+                                .text("релевантные"),
+                        )
+                        .changed();
+                    budget_changed |= ui
+                        .add(
+                            egui::Slider::new(&mut self.config.context_recent_runs, 0..=20)
+                                .text("запуски"),
+                        )
+                        .changed();
+                });
+                if budget_changed {
+                    let _ = self.config.save();
+                }
+                ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Запрос").weak().small());
                     ui.add(
@@ -7466,8 +7527,13 @@ impl LeetcodeApp {
                 } else {
                     self.context_inspector_query.as_str()
                 };
-                let snapshot =
-                    compile_context_snapshot(&workspace, &conversation_id, &self.chat, query);
+                let snapshot = compile_context_snapshot_with_budget(
+                    &workspace,
+                    &conversation_id,
+                    &self.chat,
+                    query,
+                    self.context_budget(),
+                );
                 ui.add_space(6.0);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
@@ -7515,6 +7581,59 @@ impl LeetcodeApp {
                                 .interactive(false),
                         );
                     });
+            });
+    }
+
+    fn show_archived_conversations(&mut self, ui: &mut egui::Ui) {
+        let archived = self
+            .conversation_index
+            .conversations
+            .iter()
+            .filter(|meta| meta.archived)
+            .map(|meta| {
+                (
+                    meta.id.clone(),
+                    meta.title.clone(),
+                    meta.message_count,
+                    meta.updated_at,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        if archived.is_empty() {
+            return;
+        }
+
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new(format!("Архив чатов ({})", archived.len()))
+            .id_salt("archived_conversations")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "Архивные диалоги не попадают в основной список, но их можно вернуть.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(4.0);
+                for (id, title, message_count, updated_at) in archived {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(title).strong().small());
+                        ui.label(
+                            RichText::new(format!("{message_count} сообщений · {}", updated_at))
+                                .weak()
+                                .small(),
+                        );
+                        if ui.button("Восстановить").clicked() {
+                            self.restore_conversation_from_archive(id.clone());
+                        }
+                        if ui.button("Удалить").clicked() {
+                            self.delete_conversation_by_id(id.clone());
+                        }
+                    });
+                    ui.separator();
+                }
             });
     }
 

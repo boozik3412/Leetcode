@@ -40,6 +40,9 @@ pub struct AppConfig {
     pub proxy_username: String,
     pub proxy_password: String,
     pub proxy_no_proxy: String,
+    pub context_recent_messages: usize,
+    pub context_relevant_messages: usize,
+    pub context_recent_runs: usize,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -112,6 +115,12 @@ struct PersistedConfig {
     proxy_password: String,
     #[serde(default)]
     proxy_no_proxy: String,
+    #[serde(default = "default_context_recent_messages")]
+    context_recent_messages: usize,
+    #[serde(default = "default_context_relevant_messages")]
+    context_relevant_messages: usize,
+    #[serde(default = "default_context_recent_runs")]
+    context_recent_runs: usize,
 }
 
 impl Default for PersistedConfig {
@@ -141,6 +150,9 @@ impl Default for PersistedConfig {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: default_context_recent_messages(),
+            context_relevant_messages: default_context_relevant_messages(),
+            context_recent_runs: default_context_recent_runs(),
         }
     }
 }
@@ -224,6 +236,13 @@ impl AppConfig {
             proxy_username,
             proxy_password,
             proxy_no_proxy: persisted.proxy_no_proxy.trim().to_string(),
+            context_recent_messages: normalize_context_recent_messages(
+                persisted.context_recent_messages,
+            ),
+            context_relevant_messages: normalize_context_relevant_messages(
+                persisted.context_relevant_messages,
+            ),
+            context_recent_runs: normalize_context_recent_runs(persisted.context_recent_runs),
         }
     }
 
@@ -269,6 +288,13 @@ impl AppConfig {
             proxy_username: self.proxy_username.trim().to_string(),
             proxy_password: self.proxy_password.clone(),
             proxy_no_proxy: self.proxy_no_proxy.trim().to_string(),
+            context_recent_messages: normalize_context_recent_messages(
+                self.context_recent_messages,
+            ),
+            context_relevant_messages: normalize_context_relevant_messages(
+                self.context_relevant_messages,
+            ),
+            context_recent_runs: normalize_context_recent_runs(self.context_recent_runs),
         };
 
         fs::write(path, serde_json::to_string_pretty(&persisted)?)?;
@@ -583,6 +609,18 @@ fn default_proxy_scheme() -> String {
     "http".to_string()
 }
 
+fn default_context_recent_messages() -> usize {
+    14
+}
+
+fn default_context_relevant_messages() -> usize {
+    8
+}
+
+fn default_context_recent_runs() -> usize {
+    5
+}
+
 fn default_policy_profile() -> String {
     PERMISSION_ASK.to_string()
 }
@@ -611,6 +649,18 @@ fn normalize_task_route(task_route: &str) -> String {
     } else {
         task_route
     }
+}
+
+fn normalize_context_recent_messages(value: usize) -> usize {
+    value.min(80)
+}
+
+fn normalize_context_relevant_messages(value: usize) -> usize {
+    value.min(40)
+}
+
+fn normalize_context_recent_runs(value: usize) -> usize {
+    value.min(20)
 }
 
 fn normalize_project_states(projects: Vec<ProjectUiState>) -> Vec<ProjectUiState> {
@@ -903,6 +953,9 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: default_context_recent_messages(),
+            context_relevant_messages: default_context_relevant_messages(),
+            context_recent_runs: default_context_recent_runs(),
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -945,6 +998,9 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: default_context_recent_messages(),
+            context_relevant_messages: default_context_relevant_messages(),
+            context_recent_runs: default_context_recent_runs(),
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -1029,6 +1085,9 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: default_context_recent_messages(),
+            context_relevant_messages: default_context_relevant_messages(),
+            context_recent_runs: default_context_recent_runs(),
         };
 
         config.select_provider(GEMINI_PROVIDER_ID);
@@ -1064,6 +1123,9 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: default_context_recent_messages(),
+            context_relevant_messages: default_context_relevant_messages(),
+            context_recent_runs: default_context_recent_runs(),
         };
 
         config.set_policy_profile(PERMISSION_AUTO);
@@ -1102,6 +1164,9 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: default_context_recent_messages(),
+            context_relevant_messages: default_context_relevant_messages(),
+            context_recent_runs: default_context_recent_runs(),
         };
 
         config.set_policy_profile(PERMISSION_FULL);

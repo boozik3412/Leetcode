@@ -830,6 +830,9 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: 14,
+            context_relevant_messages: 8,
+            context_recent_runs: 5,
         };
 
         assert_eq!(
@@ -865,6 +868,9 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            context_recent_messages: 14,
+            context_relevant_messages: 8,
+            context_recent_runs: 5,
         };
 
         assert_eq!(

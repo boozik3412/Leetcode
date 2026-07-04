@@ -12,8 +12,9 @@ pub const CONVERSATION_INDEX_PATH: &str = "assets/generated/leetcode/conversatio
 pub const CONVERSATION_STATE_PATH: &str = "assets/generated/leetcode/conversation_state.json";
 
 const MAX_TRANSCRIPT_BYTES: usize = 8_000_000;
-const RECENT_MESSAGE_LIMIT: usize = 14;
-const RELEVANT_MESSAGE_LIMIT: usize = 8;
+const DEFAULT_RECENT_MESSAGE_LIMIT: usize = 14;
+const DEFAULT_RELEVANT_MESSAGE_LIMIT: usize = 8;
+const DEFAULT_RECENT_RUN_LIMIT: usize = 5;
 const ROLLING_SUMMARY_CHARS: usize = 4_000;
 const CONTEXT_MESSAGE_CHARS: usize = 900;
 
@@ -69,6 +70,33 @@ pub struct AgentContextSnapshot {
     pub recent_messages: Vec<ContextMessage>,
     pub relevant_messages: Vec<ContextMessage>,
     pub recent_runs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ContextBudget {
+    pub recent_message_limit: usize,
+    pub relevant_message_limit: usize,
+    pub recent_run_limit: usize,
+}
+
+impl Default for ContextBudget {
+    fn default() -> Self {
+        Self {
+            recent_message_limit: DEFAULT_RECENT_MESSAGE_LIMIT,
+            relevant_message_limit: DEFAULT_RELEVANT_MESSAGE_LIMIT,
+            recent_run_limit: DEFAULT_RECENT_RUN_LIMIT,
+        }
+    }
+}
+
+impl ContextBudget {
+    pub fn bounded(self) -> Self {
+        Self {
+            recent_message_limit: self.recent_message_limit.min(80),
+            relevant_message_limit: self.relevant_message_limit.min(40),
+            recent_run_limit: self.recent_run_limit.min(20),
+        }
+    }
 }
 
 impl AgentContextSnapshot {
@@ -327,6 +355,27 @@ pub fn archive_conversation(
     Ok(load_active_conversation(workspace))
 }
 
+pub fn restore_conversation(
+    workspace: &Workspace,
+    conversation_id: &str,
+) -> anyhow::Result<LoadedConversation> {
+    let mut index = load_index(workspace);
+    let Some(meta) = index
+        .conversations
+        .iter_mut()
+        .find(|meta| meta.id == conversation_id)
+    else {
+        anyhow::bail!("Чат не найден: {conversation_id}");
+    };
+    meta.archived = false;
+    meta.updated_at = unix_timestamp();
+    index.active_id = Some(conversation_id.to_string());
+    sort_index(&mut index);
+    save_index(workspace, &index)?;
+    sync_active_state(workspace, Some(conversation_id.to_string()))?;
+    Ok(load_active_conversation(workspace))
+}
+
 pub fn delete_conversation(
     workspace: &Workspace,
     conversation_id: &str,
@@ -349,14 +398,32 @@ pub fn delete_conversation(
     Ok(load_active_conversation(workspace))
 }
 
+#[cfg(test)]
 pub fn compile_context_snapshot(
     workspace: &Workspace,
     conversation_id: &str,
     chat: &[ChatLine],
     query: &str,
 ) -> AgentContextSnapshot {
+    compile_context_snapshot_with_budget(
+        workspace,
+        conversation_id,
+        chat,
+        query,
+        ContextBudget::default(),
+    )
+}
+
+pub fn compile_context_snapshot_with_budget(
+    workspace: &Workspace,
+    conversation_id: &str,
+    chat: &[ChatLine],
+    query: &str,
+    budget: ContextBudget,
+) -> AgentContextSnapshot {
+    let budget = budget.bounded();
     let rolling_summary = build_rolling_summary(chat);
-    let recent_start = chat.len().saturating_sub(RECENT_MESSAGE_LIMIT);
+    let recent_start = chat.len().saturating_sub(budget.recent_message_limit);
     let recent_messages = chat[recent_start..]
         .iter()
         .filter(|line| !line.content.trim().is_empty())
@@ -375,10 +442,10 @@ pub fn compile_context_snapshot(
     scored.sort_by(|a, b| b.0.cmp(&a.0));
     let relevant_messages = scored
         .into_iter()
-        .take(RELEVANT_MESSAGE_LIMIT)
+        .take(budget.relevant_message_limit)
         .map(|(_, line)| context_message_from_line(line))
         .collect::<Vec<_>>();
-    let recent_runs = load_agent_history_tail(workspace, 5)
+    let recent_runs = load_agent_history_tail(workspace, budget.recent_run_limit)
         .into_iter()
         .rev()
         .map(|record| {
@@ -550,7 +617,7 @@ fn conversation_title(chat: &[ChatLine]) -> String {
 }
 
 fn build_rolling_summary(chat: &[ChatLine]) -> String {
-    let older_count = chat.len().saturating_sub(RECENT_MESSAGE_LIMIT);
+    let older_count = chat.len().saturating_sub(DEFAULT_RECENT_MESSAGE_LIMIT);
     if older_count == 0 {
         return String::new();
     }
@@ -744,6 +811,18 @@ mod tests {
                 .archived
         );
 
+        let restored = restore_conversation(&workspace, &first.id).expect("restore");
+        assert_eq!(restored.id, first.id);
+        assert!(
+            !restored
+                .index
+                .conversations
+                .iter()
+                .find(|meta| meta.id == first.id)
+                .unwrap()
+                .archived
+        );
+
         let loaded = delete_conversation(&workspace, &second.id).expect("delete");
         assert!(loaded
             .index
@@ -751,5 +830,33 @@ mod tests {
             .iter()
             .all(|meta| meta.id != second.id));
         assert!(loaded.index.conversations.iter().any(|meta| !meta.archived));
+    }
+
+    #[test]
+    fn context_snapshot_respects_manual_budget() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
+        let mut chat = vec![ChatLine::system("Система")];
+        for index in 0..18 {
+            chat.push(ChatLine::user(format!(
+                "Сообщение {index} про бюджет контекста"
+            )));
+        }
+
+        let snapshot = compile_context_snapshot_with_budget(
+            &workspace,
+            "chat-budget",
+            &chat,
+            "бюджет",
+            ContextBudget {
+                recent_message_limit: 3,
+                relevant_message_limit: 2,
+                recent_run_limit: 0,
+            },
+        );
+
+        assert_eq!(snapshot.recent_messages.len(), 3);
+        assert!(snapshot.relevant_messages.len() <= 2);
+        assert!(snapshot.recent_runs.is_empty());
     }
 }

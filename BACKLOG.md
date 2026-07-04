@@ -187,8 +187,10 @@ Leetcode развивается из минимального локальног
 - Done: Add tests for transcript restore and relevant-message retrieval.
 - Done: Add explicit chat rename, pin, archive, and delete controls.
 - Done: Add a dedicated context inspector so the user can see exactly what summary/retrieval block will be sent to the model.
-- Todo: Add archived-chat browser and restore action.
-- Todo: Add manual context budget controls for recent messages, retrieved messages, and run-history count.
+- Done: Add archived-chat browser with restore and delete actions.
+- Done: Add manual context budget controls for recent messages, retrieved messages, and run-history count.
+- Todo: Add context presets like "short", "balanced", and "deep research".
+- Todo: Add per-chat context notes that can be pinned into every future prompt.
 
 ## Постоянная планка качества
 
