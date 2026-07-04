@@ -114,6 +114,8 @@ Leetcode развивается из минимального локальног
 - Done: Keep file tabs and agent chat as first-class central surfaces.
 - Done: Restyle the app shell and Context panel after a real screenshot pass: softer dark theme, clearer right-panel titles, compact context health dashboard, visual composition bars, and folded technical prompt preview.
 - Done: Add daily-mode UX polish after real screenshots: compact AI settings menu in the top bar, quieter input bar, helpful empty agent home state, narrower right sidebar, and explanatory tooltips for context controls.
+- Done: Simplify daily-work UI pass: combined AI selector in the top bar, project chip, flatter prompt bar, and richer empty agent home shortcuts for project, roadmap, release, and assets.
+- Done: Add saved workspace view presets for chat, code, roadmap, release, and assets, including persisted left-project-panel collapsed state and restored right-panel selection.
 - Todo: Continue visual simplification after real screenshots from daily usage.
 
 ## Этап 14 - Центр команд проекта

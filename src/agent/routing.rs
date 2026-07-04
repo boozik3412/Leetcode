@@ -392,6 +392,9 @@ mod tests {
             context_recent_messages: 14,
             context_relevant_messages: 8,
             context_recent_runs: 5,
+            layout_workspace_mode: "chat".to_string(),
+            layout_right_panel_view: "context".to_string(),
+            layout_file_panel_collapsed: false,
         };
 
         let candidates = route_candidates(&config, TaskRoute::Coding);

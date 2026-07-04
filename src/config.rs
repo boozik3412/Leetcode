@@ -43,6 +43,9 @@ pub struct AppConfig {
     pub context_recent_messages: usize,
     pub context_relevant_messages: usize,
     pub context_recent_runs: usize,
+    pub layout_workspace_mode: String,
+    pub layout_right_panel_view: String,
+    pub layout_file_panel_collapsed: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -121,6 +124,12 @@ struct PersistedConfig {
     context_relevant_messages: usize,
     #[serde(default = "default_context_recent_runs")]
     context_recent_runs: usize,
+    #[serde(default = "default_layout_workspace_mode")]
+    layout_workspace_mode: String,
+    #[serde(default = "default_layout_right_panel_view")]
+    layout_right_panel_view: String,
+    #[serde(default)]
+    layout_file_panel_collapsed: bool,
 }
 
 impl Default for PersistedConfig {
@@ -153,6 +162,9 @@ impl Default for PersistedConfig {
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
+            layout_workspace_mode: default_layout_workspace_mode(),
+            layout_right_panel_view: default_layout_right_panel_view(),
+            layout_file_panel_collapsed: false,
         }
     }
 }
@@ -243,6 +255,13 @@ impl AppConfig {
                 persisted.context_relevant_messages,
             ),
             context_recent_runs: normalize_context_recent_runs(persisted.context_recent_runs),
+            layout_workspace_mode: normalize_layout_workspace_mode(
+                &persisted.layout_workspace_mode,
+            ),
+            layout_right_panel_view: normalize_layout_right_panel_view(
+                &persisted.layout_right_panel_view,
+            ),
+            layout_file_panel_collapsed: persisted.layout_file_panel_collapsed,
         }
     }
 
@@ -295,6 +314,11 @@ impl AppConfig {
                 self.context_relevant_messages,
             ),
             context_recent_runs: normalize_context_recent_runs(self.context_recent_runs),
+            layout_workspace_mode: normalize_layout_workspace_mode(&self.layout_workspace_mode),
+            layout_right_panel_view: normalize_layout_right_panel_view(
+                &self.layout_right_panel_view,
+            ),
+            layout_file_panel_collapsed: self.layout_file_panel_collapsed,
         };
 
         fs::write(path, serde_json::to_string_pretty(&persisted)?)?;
@@ -621,6 +645,14 @@ fn default_context_recent_runs() -> usize {
     5
 }
 
+fn default_layout_workspace_mode() -> String {
+    "chat".to_string()
+}
+
+fn default_layout_right_panel_view() -> String {
+    "context".to_string()
+}
+
 fn default_policy_profile() -> String {
     PERMISSION_ASK.to_string()
 }
@@ -661,6 +693,23 @@ fn normalize_context_relevant_messages(value: usize) -> usize {
 
 fn normalize_context_recent_runs(value: usize) -> usize {
     value.min(20)
+}
+
+fn normalize_layout_workspace_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "chat" | "code" | "assets" | "project" => {
+            value.trim().to_ascii_lowercase().replace('-', "_")
+        }
+        _ => default_layout_workspace_mode(),
+    }
+}
+
+fn normalize_layout_right_panel_view(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "overview" | "context" | "roadmap" | "release" | "project" | "assets" | "control"
+        | "logs" => value.trim().to_ascii_lowercase().replace('-', "_"),
+        _ => default_layout_right_panel_view(),
+    }
 }
 
 fn normalize_project_states(projects: Vec<ProjectUiState>) -> Vec<ProjectUiState> {
@@ -956,6 +1005,9 @@ mod tests {
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
+            layout_workspace_mode: default_layout_workspace_mode(),
+            layout_right_panel_view: default_layout_right_panel_view(),
+            layout_file_panel_collapsed: false,
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -1001,6 +1053,9 @@ mod tests {
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
+            layout_workspace_mode: default_layout_workspace_mode(),
+            layout_right_panel_view: default_layout_right_panel_view(),
+            layout_file_panel_collapsed: false,
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -1059,6 +1114,24 @@ mod tests {
     }
 
     #[test]
+    fn serializes_and_normalizes_layout_state() {
+        let config = PersistedConfig {
+            layout_workspace_mode: "code".to_string(),
+            layout_right_panel_view: "project".to_string(),
+            layout_file_panel_collapsed: true,
+            ..PersistedConfig::default()
+        };
+
+        let json = serde_json::to_string(&config).expect("serializes config");
+
+        assert!(json.contains("\"layout_workspace_mode\":\"code\""));
+        assert!(json.contains("\"layout_right_panel_view\":\"project\""));
+        assert!(json.contains("\"layout_file_panel_collapsed\":true"));
+        assert_eq!(normalize_layout_workspace_mode("bad-value"), "chat");
+        assert_eq!(normalize_layout_right_panel_view("bad-value"), "context");
+    }
+
+    #[test]
     fn selects_default_model_for_new_provider() {
         let mut config = AppConfig {
             provider: OPENAI_PROVIDER_ID.to_string(),
@@ -1088,6 +1161,9 @@ mod tests {
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
+            layout_workspace_mode: default_layout_workspace_mode(),
+            layout_right_panel_view: default_layout_right_panel_view(),
+            layout_file_panel_collapsed: false,
         };
 
         config.select_provider(GEMINI_PROVIDER_ID);
@@ -1126,6 +1202,9 @@ mod tests {
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
+            layout_workspace_mode: default_layout_workspace_mode(),
+            layout_right_panel_view: default_layout_right_panel_view(),
+            layout_file_panel_collapsed: false,
         };
 
         config.set_policy_profile(PERMISSION_AUTO);
@@ -1167,6 +1246,9 @@ mod tests {
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
+            layout_workspace_mode: default_layout_workspace_mode(),
+            layout_right_panel_view: default_layout_right_panel_view(),
+            layout_file_panel_collapsed: false,
         };
 
         config.set_policy_profile(PERMISSION_FULL);
