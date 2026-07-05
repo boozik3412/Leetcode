@@ -57,8 +57,8 @@ use crate::provider_health::{
 use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
     update_remote_shared_state, RemoteControlAction, RemoteControlServer,
-    RemoteControlServerConfig, RemoteControlSharedState, RemoteControlSnapshot,
-    RemoteSubmittedTask,
+    RemoteControlServerConfig, RemoteControlSharedState, RemoteControlSnapshot, RemoteRunSummary,
+    RemoteSubmittedTask, RemoteToolLogEntry,
 };
 use crate::roadmap::{
     load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
@@ -9857,6 +9857,46 @@ impl LeetcodeApp {
             "ожидает".to_string()
         };
 
+        let tool_log_tail = self
+            .tool_log
+            .iter()
+            .rev()
+            .take(80)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|entry| RemoteToolLogEntry {
+                title: compact(&entry.title, 180),
+                content: compact(&entry.content, 3_000),
+            })
+            .collect::<Vec<_>>();
+        let agent_history_tail = self
+            .agent_history
+            .iter()
+            .rev()
+            .take(30)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|record| RemoteRunSummary {
+                id: record.id.clone(),
+                status: record.status.clone(),
+                started_at: record.started_at,
+                duration_ms: record.duration_ms,
+                provider: record.provider.clone(),
+                model: record.model.clone(),
+                user_request: compact(&record.user_request, 500),
+                final_response: record
+                    .final_response
+                    .as_ref()
+                    .map(|response| compact(response, 1_000)),
+                changed_files: record.changed_files.iter().take(40).cloned().collect(),
+                errors: record.errors.iter().take(12).cloned().collect(),
+                tool_count: record.tool_calls.len(),
+            })
+            .collect::<Vec<_>>();
+        let file_rows = self.file_rows.iter().take(600).cloned().collect::<Vec<_>>();
+
         update_remote_shared_state(
             &self.remote_shared_state,
             RemoteControlSnapshot {
@@ -9888,6 +9928,9 @@ impl LeetcodeApp {
                     .pending_approval
                     .as_ref()
                     .map(|approval| approval.summary.clone()),
+                tool_log_tail,
+                agent_history_tail,
+                file_rows,
                 agent_status,
                 project_status,
                 asset_status,

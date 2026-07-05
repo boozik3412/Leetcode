@@ -275,8 +275,11 @@ Leetcode развивается из минимального локальног
 - Todo: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
 - Done: Добавить local-first remote action API: `POST /api/tasks`, `POST /api/run-gate`, `POST /api/approval`.
 - Done: Подключить PWA-форму отправки задачи и кнопки подтверждения/отклонения к существующей permission system.
-- Todo: Расширить remote actions: читать tool log, смотреть run history, получать подробный run timeline.
-- Todo: Добавить read-only просмотр файлов и безопасные макросы/палитру команд по ролям.
+- Done: Добавить remote observer endpoints: `GET /api/tool-log`, `GET /api/history`, `GET /api/files`.
+- Done: Добавить read-only просмотр UTF-8 файлов внутри текущей workspace через `GET /api/files/content?path=...`.
+- Done: Добавить PWA-блок "Наблюдение" для логов, истории запусков и файлов.
+- Todo: Расширить observer до подробного run timeline и фильтров по истории.
+- Todo: Добавить безопасные макросы/палитру команд по ролям.
 - Todo: Усилить безопасность: short-lived tokens, Origin validation, rate limiting, audit log, TLS/WSS, роли доступа.
 - Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Todo: Сделать лёгкий desktop thin client на WebView/Tauri после стабилизации API.

@@ -3,6 +3,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,27 @@ pub struct RemoteSubmittedTask {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteToolLogEntry {
+    pub title: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteRunSummary {
+    pub id: String,
+    pub status: String,
+    pub started_at: u64,
+    pub duration_ms: u64,
+    pub provider: String,
+    pub model: String,
+    pub user_request: String,
+    pub final_response: Option<String>,
+    pub changed_files: Vec<String>,
+    pub errors: Vec<String>,
+    pub tool_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemoteControlSnapshot {
     pub app: String,
     pub version: String,
@@ -58,6 +80,9 @@ pub struct RemoteControlSnapshot {
     pub remote_last_action: String,
     pub pending_run_gate_summary: Option<String>,
     pub pending_approval_summary: Option<String>,
+    pub tool_log_tail: Vec<RemoteToolLogEntry>,
+    pub agent_history_tail: Vec<RemoteRunSummary>,
+    pub file_rows: Vec<String>,
     pub agent_status: String,
     pub project_status: String,
     pub asset_status: String,
@@ -89,6 +114,9 @@ impl Default for RemoteControlSnapshot {
             remote_last_action: String::new(),
             pending_run_gate_summary: None,
             pending_approval_summary: None,
+            tool_log_tail: Vec::new(),
+            agent_history_tail: Vec::new(),
+            file_rows: Vec::new(),
             agent_status: "ожидает".to_string(),
             project_status: "ожидает".to_string(),
             asset_status: "ожидает".to_string(),
@@ -268,6 +296,50 @@ fn handle_client(
             }
             write_sse_stream(&mut stream, shared_state, stop);
         }
+        ("GET", "/api/tool-log") => {
+            if !is_authorized(&headers, query, &token) {
+                write_unauthorized(&mut stream);
+                return;
+            }
+            let snapshot = snapshot_or_default(&shared_state);
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({"ok": true, "entries": snapshot.tool_log_tail}),
+            );
+        }
+        ("GET", "/api/history") => {
+            if !is_authorized(&headers, query, &token) {
+                write_unauthorized(&mut stream);
+                return;
+            }
+            let snapshot = snapshot_or_default(&shared_state);
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({"ok": true, "runs": snapshot.agent_history_tail}),
+            );
+        }
+        ("GET", "/api/files") => {
+            if !is_authorized(&headers, query, &token) {
+                write_unauthorized(&mut stream);
+                return;
+            }
+            let snapshot = snapshot_or_default(&shared_state);
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({"ok": true, "workspace": snapshot.workspace_path, "files": snapshot.file_rows}),
+            );
+        }
+        ("GET", "/api/files/content") => {
+            if !is_authorized(&headers, query, &token) {
+                write_unauthorized(&mut stream);
+                return;
+            }
+            let snapshot = snapshot_or_default(&shared_state);
+            write_file_content_response(&mut stream, &snapshot, query);
+        }
         ("POST", "/api/tasks") => {
             if !is_authorized(&headers, query, &token) {
                 write_unauthorized(&mut stream);
@@ -316,6 +388,95 @@ fn read_request_body<R: Read>(reader: &mut R, headers: &HashMap<String, String>)
     } else {
         Vec::new()
     }
+}
+
+fn write_file_content_response(
+    stream: &mut TcpStream,
+    snapshot: &RemoteControlSnapshot,
+    query: &str,
+) {
+    let Some(path) = query_param(query, "path") else {
+        write_json_response(
+            stream,
+            400,
+            &json!({"ok": false, "error": "path is required"}),
+        );
+        return;
+    };
+    let Some(workspace_path) = snapshot.workspace_path.as_deref() else {
+        write_json_response(
+            stream,
+            400,
+            &json!({"ok": false, "error": "workspace is not selected"}),
+        );
+        return;
+    };
+    match read_workspace_text_file(workspace_path, &path, 200_000) {
+        Ok(file) => write_json_response(stream, 200, &file),
+        Err(err) => {
+            write_json_response(stream, 400, &json!({"ok": false, "error": err.to_string()}))
+        }
+    }
+}
+
+fn read_workspace_text_file(
+    workspace_path: &str,
+    requested_path: &str,
+    max_bytes: u64,
+) -> anyhow::Result<serde_json::Value> {
+    let root = PathBuf::from(workspace_path).canonicalize()?;
+    let rel = clean_remote_relative_path(requested_path)?;
+    let target = root.join(&rel).canonicalize()?;
+    anyhow::ensure!(target.starts_with(&root), "path is outside workspace");
+    anyhow::ensure!(!target.is_dir(), "path points to a directory");
+    let metadata = std::fs::metadata(&target)?;
+    anyhow::ensure!(
+        metadata.len() <= max_bytes,
+        "file is too large for remote preview: {} bytes",
+        metadata.len()
+    );
+    let bytes = std::fs::read(&target)?;
+    let content = String::from_utf8(bytes)?;
+    let rel_display = target
+        .strip_prefix(&root)
+        .unwrap_or(&target)
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok(json!({
+        "ok": true,
+        "path": rel_display,
+        "bytes": metadata.len(),
+        "content": content
+    }))
+}
+
+fn clean_remote_relative_path(value: &str) -> anyhow::Result<PathBuf> {
+    let path = Path::new(value.trim());
+    anyhow::ensure!(!value.trim().is_empty(), "path is empty");
+    anyhow::ensure!(!path.is_absolute(), "absolute paths are not allowed");
+    let mut cleaned = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => cleaned.push(part),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("path traversal is not allowed");
+            }
+        }
+    }
+    anyhow::ensure!(!cleaned.as_os_str().is_empty(), "path is empty");
+    Ok(cleaned)
+}
+
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|part| {
+        let (name, value) = part.split_once('=')?;
+        if name == key {
+            Some(percent_decode(value))
+        } else {
+            None
+        }
+    })
 }
 
 fn handle_submit_task(
@@ -480,29 +641,34 @@ fn is_authorized(headers: &HashMap<String, String>, query: &str, token: &str) ->
 }
 
 fn percent_decode(value: &str) -> String {
-    let mut output = String::new();
-    let mut bytes = value.as_bytes().iter().copied().peekable();
-    while let Some(byte) = bytes.next() {
-        if byte == b'%' {
-            let hi = bytes.next();
-            let lo = bytes.next();
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                let hex = [hi, lo];
+    let input = value.as_bytes();
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        match input[index] {
+            b'%' if index + 2 < input.len() => {
+                let hex = [input[index + 1], input[index + 2]];
                 if let Ok(text) = std::str::from_utf8(&hex) {
                     if let Ok(decoded) = u8::from_str_radix(text, 16) {
-                        output.push(decoded as char);
+                        output.push(decoded);
+                        index += 3;
                         continue;
                     }
                 }
+                output.push(input[index]);
+                index += 1;
             }
-            output.push('%');
-        } else if byte == b'+' {
-            output.push(' ');
-        } else {
-            output.push(byte as char);
+            b'+' => {
+                output.push(b' ');
+                index += 1;
+            }
+            byte => {
+                output.push(byte);
+                index += 1;
+            }
         }
     }
-    output
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 fn snapshot_or_default(shared_state: &RemoteControlSharedState) -> RemoteControlSnapshot {
@@ -611,6 +777,9 @@ button.secondary { background:#26303d; color:#d7e1ec; }
 .metric { border-top:1px solid #26303d; padding-top:12px; }
 .metric b { display:block; font-size:24px; margin-bottom:4px; }
 .pending { display:none; border-left:3px solid #59c38d; padding-left:12px; margin-top:12px; }
+.list { display:grid; gap:8px; margin-top:12px; }
+.list button { text-align:left; background:#0b1118; color:#d7e1ec; border:1px solid #26303d; }
+.viewer { max-height:420px; }
 pre { white-space:pre-wrap; overflow:auto; background:#070b10; border:1px solid #26303d; border-radius:10px; padding:12px; }
 @media (max-width: 620px) { body{padding:14px}.grid{grid-template-columns:1fr} }
 </style>
@@ -663,6 +832,17 @@ pre { white-space:pre-wrap; overflow:auto; background:#070b10; border:1px solid 
     </div>
   </section>
   <section class="panel">
+    <h2>Наблюдение</h2>
+    <p>Read-only обзор того, что делает агент: логи, история запусков и файлы текущего проекта.</p>
+    <div class="row">
+      <button onclick="loadToolLog()">Логи</button>
+      <button onclick="loadHistory()">История</button>
+      <button onclick="loadFiles()">Файлы</button>
+    </div>
+    <div id="observerList" class="list"></div>
+    <pre id="observerView" class="viewer">Выберите раздел.</pre>
+  </section>
+  <section class="panel">
     <pre id="json">{}</pre>
   </section>
 </main>
@@ -691,6 +871,65 @@ async function postJson(path, payload) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
   return data;
+}
+async function getJson(path) {
+  const token = tokenInput.value.trim();
+  const res = await fetch(path, {headers:{Authorization:'Bearer ' + token}});
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+function setObserver(items, text) {
+  const list = document.getElementById('observerList');
+  list.innerHTML = '';
+  for (const item of items) list.appendChild(item);
+  document.getElementById('observerView').textContent = text || '';
+}
+async function loadToolLog() {
+  try {
+    const data = await getJson('/api/tool-log');
+    const items = (data.entries || []).map((entry) => {
+      const button = document.createElement('button');
+      button.textContent = entry.title || 'log';
+      button.onclick = () => document.getElementById('observerView').textContent = (entry.title || '') + '\n\n' + (entry.content || '');
+      return button;
+    });
+    setObserver(items, JSON.stringify(data.entries || [], null, 2));
+  } catch (error) { setObserver([], 'Ошибка: ' + error.message); }
+}
+async function loadHistory() {
+  try {
+    const data = await getJson('/api/history');
+    const items = (data.runs || []).map((run) => {
+      const button = document.createElement('button');
+      button.textContent = `${run.status} · ${run.provider}/${run.model} · ${new Date((run.started_at || 0) * 1000).toLocaleString()}`;
+      button.onclick = () => document.getElementById('observerView').textContent = JSON.stringify(run, null, 2);
+      return button;
+    });
+    setObserver(items, JSON.stringify(data.runs || [], null, 2));
+  } catch (error) { setObserver([], 'Ошибка: ' + error.message); }
+}
+async function loadFiles() {
+  try {
+    const data = await getJson('/api/files');
+    const items = (data.files || []).slice(0, 300).map((path) => {
+      const button = document.createElement('button');
+      button.textContent = path;
+      button.onclick = () => openFile(path);
+      return button;
+    });
+    setObserver(items, `Workspace: ${data.workspace || 'нет'}\nФайлов: ${(data.files || []).length}`);
+  } catch (error) { setObserver([], 'Ошибка: ' + error.message); }
+}
+async function openFile(path) {
+  if (path.endsWith('/')) {
+    document.getElementById('observerView').textContent = 'Это каталог: ' + path;
+    return;
+  }
+  try {
+    const data = await getJson('/api/files/content?path=' + encodeURIComponent(path));
+    document.getElementById('observerView').textContent = `${data.path} · ${data.bytes} bytes\n\n${data.content}`;
+  } catch (error) { document.getElementById('observerView').textContent = 'Ошибка: ' + error.message; }
 }
 async function submitTask() {
   const text = document.getElementById('task').value.trim();
@@ -843,6 +1082,54 @@ mod tests {
         }
 
         server.stop();
+    }
+
+    #[test]
+    fn remote_server_reads_workspace_files_read_only() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let file_path = temp.path().join("README.md");
+        std::fs::write(&file_path, "hello remote").expect("writes file");
+        let shared_state = new_remote_shared_state();
+        update_remote_shared_state(
+            &shared_state,
+            RemoteControlSnapshot {
+                workspace_path: Some(temp.path().to_string_lossy().to_string()),
+                file_rows: vec!["README.md".to_string()],
+                ..RemoteControlSnapshot::default()
+            },
+        );
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let response = request(
+            &addr,
+            "GET /api/files/content?path=README.md HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("hello remote"));
+
+        let denied = request(
+            &addr,
+            "GET /api/files/content?path=..%2Fsecret.txt HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(denied.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(denied.contains("path traversal"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn percent_decode_preserves_utf8_paths() {
+        assert_eq!(percent_decode("%D1%84%D0%B0%D0%B9%D0%BB.txt"), "файл.txt");
     }
 
     fn request(addr: &str, request: &str) -> String {

@@ -54,9 +54,10 @@
   - Done local-first: отправить задачу агенту через `POST /api/tasks`;
   - Done local-first: approve/deny план перед запуском через `POST /api/run-gate`;
   - Done local-first: approve/deny действие инструмента через `POST /api/approval`;
-  - смотреть tool log;
-  - смотреть run timeline/history;
-  - читать файлы в безопасном read-only режиме;
+  - Done local-first: смотреть tool log через `GET /api/tool-log`;
+  - Done local-first: смотреть run history через `GET /api/history`;
+  - Done local-first: читать UTF-8 файлы текущей workspace в безопасном read-only режиме через `GET /api/files/content?path=...`;
+  - смотреть подробный run timeline;
   - запускать макросы/палитру команд по разрешениям.
 - Security hardening:
   - short-lived access tokens;
