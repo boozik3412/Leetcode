@@ -81,6 +81,8 @@ pub struct CommandPaletteMacro {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
+    pub confirm_each_step: bool,
+    #[serde(default)]
     pub command_ids: Vec<String>,
 }
 
@@ -1264,6 +1266,7 @@ mod tests {
                 id: String::new(),
                 name: "Daily flow".to_string(),
                 description: "Run daily checks".to_string(),
+                confirm_each_step: true,
                 command_ids: vec![
                     "git:status".to_string(),
                     "git:status".to_string(),
@@ -1275,6 +1278,7 @@ mod tests {
                 id: "empty".to_string(),
                 name: "Empty".to_string(),
                 description: String::new(),
+                confirm_each_step: false,
                 command_ids: Vec::new(),
             },
         ]);
@@ -1293,6 +1297,7 @@ mod tests {
         );
         assert_eq!(macros.len(), 1);
         assert_eq!(macros[0].id, "daily-flow");
+        assert!(macros[0].confirm_each_step);
         assert_eq!(macros[0].command_ids, vec!["git:status", "project:refresh"]);
     }
 

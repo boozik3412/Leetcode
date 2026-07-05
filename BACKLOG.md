@@ -253,7 +253,7 @@ Leetcode развивается из минимального локальног
 - Done: Persist recent command history in app config and rank recent commands higher in search results.
 - Done: Persist favorite commands and expose a quick favorite toggle for the selected palette item.
 - Done: Add user-defined command macros created from favorites and executable from the same palette.
-- Todo: Add macro editing, reordering, import/export, and optional per-step confirmation for advanced workflows.
+- Done: Add macro editing, step reordering/removal, JSON import/export, and optional per-step confirmation for advanced workflows.
 
 ## Постоянная планка качества
 

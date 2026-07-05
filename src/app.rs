@@ -116,7 +116,12 @@ pub struct LeetcodeApp {
     command_palette_query: String,
     command_palette_selected: usize,
     command_macro_name_input: String,
+    command_macro_edit_target: Option<String>,
+    command_macro_edit_name: String,
+    command_macro_edit_description: String,
+    command_macro_import_input: String,
     command_palette_status: String,
+    pending_command_macro_run: Option<PendingCommandMacroRun>,
     chat: Vec<ChatLine>,
     active_conversation_id: Option<String>,
     conversation_index: ConversationIndex,
@@ -407,6 +412,15 @@ struct CommandPaletteItem {
     shortcut: Option<&'static str>,
     action: CommandPaletteAction,
     enabled: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PendingCommandMacroRun {
+    name: String,
+    command_ids: Vec<String>,
+    index: usize,
+    executed: usize,
+    skipped: usize,
 }
 
 impl CommandPaletteItem {
@@ -1138,7 +1152,12 @@ impl LeetcodeApp {
             command_palette_query: String::new(),
             command_palette_selected: 0,
             command_macro_name_input: String::new(),
+            command_macro_edit_target: None,
+            command_macro_edit_name: String::new(),
+            command_macro_edit_description: String::new(),
+            command_macro_import_input: String::new(),
             command_palette_status: String::new(),
+            pending_command_macro_run: None,
             chat,
             active_conversation_id,
             conversation_index,
@@ -1974,6 +1993,7 @@ impl LeetcodeApp {
                 id,
                 name: name.clone(),
                 description: format!("{} команд из избранного", command_ids.len()),
+                confirm_each_step: false,
                 command_ids,
             });
         self.command_macro_name_input.clear();
@@ -1998,6 +2018,196 @@ impl LeetcodeApp {
         }
     }
 
+    fn begin_edit_command_macro(&mut self, macro_id: &str) {
+        let Some(command_macro) = self
+            .config
+            .command_palette_macros
+            .iter()
+            .find(|command_macro| command_macro.id == macro_id)
+            .cloned()
+        else {
+            self.command_palette_status = "Макрос не найден".to_string();
+            return;
+        };
+        self.command_macro_edit_target = Some(command_macro.id);
+        self.command_macro_edit_name = command_macro.name;
+        self.command_macro_edit_description = command_macro.description;
+        self.command_palette_status = "Макрос открыт для редактирования".to_string();
+    }
+
+    fn save_command_macro_edit(&mut self) {
+        let Some(macro_id) = self.command_macro_edit_target.clone() else {
+            self.command_palette_status = "Макрос для редактирования не выбран".to_string();
+            return;
+        };
+        let name = self.command_macro_edit_name.trim().to_string();
+        if name.is_empty() {
+            self.command_palette_status = "Название макроса не может быть пустым".to_string();
+            return;
+        }
+        let Some(command_macro) = self
+            .config
+            .command_palette_macros
+            .iter_mut()
+            .find(|command_macro| command_macro.id == macro_id)
+        else {
+            self.command_palette_status = "Макрос не найден".to_string();
+            return;
+        };
+        command_macro.name = name;
+        command_macro.description = self.command_macro_edit_description.trim().to_string();
+        self.command_palette_status = "Макрос сохранён".to_string();
+        self.persist_command_palette_state();
+    }
+
+    fn cancel_command_macro_edit(&mut self) {
+        self.command_macro_edit_target = None;
+        self.command_macro_edit_name.clear();
+        self.command_macro_edit_description.clear();
+    }
+
+    fn move_command_macro_step(&mut self, macro_id: &str, index: usize, delta: isize) {
+        let Some(command_macro) = self
+            .config
+            .command_palette_macros
+            .iter_mut()
+            .find(|command_macro| command_macro.id == macro_id)
+        else {
+            self.command_palette_status = "Макрос не найден".to_string();
+            return;
+        };
+        if index >= command_macro.command_ids.len() {
+            return;
+        }
+        let new_index = if delta < 0 {
+            index.saturating_sub(1)
+        } else {
+            (index + 1).min(command_macro.command_ids.len().saturating_sub(1))
+        };
+        if new_index != index {
+            command_macro.command_ids.swap(index, new_index);
+            self.command_palette_status = "Порядок шагов обновлён".to_string();
+            self.persist_command_palette_state();
+        }
+    }
+
+    fn remove_command_macro_step(&mut self, macro_id: &str, index: usize) {
+        let Some(command_macro) = self
+            .config
+            .command_palette_macros
+            .iter_mut()
+            .find(|command_macro| command_macro.id == macro_id)
+        else {
+            self.command_palette_status = "Макрос не найден".to_string();
+            return;
+        };
+        if index < command_macro.command_ids.len() {
+            command_macro.command_ids.remove(index);
+            self.command_palette_status = "Шаг удалён".to_string();
+            self.persist_command_palette_state();
+        }
+    }
+
+    fn toggle_command_macro_confirmation(&mut self, macro_id: &str) {
+        let Some(command_macro) = self
+            .config
+            .command_palette_macros
+            .iter_mut()
+            .find(|command_macro| command_macro.id == macro_id)
+        else {
+            self.command_palette_status = "Макрос не найден".to_string();
+            return;
+        };
+        command_macro.confirm_each_step = !command_macro.confirm_each_step;
+        self.command_palette_status = if command_macro.confirm_each_step {
+            "Подтверждение шагов включено".to_string()
+        } else {
+            "Подтверждение шагов выключено".to_string()
+        };
+        self.persist_command_palette_state();
+    }
+
+    fn export_command_macro_to_clipboard(&mut self, macro_id: &str) {
+        let Some(command_macro) = self
+            .config
+            .command_palette_macros
+            .iter()
+            .find(|command_macro| command_macro.id == macro_id)
+            .cloned()
+        else {
+            self.command_palette_status = "Макрос не найден".to_string();
+            return;
+        };
+        let Ok(json) = serde_json::to_string_pretty(&command_macro) else {
+            self.command_palette_status = "Не удалось экспортировать макрос".to_string();
+            return;
+        };
+        self.command_macro_import_input = json.clone();
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(json)) {
+            Ok(()) => self.command_palette_status = "Макрос скопирован в буфер".to_string(),
+            Err(err) => {
+                self.command_palette_status =
+                    format!("Буфер недоступен, JSON оставлен в поле импорта: {err}");
+            }
+        }
+    }
+
+    fn import_command_macro_from_input(&mut self) {
+        let text = self.command_macro_import_input.trim();
+        if text.is_empty() {
+            self.command_palette_status = "Вставьте JSON макроса для импорта".to_string();
+            return;
+        }
+        let Ok(mut command_macro) = serde_json::from_str::<CommandPaletteMacro>(text) else {
+            self.command_palette_status = "JSON макроса не распознан".to_string();
+            return;
+        };
+        command_macro.name = command_macro.name.trim().to_string();
+        command_macro.description = command_macro.description.trim().to_string();
+        command_macro.command_ids = command_macro
+            .command_ids
+            .into_iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty() && !id.starts_with("macro:"))
+            .filter(|id| self.find_command_palette_item_by_id(id).is_some())
+            .take(12)
+            .collect();
+        if command_macro.name.is_empty() || command_macro.command_ids.is_empty() {
+            self.command_palette_status =
+                "Макрос должен иметь название и хотя бы один существующий шаг".to_string();
+            return;
+        }
+        command_macro.id = self.unique_command_macro_id(&command_macro.id, &command_macro.name);
+        let imported_name = command_macro.name.clone();
+        self.config.command_palette_macros.push(command_macro);
+        self.command_macro_import_input.clear();
+        self.command_palette_status = format!("Макрос импортирован: {imported_name}");
+        self.persist_command_palette_state();
+    }
+
+    fn unique_command_macro_id(&self, id: &str, name: &str) -> String {
+        let mut candidate = if id.trim().is_empty() {
+            command_palette_id_part(name)
+        } else {
+            command_palette_id_part(id)
+        };
+        if candidate.starts_with("command-") {
+            candidate = format!("macro-{}", command_palette_hash_part(name));
+        }
+        let base = candidate.clone();
+        let mut suffix = 2;
+        while self
+            .config
+            .command_palette_macros
+            .iter()
+            .any(|command_macro| command_macro.id == candidate)
+        {
+            candidate = format!("{base}-{suffix}");
+            suffix += 1;
+        }
+        candidate
+    }
+
     fn execute_command_palette_item(&mut self, item: CommandPaletteItem) {
         self.record_command_palette_use(&item.id);
         self.execute_command_palette_action(item.action);
@@ -2014,6 +2224,19 @@ impl LeetcodeApp {
             self.command_palette_status = "Макрос не найден".to_string();
             return;
         };
+
+        if command_macro.confirm_each_step {
+            self.pending_command_macro_run = Some(PendingCommandMacroRun {
+                name: command_macro.name.clone(),
+                command_ids: command_macro.command_ids.clone(),
+                index: 0,
+                executed: 0,
+                skipped: 0,
+            });
+            self.command_palette_status =
+                format!("Макрос ждёт подтверждения: {}", command_macro.name);
+            return;
+        }
 
         let mut executed = 0;
         let mut skipped = 0;
@@ -2034,6 +2257,51 @@ impl LeetcodeApp {
                 command_macro.name
             )
         };
+    }
+
+    fn advance_pending_command_macro(&mut self, execute_step: bool) {
+        let Some(mut run) = self.pending_command_macro_run.take() else {
+            return;
+        };
+        if run.index >= run.command_ids.len() {
+            self.command_palette_status = format!(
+                "Макрос завершён: {} (выполнено {}, пропущено {})",
+                run.name, run.executed, run.skipped
+            );
+            return;
+        }
+
+        let command_id = run.command_ids[run.index].clone();
+        if execute_step {
+            match self.find_command_palette_item_by_id(&command_id) {
+                Some(item) if item.enabled => {
+                    self.execute_command_palette_action(item.action);
+                    run.executed += 1;
+                }
+                _ => run.skipped += 1,
+            }
+        } else {
+            run.skipped += 1;
+        }
+        run.index += 1;
+
+        if run.index >= run.command_ids.len() {
+            self.command_palette_status = format!(
+                "Макрос завершён: {} (выполнено {}, пропущено {})",
+                run.name, run.executed, run.skipped
+            );
+        } else {
+            self.pending_command_macro_run = Some(run);
+        }
+    }
+
+    fn cancel_pending_command_macro(&mut self) {
+        if let Some(run) = self.pending_command_macro_run.take() {
+            self.command_palette_status = format!(
+                "Макрос остановлен: {} (выполнено {}, пропущено {})",
+                run.name, run.executed, run.skipped
+            );
+        }
     }
 
     fn execute_command_palette_action(&mut self, action: CommandPaletteAction) {
@@ -3072,8 +3340,26 @@ impl LeetcodeApp {
         let mut execute_item: Option<CommandPaletteItem> = None;
         let mut toggle_favorite_id: Option<String> = None;
         let mut delete_macro_id: Option<String> = None;
+        let mut edit_macro_id: Option<String> = None;
+        let mut export_macro_id: Option<String> = None;
+        let mut toggle_macro_confirmation_id: Option<String> = None;
+        let mut move_macro_step: Option<(String, usize, isize)> = None;
+        let mut remove_macro_step: Option<(String, usize)> = None;
+        let mut save_macro_edit = false;
+        let mut cancel_macro_edit = false;
+        let mut import_macro = false;
         let mut create_macro = false;
         let items = self.filtered_command_palette_items();
+        let edit_macro = self
+            .command_macro_edit_target
+            .as_ref()
+            .and_then(|macro_id| {
+                self.config
+                    .command_palette_macros
+                    .iter()
+                    .find(|command_macro| &command_macro.id == macro_id)
+                    .cloned()
+            });
         if self.command_palette_selected >= items.len() {
             self.command_palette_selected = items.len().saturating_sub(1);
         }
@@ -3138,6 +3424,12 @@ impl LeetcodeApp {
                             toggle_favorite_id = Some(selected_item.id.clone());
                         }
                         if let CommandPaletteAction::RunMacro(macro_id) = &selected_item.action {
+                            if ui.button("Редактировать").clicked() {
+                                edit_macro_id = Some(macro_id.clone());
+                            }
+                            if ui.button("Экспорт").clicked() {
+                                export_macro_id = Some(macro_id.clone());
+                            }
                             if ui.button("Удалить макрос").clicked() {
                                 delete_macro_id = Some(macro_id.clone());
                             }
@@ -3158,6 +3450,75 @@ impl LeetcodeApp {
                     );
                     if ui.button("Создать макрос").clicked() {
                         create_macro = true;
+                    }
+                });
+                if let Some(command_macro) = &edit_macro {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Редактор макроса").strong());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Название").weak());
+                        ui.add_sized(
+                            [safe_available_width(ui, 220.0), 28.0],
+                            TextEdit::singleline(&mut self.command_macro_edit_name),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Описание").weak());
+                        ui.add_sized(
+                            [safe_available_width(ui, 220.0), 28.0],
+                            TextEdit::singleline(&mut self.command_macro_edit_description),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Сохранить").clicked() {
+                            save_macro_edit = true;
+                        }
+                        if ui.button("Закрыть редактор").clicked() {
+                            cancel_macro_edit = true;
+                        }
+                        let confirm_label = if command_macro.confirm_each_step {
+                            "Подтверждение: вкл"
+                        } else {
+                            "Подтверждение: выкл"
+                        };
+                        if ui.button(confirm_label).clicked() {
+                            toggle_macro_confirmation_id = Some(command_macro.id.clone());
+                        }
+                    });
+                    ui.add_space(4.0);
+                    for (step_index, command_id) in command_macro.command_ids.iter().enumerate() {
+                        let item = items.iter().find(|item| &item.id == command_id);
+                        let title = item
+                            .map(|item| item.title.as_str())
+                            .unwrap_or(command_id.as_str());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(format!("{}.", step_index + 1)).weak());
+                            ui.label(RichText::new(title).strong());
+                            ui.label(RichText::new(command_id).weak().small());
+                            if ui.small_button("Вверх").clicked() {
+                                move_macro_step = Some((command_macro.id.clone(), step_index, -1));
+                            }
+                            if ui.small_button("Вниз").clicked() {
+                                move_macro_step = Some((command_macro.id.clone(), step_index, 1));
+                            }
+                            if ui.small_button("Удалить шаг").clicked() {
+                                remove_macro_step = Some((command_macro.id.clone(), step_index));
+                            }
+                        });
+                    }
+                }
+                ui.add_space(8.0);
+                ui.collapsing("Импорт макроса", |ui| {
+                    ui.add(
+                        TextEdit::multiline(&mut self.command_macro_import_input)
+                            .desired_rows(3)
+                            .desired_width(safe_available_width(ui, 260.0))
+                            .hint_text("Вставьте JSON макроса"),
+                    );
+                    if ui.button("Импортировать").clicked() {
+                        import_macro = true;
                     }
                 });
                 if !self.command_palette_status.trim().is_empty() {
@@ -3239,6 +3600,30 @@ impl LeetcodeApp {
                     });
             });
 
+        if let Some(macro_id) = edit_macro_id {
+            self.begin_edit_command_macro(&macro_id);
+        }
+        if let Some(macro_id) = export_macro_id {
+            self.export_command_macro_to_clipboard(&macro_id);
+        }
+        if let Some(macro_id) = toggle_macro_confirmation_id {
+            self.toggle_command_macro_confirmation(&macro_id);
+        }
+        if let Some((macro_id, step_index, delta)) = move_macro_step {
+            self.move_command_macro_step(&macro_id, step_index, delta);
+        }
+        if let Some((macro_id, step_index)) = remove_macro_step {
+            self.remove_command_macro_step(&macro_id, step_index);
+        }
+        if save_macro_edit {
+            self.save_command_macro_edit();
+        }
+        if cancel_macro_edit {
+            self.cancel_command_macro_edit();
+        }
+        if import_macro {
+            self.import_command_macro_from_input();
+        }
         if let Some(command_id) = toggle_favorite_id {
             self.toggle_command_palette_favorite(&command_id);
         }
@@ -3253,6 +3638,92 @@ impl LeetcodeApp {
             open = false;
         }
         self.command_palette_open = open;
+    }
+
+    fn show_command_macro_confirmation(&mut self, ctx: &egui::Context) {
+        let Some(run) = self.pending_command_macro_run.clone() else {
+            return;
+        };
+
+        let current_command_id = run.command_ids.get(run.index).cloned().unwrap_or_default();
+        let current_item = self.find_command_palette_item_by_id(&current_command_id);
+        let step_title = current_item
+            .as_ref()
+            .map(|item| item.title.clone())
+            .unwrap_or_else(|| current_command_id.clone());
+        let step_description = current_item
+            .as_ref()
+            .map(|item| item.description.clone())
+            .unwrap_or_else(|| "Команда недоступна или больше не существует".to_string());
+        let step_enabled = current_item
+            .as_ref()
+            .map(|item| item.enabled)
+            .unwrap_or(false);
+
+        let mut execute_step = false;
+        let mut skip_step = false;
+        let mut stop_macro = false;
+        let mut run_all = false;
+
+        egui::Window::new("Подтверждение макроса")
+            .id(egui::Id::new("command_macro_confirmation"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                ui.label(RichText::new(&run.name).strong());
+                ui.label(
+                    RichText::new(format!(
+                        "Шаг {} из {}",
+                        run.index + 1,
+                        run.command_ids.len()
+                    ))
+                    .weak(),
+                );
+                ui.add_space(8.0);
+                ui.label(RichText::new(step_title).strong());
+                ui.label(RichText::new(step_description).weak());
+                if !step_enabled {
+                    ui.label(
+                        RichText::new("Этот шаг сейчас недоступен и будет пропущен.")
+                            .color(egui::Color32::from_rgb(235, 154, 154)),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .add_enabled(step_enabled, egui::Button::new("Выполнить шаг"))
+                        .clicked()
+                    {
+                        execute_step = true;
+                    }
+                    if ui.button("Пропустить").clicked() {
+                        skip_step = true;
+                    }
+                    if ui.button("Выполнить всё").clicked() {
+                        run_all = true;
+                    }
+                    if ui.button("Остановить").clicked() {
+                        stop_macro = true;
+                    }
+                });
+            });
+
+        if execute_step {
+            self.advance_pending_command_macro(true);
+        }
+        if skip_step {
+            self.advance_pending_command_macro(false);
+        }
+        if run_all {
+            while self.pending_command_macro_run.is_some() {
+                self.advance_pending_command_macro(true);
+            }
+        }
+        if stop_macro {
+            self.cancel_pending_command_macro();
+        }
     }
 
     fn refresh_journal(&mut self) {
@@ -12296,12 +12767,14 @@ impl eframe::App for LeetcodeApp {
         self.show_chat_panel(ctx);
         self.show_git_commit_dialog(ctx);
         self.show_command_palette(ctx);
+        self.show_command_macro_confirmation(ctx);
 
         if self.is_running
             || self.project_is_running
             || self.asset_is_running
             || self.provider_validation_running
             || self.terminal_running
+            || self.pending_command_macro_run.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
