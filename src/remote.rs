@@ -141,6 +141,7 @@ pub struct RemoteRunSummary {
 pub struct RemoteControlSnapshot {
     pub app: String,
     pub version: String,
+    pub agent_id: String,
     pub remote_enabled: bool,
     pub project_name: String,
     pub workspace_path: Option<String>,
@@ -178,6 +179,7 @@ impl Default for RemoteControlSnapshot {
         Self {
             app: "Leetcode".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            agent_id: String::new(),
             remote_enabled: false,
             project_name: "нет проекта".to_string(),
             workspace_path: None,

@@ -20,8 +20,8 @@ use crate::assets::{
     OPENAI_VIDEO_PROVIDER_ID,
 };
 use crate::config::{
-    append_journal, clear_journal, permission_mode_description, policy_profile_labels,
-    read_journal_tail, AppConfig, CommandPaletteMacro, ProjectUiState,
+    append_journal, clear_journal, generate_agent_id, permission_mode_description,
+    policy_profile_labels, read_journal_tail, AppConfig, CommandPaletteMacro, ProjectUiState,
 };
 use crate::conversation::{
     archive_conversation, compile_context_snapshot_with_budget, create_new_conversation,
@@ -1138,6 +1138,10 @@ impl LeetcodeApp {
             right_panel_view = workspace_mode.default_panel();
         }
         let file_panel_collapsed = config.layout_file_panel_collapsed;
+        if config.agent_id.trim().is_empty() {
+            config.agent_id = generate_agent_id();
+            let _ = config.save();
+        }
         if config.remote_access_token.trim().is_empty() {
             config.remote_access_token = generate_remote_access_token();
             let _ = config.save();
@@ -9577,9 +9581,25 @@ impl LeetcodeApp {
         ui.collapsing("Удалённое управление", |ui| {
             panel_header(
                 ui,
-                "Remote Control",
-                "Локальный API и мобильная PWA-панель для доступа к запущенному агенту.",
+                "Удалённый доступ",
+                "Agent ID, локальный API и мобильная PWA-панель для доступа к запущенному агенту.",
             );
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Agent ID").strong());
+                ui.label(RichText::new(&self.config.agent_id).monospace());
+                if ui.button("Копировать").clicked() {
+                    self.copy_agent_id_to_clipboard();
+                }
+            });
+            ui.label(
+                RichText::new(
+                    "Это постоянный идентификатор этого агента. Сейчас он отображается локально; подключение по ID через thin client/relay будет следующим слоем.",
+                )
+                .weak()
+                .small(),
+            );
+            ui.add_space(6.0);
 
             let enabled_changed = ui
                 .checkbox(&mut self.config.remote_enabled, "Включить Remote API")
@@ -9732,6 +9752,15 @@ impl LeetcodeApp {
             return;
         }
         self.restart_remote_control_server();
+    }
+
+    fn copy_agent_id_to_clipboard(&mut self) {
+        match arboard::Clipboard::new()
+            .and_then(|mut clipboard| clipboard.set_text(self.config.agent_id.clone()))
+        {
+            Ok(()) => self.remote_status = "Agent ID скопирован".to_string(),
+            Err(err) => self.remote_status = format!("Не удалось скопировать Agent ID: {err}"),
+        }
     }
 
     fn restart_remote_control_server(&mut self) {
@@ -10050,6 +10079,7 @@ impl LeetcodeApp {
             RemoteControlSnapshot {
                 app: "Leetcode".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                agent_id: self.config.agent_id.clone(),
                 remote_enabled: self.config.remote_enabled,
                 project_name,
                 workspace_path,
@@ -13941,11 +13971,24 @@ fn release_artifacts(root: &Path) -> Vec<ReleaseArtifact> {
             "sha256",
             root.join("dist").join("leetcode-portable.sha256.txt"),
         ),
+        ("update manifest", root.join("dist").join("latest.json")),
         (
             "portable exe",
             root.join("dist")
                 .join("leetcode-portable")
                 .join("leetcode.exe"),
+        ),
+        (
+            "installer script",
+            root.join("dist")
+                .join("leetcode-portable")
+                .join("install-leetcode.ps1"),
+        ),
+        (
+            "package info",
+            root.join("dist")
+                .join("leetcode-portable")
+                .join("package-info.json"),
         ),
         (
             "release exe",

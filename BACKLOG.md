@@ -286,6 +286,28 @@ Leetcode развивается из минимального локальног
 - Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Todo: Сделать лёгкий desktop thin client на WebView/Tauri после стабилизации API.
 
+## Этап 26 - Installer и обновления
+
+Цель: превратить Leetcode из dev/portable-сборки в устанавливаемый продукт, который можно поставить на другой компьютер и обновлять без ручной сборки из репозитория.
+
+- Done: Добавить Windows installer foundation: install/uninstall scripts, установка в user-local app directory, ярлыки Start Menu/Desktop и install metadata.
+- Done: Расширить packaging script так, чтобы он собирал portable package, installer bundle и update manifest `latest.json`.
+- Done: Добавить Release Cockpit/diagnostics видимость installer/update артефактов.
+- Todo: Добавить ручную проверку обновлений по manifest URL.
+- Todo: Добавить безопасное скачивание обновления с SHA256-проверкой.
+- Todo: Добавить product-grade автообновление после стабилизации release канала и подписи.
+
+## Этап 27 - Agent ID и простое подключение
+
+Цель: спрятать IP/port/token-схему за понятной моделью: пользователь видит Agent ID, подключает тонкий клиент или iPhone и подтверждает устройство на основном компьютере.
+
+- Done: Добавить постоянный `Agent ID`, который создаётся при первом запуске и сохраняется в конфиге.
+- Done: Показать `Agent ID` в UI удалённого доступа с копированием и понятным статусом.
+- Todo: Добавить device registry: доверенные устройства, роли, last seen, revoke.
+- Todo: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
+- Todo: Подготовить thin-client протокол поверх уже существующего Remote API.
+- Todo: Подготовить Relay/Agent ID слой: исходящее WSS-соединение от агента, подключение клиента по Agent ID без ручных IP/портов.
+
 ## Постоянная планка качества
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

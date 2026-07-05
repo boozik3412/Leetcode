@@ -22,6 +22,7 @@ pub struct AppConfig {
     pub providers: BTreeMap<String, ProviderSettings>,
     pub last_workspace: Option<PathBuf>,
     pub projects: Vec<ProjectUiState>,
+    pub agent_id: String,
     pub policy_profile: String,
     pub require_shell_approval: bool,
     pub require_write_approval: bool,
@@ -112,6 +113,8 @@ struct PersistedConfig {
     #[serde(default)]
     projects: Vec<ProjectUiState>,
     last_workspace: Option<PathBuf>,
+    #[serde(default)]
+    agent_id: String,
     #[serde(default = "default_policy_profile")]
     policy_profile: String,
     #[serde(default = "default_true")]
@@ -198,6 +201,7 @@ impl Default for PersistedConfig {
             task_route: default_task_route(),
             projects: Vec::new(),
             last_workspace: None,
+            agent_id: String::new(),
             policy_profile: default_policy_profile(),
             require_shell_approval: true,
             require_write_approval: true,
@@ -300,6 +304,7 @@ impl AppConfig {
             providers,
             last_workspace: persisted.last_workspace,
             projects,
+            agent_id: normalize_agent_id(&persisted.agent_id),
             policy_profile: normalize_policy_profile(&persisted.policy_profile),
             require_shell_approval: persisted.require_shell_approval,
             require_write_approval: persisted.require_write_approval,
@@ -386,6 +391,7 @@ impl AppConfig {
             task_route: normalize_task_route(&self.task_route),
             projects: normalize_project_states(self.projects.clone()),
             last_workspace: self.last_workspace.clone(),
+            agent_id: normalize_agent_id(&self.agent_id),
             policy_profile: normalize_policy_profile(&self.policy_profile),
             require_shell_approval: self.require_shell_approval,
             require_write_approval: self.require_write_approval,
@@ -761,6 +767,14 @@ fn default_remote_port() -> u16 {
     17890
 }
 
+pub fn generate_agent_id() -> String {
+    let raw = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .to_ascii_uppercase();
+    format!("LC-{}-{}-{}", &raw[0..4], &raw[4..8], &raw[8..12])
+}
+
 fn default_remote_rate_limit_per_minute() -> u32 {
     120
 }
@@ -829,6 +843,20 @@ fn normalize_remote_port(port: u16) -> u16 {
         default_remote_port()
     } else {
         port
+    }
+}
+
+fn normalize_agent_id(value: &str) -> String {
+    let normalized = value
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect::<String>();
+    if normalized.is_empty() {
+        String::new()
+    } else {
+        normalized
     }
 }
 
@@ -1223,6 +1251,7 @@ mod tests {
             task_route: "auto".to_string(),
             projects: Vec::new(),
             last_workspace: None,
+            agent_id: String::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
@@ -1285,6 +1314,7 @@ mod tests {
             task_route: "coding".to_string(),
             projects: Vec::new(),
             last_workspace: None,
+            agent_id: String::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
@@ -1416,6 +1446,19 @@ mod tests {
     }
 
     #[test]
+    fn generates_and_normalizes_agent_ids() {
+        let agent_id = generate_agent_id();
+
+        assert!(agent_id.starts_with("LC-"));
+        assert_eq!(agent_id.len(), "LC-0000-0000-0000".len());
+        assert_eq!(
+            normalize_agent_id(" lc-ab12-cd34-ef56 "),
+            "LC-AB12-CD34-EF56"
+        );
+        assert_eq!(normalize_agent_id(""), "");
+    }
+
+    #[test]
     fn normalizes_command_palette_state() {
         let macros = normalize_command_palette_macros(vec![
             CommandPaletteMacro {
@@ -1466,6 +1509,7 @@ mod tests {
             providers: BTreeMap::new(),
             last_workspace: None,
             projects: Vec::new(),
+            agent_id: String::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
@@ -1521,6 +1565,7 @@ mod tests {
             providers: BTreeMap::new(),
             last_workspace: None,
             projects: Vec::new(),
+            agent_id: String::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,
@@ -1579,6 +1624,7 @@ mod tests {
             providers: BTreeMap::new(),
             last_workspace: None,
             projects: Vec::new(),
+            agent_id: String::new(),
             policy_profile: PERMISSION_ASK.to_string(),
             require_shell_approval: true,
             require_write_approval: true,

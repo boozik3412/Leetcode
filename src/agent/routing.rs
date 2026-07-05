@@ -371,6 +371,7 @@ mod tests {
             providers,
             last_workspace: None,
             projects: Vec::new(),
+            agent_id: String::new(),
             policy_profile: "ask".to_string(),
             require_shell_approval: true,
             require_write_approval: true,

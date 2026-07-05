@@ -199,7 +199,14 @@ powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1
 
 The output is written to `dist/leetcode-portable`.
 
-The package script also creates `dist/leetcode-portable.zip` and `dist/leetcode-portable.sha256.txt` by default. Pass `-Sign` with `LEETCODE_SIGN_CERT_THUMBPRINT` when a Windows code-signing certificate is available.
+The package script also creates `dist/leetcode-portable.zip`, `dist/leetcode-portable.sha256.txt`, and `dist/latest.json` by default. The portable package includes `install-leetcode.ps1` and `uninstall-leetcode.ps1`, so a clean Windows machine can install the current build into `%LOCALAPPDATA%\Programs\Leetcode` without Cargo or Rust:
+
+```powershell
+cd dist\leetcode-portable
+powershell -ExecutionPolicy Bypass -File .\install-leetcode.ps1
+```
+
+`latest.json` is the update-manifest foundation for the future in-app updater and thin-client distribution flow: version, platform, archive filename, SHA256, size, and publish timestamp. Pass `-Sign` with `LEETCODE_SIGN_CERT_THUMBPRINT` when a Windows code-signing certificate is available.
 
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 
