@@ -56,9 +56,9 @@ use crate::provider_health::{
 };
 use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
-    update_remote_shared_state, RemoteControlAction, RemoteControlServer,
-    RemoteControlServerConfig, RemoteControlSharedState, RemoteControlSnapshot, RemoteRunSummary,
-    RemoteSubmittedTask, RemoteToolLogEntry,
+    update_remote_shared_state, RemoteAccessPolicy, RemoteAuditEvent, RemoteControlAction,
+    RemoteControlServer, RemoteControlServerConfig, RemoteControlSharedState,
+    RemoteControlSnapshot, RemoteRunSummary, RemoteSubmittedTask, RemoteToolLogEntry,
 };
 use crate::roadmap::{
     load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
@@ -196,6 +196,8 @@ pub struct LeetcodeApp {
     remote_host_input: String,
     remote_port_input: String,
     remote_token_input: String,
+    remote_allowed_origins_input: String,
+    remote_rate_limit_input: String,
     remote_events_tx: mpsc::Sender<RemoteControlAction>,
     remote_events_rx: Receiver<RemoteControlAction>,
     remote_task_queue: VecDeque<RemoteSubmittedTask>,
@@ -1143,6 +1145,8 @@ impl LeetcodeApp {
         let remote_host_input = config.remote_bind_host.clone();
         let remote_port_input = config.remote_port.to_string();
         let remote_token_input = config.remote_access_token.clone();
+        let remote_allowed_origins_input = config.remote_allowed_origins.clone();
+        let remote_rate_limit_input = config.remote_rate_limit_per_minute.to_string();
         let (remote_events_tx, remote_events_rx) = mpsc::channel();
         let (remote_server, remote_status) = if config.remote_enabled {
             match start_remote_control_server(
@@ -1150,6 +1154,7 @@ impl LeetcodeApp {
                     host: config.remote_bind_host.clone(),
                     port: config.remote_port,
                     token: config.remote_access_token.clone(),
+                    policy: remote_access_policy_from_config(&config),
                     actions: Some(remote_events_tx.clone()),
                 },
                 Arc::clone(&remote_shared_state),
@@ -1273,6 +1278,8 @@ impl LeetcodeApp {
             remote_host_input,
             remote_port_input,
             remote_token_input,
+            remote_allowed_origins_input,
+            remote_rate_limit_input,
             remote_events_tx,
             remote_events_rx,
             remote_task_queue: VecDeque::new(),
@@ -9593,6 +9600,35 @@ impl LeetcodeApp {
             )
             .on_hover_text("Этот token нужен для /api/state и /api/events. Не отправляйте его в чат и не храните в публичных файлах.");
 
+            ui.separator();
+            ui.label(RichText::new("Роли remote-доступа").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.config.remote_role_view, "Обзор")
+                    .on_hover_text("Разрешает читать состояние агента, логи инструментов и историю запусков.");
+                ui.checkbox(&mut self.config.remote_role_chat, "Задачи")
+                    .on_hover_text("Разрешает отправлять новые задачи агенту через Remote API/PWA.");
+                ui.checkbox(&mut self.config.remote_role_approve, "Подтверждения")
+                    .on_hover_text("Разрешает удалённо подтверждать план запуска и запросы инструментов.");
+                ui.checkbox(&mut self.config.remote_role_files, "Файлы")
+                    .on_hover_text("Разрешает read-only просмотр списка файлов и содержимого файлов проекта.");
+                ui.checkbox(&mut self.config.remote_audit_enabled, "Аудит")
+                    .on_hover_text("Пишет удалённые действия в журнал приложения: задачи, approvals, чтение файлов, security-deny.");
+            });
+
+            ui.label(RichText::new("Allowed Origins").weak());
+            ui.add(
+                TextEdit::singleline(&mut self.remote_allowed_origins_input)
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text("Пусто = только тот же origin/запросы без Origin. Можно указать https://example.com, http://localhost:3000 или несколько через запятую.");
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Rate limit");
+                ui.add(TextEdit::singleline(&mut self.remote_rate_limit_input).desired_width(88.0))
+                    .on_hover_text("Глобальный лимит API-запросов в минуту. 0 отключает лимит. Рекомендуемо: 120.");
+                ui.label(RichText::new("запросов/мин").weak());
+            });
+
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Сохранить и перезапустить").clicked() {
                     self.save_remote_control_settings();
@@ -9625,7 +9661,7 @@ impl LeetcodeApp {
             );
             ui.label(
                 RichText::new(
-                    "Stage 25A: удалённая панель пока читает состояние. Отправка задач, approvals и файловые действия пойдут в Stage 25B поверх этого же API.",
+                    "Stage 25B: remote API поддерживает PWA, задачи, approvals, read-only observer, роли доступа, Origin allowlist, rate limit и audit-журнал.",
                 )
                 .weak()
                 .small(),
@@ -9660,6 +9696,18 @@ impl LeetcodeApp {
             self.remote_token_input = generate_remote_access_token();
         }
         self.config.remote_access_token = self.remote_token_input.trim().to_string();
+        self.config.remote_allowed_origins = self.remote_allowed_origins_input.trim().to_string();
+
+        let Ok(rate_limit) = self.remote_rate_limit_input.trim().parse::<u32>() else {
+            self.remote_status = "Rate limit должен быть числом. 0 отключает лимит.".to_string();
+            return;
+        };
+        self.config.remote_rate_limit_per_minute = if rate_limit == 0 {
+            0
+        } else {
+            rate_limit.clamp(10, 5_000)
+        };
+        self.remote_rate_limit_input = self.config.remote_rate_limit_per_minute.to_string();
 
         if let Err(err) = self.config.save() {
             self.remote_status = format!("Не удалось сохранить настройки remote: {err}");
@@ -9690,6 +9738,7 @@ impl LeetcodeApp {
                 host: self.config.remote_bind_host.clone(),
                 port: self.config.remote_port,
                 token: self.config.remote_access_token.clone(),
+                policy: remote_access_policy_from_config(&self.config),
                 actions: Some(self.remote_events_tx.clone()),
             },
             Arc::clone(&self.remote_shared_state),
@@ -9755,8 +9804,30 @@ impl LeetcodeApp {
                             "Remote: нет действия, ожидающего разрешения".to_string();
                     }
                 }
+                RemoteControlAction::Audit(event) => {
+                    self.record_remote_audit(event);
+                }
             }
         }
+    }
+
+    fn record_remote_audit(&mut self, event: RemoteAuditEvent) {
+        self.remote_last_action = format!(
+            "Remote audit: {} · {}",
+            event.event,
+            compact(&event.detail, 160)
+        );
+        append_journal(format!(
+            "remote_audit\t{}\t{}\t{}",
+            event.created_at,
+            event.event,
+            compact(&event.detail, 500)
+        ));
+        self.tool_log.push(ToolLogLine {
+            title: format!("remote audit · {}", event.event),
+            content: event.detail,
+        });
+        self.refresh_journal();
     }
 
     fn process_remote_task_queue(&mut self) {
@@ -9895,6 +9966,16 @@ impl LeetcodeApp {
                 tool_count: record.tool_calls.len(),
             })
             .collect::<Vec<_>>();
+        let agent_history_details = self
+            .agent_history
+            .iter()
+            .rev()
+            .take(20)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .filter_map(|record| serde_json::to_value(record).ok())
+            .collect::<Vec<_>>();
         let file_rows = self.file_rows.iter().take(600).cloned().collect::<Vec<_>>();
 
         update_remote_shared_state(
@@ -9930,6 +10011,7 @@ impl LeetcodeApp {
                     .map(|approval| approval.summary.clone()),
                 tool_log_tail,
                 agent_history_tail,
+                agent_history_details,
                 file_rows,
                 agent_status,
                 project_status,
@@ -15180,6 +15262,27 @@ fn chat_message_body(ui: &mut egui::Ui, line: &ChatLine, live_status: Option<&st
             });
         }
     });
+}
+
+fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
+    let allowed_origins = config
+        .remote_allowed_origins
+        .split(|ch| matches!(ch, '\n' | ',' | ';'))
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .take(32)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+
+    RemoteAccessPolicy {
+        view: config.remote_role_view,
+        chat: config.remote_role_chat,
+        approve: config.remote_role_approve,
+        files: config.remote_role_files,
+        allowed_origins,
+        rate_limit_per_minute: config.remote_rate_limit_per_minute,
+        audit: config.remote_audit_enabled,
+    }
 }
 
 fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {

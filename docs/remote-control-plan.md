@@ -56,17 +56,18 @@
   - Done local-first: approve/deny действие инструмента через `POST /api/approval`;
   - Done local-first: смотреть tool log через `GET /api/tool-log`;
   - Done local-first: смотреть run history через `GET /api/history`;
+  - Done local-first: смотреть подробный run timeline через `GET /api/history/run?id=...`;
   - Done local-first: читать UTF-8 файлы текущей workspace в безопасном read-only режиме через `GET /api/files/content?path=...`;
-  - смотреть подробный run timeline;
   - запускать макросы/палитру команд по разрешениям.
 - Security hardening:
   - short-lived access tokens;
   - passkeys/WebAuthn;
   - TLS/WSS;
-  - Origin validation;
-  - rate limiting;
-  - audit log remote actions;
-  - roles: view/chat/approve/run/files/desktop.
+  - Done local-first: Origin validation с allowlist в настройках;
+  - Done local-first: глобальный rate limit для Remote API;
+  - Done local-first: audit log remote actions;
+  - Done local-first: roles: view/chat/approve/files;
+  - later product: per-device/per-IP limits, revoke devices, run/desktop roles, signed short-lived sessions.
 
 Критерии готовности:
 

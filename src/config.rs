@@ -44,6 +44,13 @@ pub struct AppConfig {
     pub remote_bind_host: String,
     pub remote_port: u16,
     pub remote_access_token: String,
+    pub remote_role_view: bool,
+    pub remote_role_chat: bool,
+    pub remote_role_approve: bool,
+    pub remote_role_files: bool,
+    pub remote_allowed_origins: String,
+    pub remote_rate_limit_per_minute: u32,
+    pub remote_audit_enabled: bool,
     pub context_recent_messages: usize,
     pub context_relevant_messages: usize,
     pub context_recent_runs: usize,
@@ -147,6 +154,20 @@ struct PersistedConfig {
     remote_port: u16,
     #[serde(default)]
     remote_access_token: String,
+    #[serde(default = "default_true")]
+    remote_role_view: bool,
+    #[serde(default = "default_true")]
+    remote_role_chat: bool,
+    #[serde(default = "default_true")]
+    remote_role_approve: bool,
+    #[serde(default = "default_true")]
+    remote_role_files: bool,
+    #[serde(default)]
+    remote_allowed_origins: String,
+    #[serde(default = "default_remote_rate_limit_per_minute")]
+    remote_rate_limit_per_minute: u32,
+    #[serde(default = "default_true")]
+    remote_audit_enabled: bool,
     #[serde(default = "default_context_recent_messages")]
     context_recent_messages: usize,
     #[serde(default = "default_context_relevant_messages")]
@@ -198,6 +219,13 @@ impl Default for PersistedConfig {
             remote_bind_host: default_remote_bind_host(),
             remote_port: default_remote_port(),
             remote_access_token: String::new(),
+            remote_role_view: true,
+            remote_role_chat: true,
+            remote_role_approve: true,
+            remote_role_files: true,
+            remote_allowed_origins: String::new(),
+            remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_audit_enabled: true,
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -294,6 +322,17 @@ impl AppConfig {
             remote_bind_host: normalize_remote_bind_host(&persisted.remote_bind_host),
             remote_port: normalize_remote_port(persisted.remote_port),
             remote_access_token: persisted.remote_access_token.trim().to_string(),
+            remote_role_view: persisted.remote_role_view,
+            remote_role_chat: persisted.remote_role_chat,
+            remote_role_approve: persisted.remote_role_approve,
+            remote_role_files: persisted.remote_role_files,
+            remote_allowed_origins: normalize_remote_allowed_origins(
+                &persisted.remote_allowed_origins,
+            ),
+            remote_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
+                persisted.remote_rate_limit_per_minute,
+            ),
+            remote_audit_enabled: persisted.remote_audit_enabled,
             context_recent_messages: normalize_context_recent_messages(
                 persisted.context_recent_messages,
             ),
@@ -368,6 +407,15 @@ impl AppConfig {
             remote_bind_host: normalize_remote_bind_host(&self.remote_bind_host),
             remote_port: normalize_remote_port(self.remote_port),
             remote_access_token: self.remote_access_token.trim().to_string(),
+            remote_role_view: self.remote_role_view,
+            remote_role_chat: self.remote_role_chat,
+            remote_role_approve: self.remote_role_approve,
+            remote_role_files: self.remote_role_files,
+            remote_allowed_origins: normalize_remote_allowed_origins(&self.remote_allowed_origins),
+            remote_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
+                self.remote_rate_limit_per_minute,
+            ),
+            remote_audit_enabled: self.remote_audit_enabled,
             context_recent_messages: normalize_context_recent_messages(
                 self.context_recent_messages,
             ),
@@ -713,6 +761,10 @@ fn default_remote_port() -> u16 {
     17890
 }
 
+fn default_remote_rate_limit_per_minute() -> u32 {
+    120
+}
+
 fn default_context_recent_messages() -> usize {
     14
 }
@@ -777,6 +829,24 @@ fn normalize_remote_port(port: u16) -> u16 {
         default_remote_port()
     } else {
         port
+    }
+}
+
+fn normalize_remote_allowed_origins(value: &str) -> String {
+    value
+        .split(|ch| matches!(ch, '\n' | ',' | ';'))
+        .map(str::trim)
+        .filter(|origin| !origin.is_empty())
+        .take(32)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_remote_rate_limit_per_minute(value: u32) -> u32 {
+    if value == 0 {
+        0
+    } else {
+        value.clamp(10, 5_000)
     }
 }
 
@@ -1174,6 +1244,13 @@ mod tests {
             remote_bind_host: default_remote_bind_host(),
             remote_port: default_remote_port(),
             remote_access_token: String::new(),
+            remote_role_view: true,
+            remote_role_chat: true,
+            remote_role_approve: true,
+            remote_role_files: true,
+            remote_allowed_origins: String::new(),
+            remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_audit_enabled: true,
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1229,6 +1306,13 @@ mod tests {
             remote_bind_host: default_remote_bind_host(),
             remote_port: default_remote_port(),
             remote_access_token: String::new(),
+            remote_role_view: true,
+            remote_role_chat: true,
+            remote_role_approve: true,
+            remote_role_files: true,
+            remote_allowed_origins: String::new(),
+            remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_audit_enabled: true,
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1322,6 +1406,13 @@ mod tests {
         assert_eq!(normalize_remote_bind_host(" 0.0.0.0 "), "0.0.0.0");
         assert_eq!(normalize_remote_port(0), 17890);
         assert_eq!(normalize_remote_port(18080), 18080);
+        assert_eq!(
+            normalize_remote_allowed_origins(" https://a.test, http://b.test\n; "),
+            "https://a.test\nhttp://b.test"
+        );
+        assert_eq!(normalize_remote_rate_limit_per_minute(0), 0);
+        assert_eq!(normalize_remote_rate_limit_per_minute(1), 10);
+        assert_eq!(normalize_remote_rate_limit_per_minute(6_000), 5_000);
     }
 
     #[test]
@@ -1397,6 +1488,13 @@ mod tests {
             remote_bind_host: default_remote_bind_host(),
             remote_port: default_remote_port(),
             remote_access_token: String::new(),
+            remote_role_view: true,
+            remote_role_chat: true,
+            remote_role_approve: true,
+            remote_role_files: true,
+            remote_allowed_origins: String::new(),
+            remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_audit_enabled: true,
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1445,6 +1543,13 @@ mod tests {
             remote_bind_host: default_remote_bind_host(),
             remote_port: default_remote_port(),
             remote_access_token: String::new(),
+            remote_role_view: true,
+            remote_role_chat: true,
+            remote_role_approve: true,
+            remote_role_files: true,
+            remote_allowed_origins: String::new(),
+            remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_audit_enabled: true,
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1496,6 +1601,13 @@ mod tests {
             remote_bind_host: default_remote_bind_host(),
             remote_port: default_remote_port(),
             remote_access_token: String::new(),
+            remote_role_view: true,
+            remote_role_chat: true,
+            remote_role_approve: true,
+            remote_role_files: true,
+            remote_allowed_origins: String::new(),
+            remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_audit_enabled: true,
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),

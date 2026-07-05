@@ -278,9 +278,10 @@ Leetcode развивается из минимального локальног
 - Done: Добавить remote observer endpoints: `GET /api/tool-log`, `GET /api/history`, `GET /api/files`.
 - Done: Добавить read-only просмотр UTF-8 файлов внутри текущей workspace через `GET /api/files/content?path=...`.
 - Done: Добавить PWA-блок "Наблюдение" для логов, истории запусков и файлов.
-- Todo: Расширить observer до подробного run timeline и фильтров по истории.
+- Done: Расширить observer до подробного run timeline через `GET /api/history/run?id=...` и PWA drill-down по выбранному запуску.
+- Done: Добавить security baseline для local Remote API: роли доступа, Origin allowlist, глобальный rate limit и audit-события удалённых действий.
 - Todo: Добавить безопасные макросы/палитру команд по ролям.
-- Todo: Усилить безопасность: short-lived tokens, Origin validation, rate limiting, audit log, TLS/WSS, роли доступа.
+- Todo: Усилить безопасность до product-grade: short-lived tokens, device pairing, revoke devices, TLS/WSS, per-device/per-IP rate limiting.
 - Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Todo: Сделать лёгкий desktop thin client на WebView/Tauri после стабилизации API.
 

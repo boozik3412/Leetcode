@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -15,6 +15,7 @@ pub struct RemoteControlServerConfig {
     pub host: String,
     pub port: u16,
     pub token: String,
+    pub policy: RemoteAccessPolicy,
     pub actions: Option<Sender<RemoteControlAction>>,
 }
 
@@ -25,6 +26,69 @@ pub enum RemoteControlAction {
     SubmitTask(RemoteSubmittedTask),
     AnswerRunGate { approved: bool },
     AnswerApproval { approved: bool },
+    Audit(RemoteAuditEvent),
+}
+
+#[derive(Clone, Debug)]
+pub struct RemoteAccessPolicy {
+    pub view: bool,
+    pub chat: bool,
+    pub approve: bool,
+    pub files: bool,
+    pub allowed_origins: Vec<String>,
+    pub rate_limit_per_minute: u32,
+    pub audit: bool,
+}
+
+impl Default for RemoteAccessPolicy {
+    fn default() -> Self {
+        Self {
+            view: true,
+            chat: true,
+            approve: true,
+            files: true,
+            allowed_origins: Vec::new(),
+            rate_limit_per_minute: 120,
+            audit: true,
+        }
+    }
+}
+
+impl RemoteAccessPolicy {
+    fn allows(&self, role: RemoteAccessRole) -> bool {
+        match role {
+            RemoteAccessRole::View => self.view,
+            RemoteAccessRole::Chat => self.chat,
+            RemoteAccessRole::Approve => self.approve,
+            RemoteAccessRole::Files => self.files,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RemoteAccessRole {
+    View,
+    Chat,
+    Approve,
+    Files,
+}
+
+impl RemoteAccessRole {
+    fn label(self) -> &'static str {
+        match self {
+            RemoteAccessRole::View => "view",
+            RemoteAccessRole::Chat => "chat",
+            RemoteAccessRole::Approve => "approve",
+            RemoteAccessRole::Files => "files",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteAuditEvent {
+    pub event: String,
+    pub detail: String,
+    pub created_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -82,6 +146,8 @@ pub struct RemoteControlSnapshot {
     pub pending_approval_summary: Option<String>,
     pub tool_log_tail: Vec<RemoteToolLogEntry>,
     pub agent_history_tail: Vec<RemoteRunSummary>,
+    #[serde(skip_serializing, default)]
+    pub agent_history_details: Vec<Value>,
     pub file_rows: Vec<String>,
     pub agent_status: String,
     pub project_status: String,
@@ -116,6 +182,7 @@ impl Default for RemoteControlSnapshot {
             pending_approval_summary: None,
             tool_log_tail: Vec::new(),
             agent_history_tail: Vec::new(),
+            agent_history_details: Vec::new(),
             file_rows: Vec::new(),
             agent_status: "ожидает".to_string(),
             project_status: "ожидает".to_string(),
@@ -183,7 +250,9 @@ pub fn start_remote_control_server(
     let stop = Arc::new(AtomicBool::new(false));
     let server_stop = Arc::clone(&stop);
     let token = config.token.trim().to_string();
+    let policy = config.policy.clone();
     let actions = config.actions.clone();
+    let rate_limit = Arc::new(Mutex::new(RemoteRateLimitState::default()));
 
     let handle = thread::spawn(move || {
         while !server_stop.load(Ordering::Relaxed) {
@@ -191,11 +260,15 @@ pub fn start_remote_control_server(
                 Ok((stream, _addr)) => {
                     let state = Arc::clone(&shared_state);
                     let token = token.clone();
+                    let policy = policy.clone();
                     let actions = actions.clone();
+                    let rate_limit = Arc::clone(&rate_limit);
                     let stop = Arc::clone(&server_stop);
                     let _ = thread::Builder::new()
                         .name("leetcode-remote-client".to_string())
-                        .spawn(move || handle_client(stream, state, token, actions, stop));
+                        .spawn(move || {
+                            handle_client(stream, state, token, policy, actions, rate_limit, stop)
+                        });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(60));
@@ -218,7 +291,9 @@ fn handle_client(
     mut stream: TcpStream,
     shared_state: RemoteControlSharedState,
     token: String,
+    policy: RemoteAccessPolicy,
     actions: Option<Sender<RemoteControlAction>>,
+    rate_limit: Arc<Mutex<RemoteRateLimitState>>,
     stop: Arc<AtomicBool>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -282,23 +357,50 @@ fn handle_client(
             }),
         ),
         ("GET", "/api/state") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::View,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             let snapshot = snapshot_or_default(&shared_state);
             write_json_response(&mut stream, 200, &snapshot);
         }
         ("GET", "/api/events") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::View,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             write_sse_stream(&mut stream, shared_state, stop);
         }
         ("GET", "/api/tool-log") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::View,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             let snapshot = snapshot_or_default(&shared_state);
@@ -309,8 +411,17 @@ fn handle_client(
             );
         }
         ("GET", "/api/history") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::View,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             let snapshot = snapshot_or_default(&shared_state);
@@ -320,9 +431,55 @@ fn handle_client(
                 &json!({"ok": true, "runs": snapshot.agent_history_tail}),
             );
         }
+        ("GET", "/api/history/run") => {
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::View,
+                actions.as_ref(),
+                path,
+            ) {
+                return;
+            }
+            let Some(id) = query_param(query, "id") else {
+                write_json_response(
+                    &mut stream,
+                    400,
+                    &json!({"ok": false, "error": "id is required"}),
+                );
+                return;
+            };
+            let snapshot = snapshot_or_default(&shared_state);
+            let run = snapshot
+                .agent_history_details
+                .iter()
+                .find(|run| run.get("id").and_then(Value::as_str) == Some(id.as_str()));
+            if let Some(run) = run {
+                write_json_response(&mut stream, 200, &json!({"ok": true, "run": run}));
+            } else {
+                write_json_response(
+                    &mut stream,
+                    404,
+                    &json!({"ok": false, "error": "run not found"}),
+                );
+            }
+        }
         ("GET", "/api/files") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::Files,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             let snapshot = snapshot_or_default(&shared_state);
@@ -333,30 +490,74 @@ fn handle_client(
             );
         }
         ("GET", "/api/files/content") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::Files,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
+            }
+            if let Some(file_path) = query_param(query, "path") {
+                send_remote_audit(
+                    actions.as_ref(),
+                    policy.audit,
+                    "file_read",
+                    &format!("GET /api/files/content path={file_path}"),
+                );
             }
             let snapshot = snapshot_or_default(&shared_state);
             write_file_content_response(&mut stream, &snapshot, query);
         }
         ("POST", "/api/tasks") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::Chat,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             handle_submit_task(&mut stream, &body, actions.as_ref());
         }
         ("POST", "/api/run-gate") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::Approve,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             handle_binary_action(&mut stream, &body, actions.as_ref(), true);
         }
         ("POST", "/api/approval") => {
-            if !is_authorized(&headers, query, &token) {
-                write_unauthorized(&mut stream);
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::Approve,
+                actions.as_ref(),
+                path,
+            ) {
                 return;
             }
             handle_binary_action(&mut stream, &body, actions.as_ref(), false);
@@ -605,12 +806,146 @@ fn handle_binary_action(
 
 fn compact_remote_message(message: &str) -> String {
     const LIMIT: usize = 20_000;
-    if message.chars().count() <= LIMIT {
+    compact_remote_text(message, LIMIT)
+}
+
+fn compact_remote_text(message: &str, limit: usize) -> String {
+    if message.chars().count() <= limit {
         return message.to_string();
     }
-    let mut output = message.chars().take(LIMIT).collect::<String>();
+    let mut output = message.chars().take(limit).collect::<String>();
     output.push_str("\n\n[remote message truncated]");
     output
+}
+
+#[derive(Debug)]
+struct RemoteRateLimitState {
+    window_started_at: u64,
+    count: u32,
+}
+
+impl Default for RemoteRateLimitState {
+    fn default() -> Self {
+        Self {
+            window_started_at: unix_timestamp(),
+            count: 0,
+        }
+    }
+}
+
+fn authorize_or_write(
+    stream: &mut TcpStream,
+    headers: &HashMap<String, String>,
+    query: &str,
+    token: &str,
+    policy: &RemoteAccessPolicy,
+    rate_limit: &Arc<Mutex<RemoteRateLimitState>>,
+    role: RemoteAccessRole,
+    actions: Option<&Sender<RemoteControlAction>>,
+    path: &str,
+) -> bool {
+    if !is_authorized(headers, query, token) {
+        write_unauthorized(stream);
+        return false;
+    }
+
+    if !origin_is_allowed(headers, policy) {
+        send_remote_audit(actions, policy.audit, "origin_denied", path);
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "origin is not allowed"}),
+        );
+        return false;
+    }
+
+    if !policy.allows(role) {
+        send_remote_audit(
+            actions,
+            policy.audit,
+            "role_denied",
+            &format!("{path} requires {}", role.label()),
+        );
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": format!("forbidden: role required: {}", role.label())}),
+        );
+        return false;
+    }
+
+    if !check_remote_rate_limit(rate_limit, policy.rate_limit_per_minute) {
+        send_remote_audit(actions, policy.audit, "rate_limited", path);
+        write_json_response(
+            stream,
+            429,
+            &json!({"ok": false, "error": "remote API rate limit exceeded"}),
+        );
+        return false;
+    }
+
+    true
+}
+
+fn origin_is_allowed(headers: &HashMap<String, String>, policy: &RemoteAccessPolicy) -> bool {
+    let Some(origin) = headers.get("origin").map(|value| value.trim()) else {
+        return true;
+    };
+    if origin.is_empty() {
+        return true;
+    }
+
+    let origin = origin.trim_end_matches('/');
+    if policy.allowed_origins.iter().any(|allowed| {
+        let allowed = allowed.trim().trim_end_matches('/');
+        allowed == "*" || allowed.eq_ignore_ascii_case(origin)
+    }) {
+        return true;
+    }
+
+    let Some(host) = headers.get("host").map(|value| value.trim()) else {
+        return false;
+    };
+    let same_http = format!("http://{host}");
+    let same_https = format!("https://{host}");
+    origin.eq_ignore_ascii_case(&same_http) || origin.eq_ignore_ascii_case(&same_https)
+}
+
+fn check_remote_rate_limit(rate_limit: &Arc<Mutex<RemoteRateLimitState>>, per_minute: u32) -> bool {
+    if per_minute == 0 {
+        return true;
+    }
+    let Ok(mut state) = rate_limit.lock() else {
+        return true;
+    };
+    let now = unix_timestamp();
+    if now.saturating_sub(state.window_started_at) >= 60 {
+        state.window_started_at = now;
+        state.count = 0;
+    }
+    if state.count >= per_minute {
+        return false;
+    }
+    state.count = state.count.saturating_add(1);
+    true
+}
+
+fn send_remote_audit(
+    actions: Option<&Sender<RemoteControlAction>>,
+    enabled: bool,
+    event: &str,
+    detail: &str,
+) {
+    if !enabled {
+        return;
+    }
+    if let Some(actions) = actions {
+        let _ = actions.send(RemoteControlAction::Audit(RemoteAuditEvent {
+            event: event.to_string(),
+            detail: compact_remote_text(detail, 1_000),
+            created_at: unix_timestamp(),
+        }));
+    }
 }
 
 fn split_target(target: &str) -> (&str, &str) {
@@ -685,7 +1020,9 @@ fn write_json_response<T: Serialize>(stream: &mut TcpStream, status: u16, value:
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
+        429 => "Too Many Requests",
         503 => "Service Unavailable",
         _ => "OK",
     };
@@ -729,7 +1066,7 @@ fn write_sse_stream(
     shared_state: RemoteControlSharedState,
     stop: Arc<AtomicBool>,
 ) {
-    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+    let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n";
     if stream.write_all(header.as_bytes()).is_err() {
         return;
     }
@@ -903,11 +1240,23 @@ async function loadHistory() {
     const items = (data.runs || []).map((run) => {
       const button = document.createElement('button');
       button.textContent = `${run.status} · ${run.provider}/${run.model} · ${new Date((run.started_at || 0) * 1000).toLocaleString()}`;
-      button.onclick = () => document.getElementById('observerView').textContent = JSON.stringify(run, null, 2);
+      button.onclick = () => openRun(run.id, run);
       return button;
     });
     setObserver(items, JSON.stringify(data.runs || [], null, 2));
   } catch (error) { setObserver([], 'Ошибка: ' + error.message); }
+}
+async function openRun(id, fallback) {
+  if (!id) {
+    document.getElementById('observerView').textContent = JSON.stringify(fallback || {}, null, 2);
+    return;
+  }
+  try {
+    const data = await getJson('/api/history/run?id=' + encodeURIComponent(id));
+    document.getElementById('observerView').textContent = JSON.stringify(data.run || fallback || {}, null, 2);
+  } catch (error) {
+    document.getElementById('observerView').textContent = JSON.stringify(fallback || {}, null, 2) + '\n\nDetail error: ' + error.message;
+  }
 }
 async function loadFiles() {
   try {
@@ -1021,6 +1370,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 0,
                 token: "lrt-test".to_string(),
+                policy: RemoteAccessPolicy::default(),
                 actions: None,
             },
             shared_state,
@@ -1054,6 +1404,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 0,
                 token: "lrt-test".to_string(),
+                policy: RemoteAccessPolicy::default(),
                 actions: Some(tx),
             },
             shared_state,
@@ -1103,6 +1454,7 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 0,
                 token: "lrt-test".to_string(),
+                policy: RemoteAccessPolicy::default(),
                 actions: None,
             },
             shared_state,
@@ -1123,6 +1475,123 @@ mod tests {
         );
         assert!(denied.starts_with("HTTP/1.1 400 Bad Request"));
         assert!(denied.contains("path traversal"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_server_exposes_run_detail_by_id() {
+        let shared_state = new_remote_shared_state();
+        update_remote_shared_state(
+            &shared_state,
+            RemoteControlSnapshot {
+                agent_history_tail: vec![RemoteRunSummary {
+                    id: "run-1".to_string(),
+                    status: "done".to_string(),
+                    started_at: 1,
+                    duration_ms: 1200,
+                    provider: "OpenAI".to_string(),
+                    model: "gpt-5.4".to_string(),
+                    user_request: "test".to_string(),
+                    final_response: Some("ok".to_string()),
+                    changed_files: Vec::new(),
+                    errors: Vec::new(),
+                    tool_count: 1,
+                }],
+                agent_history_details: vec![json!({
+                    "id": "run-1",
+                    "timeline_steps": [{"kind": "tool", "summary": "checked"}]
+                })],
+                ..RemoteControlSnapshot::default()
+            },
+        );
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy: RemoteAccessPolicy::default(),
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let response = request(
+            &addr,
+            "GET /api/history/run?id=run-1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("timeline_steps"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_security_denies_missing_role_and_bad_origin() {
+        let shared_state = new_remote_shared_state();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.files = false;
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy,
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let denied_role = request(
+            &addr,
+            "GET /api/files HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(denied_role.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(denied_role.contains("files"));
+
+        let denied_origin = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nOrigin: https://example.invalid\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(denied_origin.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(denied_origin.contains("origin"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_security_rate_limits_api_requests() {
+        let shared_state = new_remote_shared_state();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.rate_limit_per_minute = 1;
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy,
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let first = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(first.starts_with("HTTP/1.1 200 OK"));
+
+        let second = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(second.starts_with("HTTP/1.1 429 Too Many Requests"));
 
         server.stop();
     }
