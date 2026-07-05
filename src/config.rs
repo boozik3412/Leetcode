@@ -46,6 +46,9 @@ pub struct AppConfig {
     pub layout_workspace_mode: String,
     pub layout_right_panel_view: String,
     pub layout_file_panel_collapsed: bool,
+    pub command_palette_recent: Vec<String>,
+    pub command_palette_favorites: Vec<String>,
+    pub command_palette_macros: Vec<CommandPaletteMacro>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -67,6 +70,18 @@ pub struct ProjectUiState {
     pub expanded: bool,
     #[serde(default)]
     pub expanded_dirs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandPaletteMacro {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub command_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -130,6 +145,12 @@ struct PersistedConfig {
     layout_right_panel_view: String,
     #[serde(default)]
     layout_file_panel_collapsed: bool,
+    #[serde(default)]
+    command_palette_recent: Vec<String>,
+    #[serde(default)]
+    command_palette_favorites: Vec<String>,
+    #[serde(default)]
+    command_palette_macros: Vec<CommandPaletteMacro>,
 }
 
 impl Default for PersistedConfig {
@@ -165,6 +186,9 @@ impl Default for PersistedConfig {
             layout_workspace_mode: default_layout_workspace_mode(),
             layout_right_panel_view: default_layout_right_panel_view(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         }
     }
 }
@@ -262,6 +286,17 @@ impl AppConfig {
                 &persisted.layout_right_panel_view,
             ),
             layout_file_panel_collapsed: persisted.layout_file_panel_collapsed,
+            command_palette_recent: normalize_command_palette_ids(
+                persisted.command_palette_recent,
+                24,
+            ),
+            command_palette_favorites: normalize_command_palette_ids(
+                persisted.command_palette_favorites,
+                80,
+            ),
+            command_palette_macros: normalize_command_palette_macros(
+                persisted.command_palette_macros,
+            ),
         }
     }
 
@@ -319,6 +354,17 @@ impl AppConfig {
                 &self.layout_right_panel_view,
             ),
             layout_file_panel_collapsed: self.layout_file_panel_collapsed,
+            command_palette_recent: normalize_command_palette_ids(
+                self.command_palette_recent.clone(),
+                24,
+            ),
+            command_palette_favorites: normalize_command_palette_ids(
+                self.command_palette_favorites.clone(),
+                80,
+            ),
+            command_palette_macros: normalize_command_palette_macros(
+                self.command_palette_macros.clone(),
+            ),
         };
 
         fs::write(path, serde_json::to_string_pretty(&persisted)?)?;
@@ -712,6 +758,77 @@ fn normalize_layout_right_panel_view(value: &str) -> String {
     }
 }
 
+fn normalize_command_palette_ids(ids: Vec<String>, limit: usize) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for id in ids {
+        let id = id.trim().to_string();
+        if id.is_empty() || normalized.iter().any(|existing| existing == &id) {
+            continue;
+        }
+        normalized.push(id);
+        if normalized.len() >= limit {
+            break;
+        }
+    }
+    normalized
+}
+
+fn normalize_command_palette_macros(macros: Vec<CommandPaletteMacro>) -> Vec<CommandPaletteMacro> {
+    let mut normalized = Vec::new();
+    for (index, mut command_macro) in macros.into_iter().enumerate() {
+        command_macro.name = command_macro.name.trim().to_string();
+        command_macro.description = command_macro.description.trim().to_string();
+        command_macro.command_ids = normalize_command_palette_ids(command_macro.command_ids, 12)
+            .into_iter()
+            .filter(|id| !id.starts_with("macro:"))
+            .collect();
+        command_macro.id =
+            normalize_command_macro_id(&command_macro.id, &command_macro.name, index);
+
+        if command_macro.name.is_empty() || command_macro.command_ids.is_empty() {
+            continue;
+        }
+        if normalized
+            .iter()
+            .any(|existing: &CommandPaletteMacro| existing.id == command_macro.id)
+        {
+            continue;
+        }
+        normalized.push(command_macro);
+        if normalized.len() >= 40 {
+            break;
+        }
+    }
+    normalized
+}
+
+fn normalize_command_macro_id(id: &str, name: &str, index: usize) -> String {
+    let source = if id.trim().is_empty() { name } else { id };
+    let slug = source
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else if ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let compact = slug
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if compact.is_empty() {
+        format!("macro-{index}")
+    } else {
+        compact
+    }
+}
+
 fn normalize_project_states(projects: Vec<ProjectUiState>) -> Vec<ProjectUiState> {
     let mut normalized = Vec::new();
     for project in projects {
@@ -1008,6 +1125,9 @@ mod tests {
             layout_workspace_mode: default_layout_workspace_mode(),
             layout_right_panel_view: default_layout_right_panel_view(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -1056,6 +1176,9 @@ mod tests {
             layout_workspace_mode: default_layout_workspace_mode(),
             layout_right_panel_view: default_layout_right_panel_view(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         };
 
         let json = serde_json::to_string(&config).expect("serializes config");
@@ -1119,6 +1242,9 @@ mod tests {
             layout_workspace_mode: "code".to_string(),
             layout_right_panel_view: "project".to_string(),
             layout_file_panel_collapsed: true,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
             ..PersistedConfig::default()
         };
 
@@ -1129,6 +1255,45 @@ mod tests {
         assert!(json.contains("\"layout_file_panel_collapsed\":true"));
         assert_eq!(normalize_layout_workspace_mode("bad-value"), "chat");
         assert_eq!(normalize_layout_right_panel_view("bad-value"), "context");
+    }
+
+    #[test]
+    fn normalizes_command_palette_state() {
+        let macros = normalize_command_palette_macros(vec![
+            CommandPaletteMacro {
+                id: String::new(),
+                name: "Daily flow".to_string(),
+                description: "Run daily checks".to_string(),
+                command_ids: vec![
+                    "git:status".to_string(),
+                    "git:status".to_string(),
+                    "macro:loop".to_string(),
+                    "project:refresh".to_string(),
+                ],
+            },
+            CommandPaletteMacro {
+                id: "empty".to_string(),
+                name: "Empty".to_string(),
+                description: String::new(),
+                command_ids: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(
+            normalize_command_palette_ids(
+                vec![
+                    "git:status".to_string(),
+                    "git:status".to_string(),
+                    " ".to_string(),
+                    "project:refresh".to_string(),
+                ],
+                8,
+            ),
+            vec!["git:status", "project:refresh"]
+        );
+        assert_eq!(macros.len(), 1);
+        assert_eq!(macros[0].id, "daily-flow");
+        assert_eq!(macros[0].command_ids, vec!["git:status", "project:refresh"]);
     }
 
     #[test]
@@ -1164,6 +1329,9 @@ mod tests {
             layout_workspace_mode: default_layout_workspace_mode(),
             layout_right_panel_view: default_layout_right_panel_view(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         };
 
         config.select_provider(GEMINI_PROVIDER_ID);
@@ -1205,6 +1373,9 @@ mod tests {
             layout_workspace_mode: default_layout_workspace_mode(),
             layout_right_panel_view: default_layout_right_panel_view(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         };
 
         config.set_policy_profile(PERMISSION_AUTO);
@@ -1249,6 +1420,9 @@ mod tests {
             layout_workspace_mode: default_layout_workspace_mode(),
             layout_right_panel_view: default_layout_right_panel_view(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         };
 
         config.set_policy_profile(PERMISSION_FULL);

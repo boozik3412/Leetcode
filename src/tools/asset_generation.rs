@@ -836,6 +836,9 @@ mod tests {
             layout_workspace_mode: "chat".to_string(),
             layout_right_panel_view: "context".to_string(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         };
 
         assert_eq!(
@@ -877,6 +880,9 @@ mod tests {
             layout_workspace_mode: "chat".to_string(),
             layout_right_panel_view: "context".to_string(),
             layout_file_panel_collapsed: false,
+            command_palette_recent: Vec::new(),
+            command_palette_favorites: Vec::new(),
+            command_palette_macros: Vec::new(),
         };
 
         assert_eq!(

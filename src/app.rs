@@ -21,7 +21,7 @@ use crate::assets::{
 };
 use crate::config::{
     append_journal, clear_journal, permission_mode_description, policy_profile_labels,
-    read_journal_tail, AppConfig, ProjectUiState,
+    read_journal_tail, AppConfig, CommandPaletteMacro, ProjectUiState,
 };
 use crate::conversation::{
     archive_conversation, compile_context_snapshot_with_budget, create_new_conversation,
@@ -115,6 +115,8 @@ pub struct LeetcodeApp {
     command_palette_open: bool,
     command_palette_query: String,
     command_palette_selected: usize,
+    command_macro_name_input: String,
+    command_palette_status: String,
     chat: Vec<ChatLine>,
     active_conversation_id: Option<String>,
     conversation_index: ConversationIndex,
@@ -393,10 +395,12 @@ enum CommandPaletteAction {
     GitCommit,
     StopAgent,
     StopProjectCommand,
+    RunMacro(String),
 }
 
 #[derive(Clone, Debug)]
 struct CommandPaletteItem {
+    id: String,
     title: String,
     category: &'static str,
     description: String,
@@ -414,7 +418,9 @@ impl CommandPaletteItem {
         action: CommandPaletteAction,
         enabled: bool,
     ) -> Self {
+        let id = action.stable_id();
         Self {
+            id,
             title: title.into(),
             category,
             description: description.into(),
@@ -430,7 +436,8 @@ impl CommandPaletteItem {
             return true;
         }
         let haystack = format!(
-            "{} {} {} {}",
+            "{} {} {} {} {}",
+            self.id,
             self.title,
             self.category,
             self.description,
@@ -441,6 +448,67 @@ impl CommandPaletteItem {
             .split_whitespace()
             .all(|needle| haystack.contains(needle))
     }
+}
+
+impl CommandPaletteAction {
+    fn stable_id(&self) -> String {
+        match self {
+            CommandPaletteAction::ApplyLayout(preset) => format!("layout:{}", preset.id()),
+            CommandPaletteAction::SetWorkspaceMode(mode) => format!("mode:{}", mode.id()),
+            CommandPaletteAction::SetRightPanel(view) => format!("panel:{}", view.id()),
+            CommandPaletteAction::ToggleFilePanel => "view:toggle_file_panel".to_string(),
+            CommandPaletteAction::OpenProject => "project:open".to_string(),
+            CommandPaletteAction::RefreshWorkspace => "project:refresh".to_string(),
+            CommandPaletteAction::NewChat => "agent:new_chat".to_string(),
+            CommandPaletteAction::ResetConversation => "agent:reset_conversation".to_string(),
+            CommandPaletteAction::SetPrompt(prompt) => {
+                format!("prompt:{}", command_palette_hash_part(prompt))
+            }
+            CommandPaletteAction::StartProjectCommand(command) => {
+                format!("project_command:{}", command_palette_id_part(&command.id))
+            }
+            CommandPaletteAction::GitStatus => "git:status".to_string(),
+            CommandPaletteAction::GitCommit => "git:commit".to_string(),
+            CommandPaletteAction::StopAgent => "agent:stop".to_string(),
+            CommandPaletteAction::StopProjectCommand => "project:stop_command".to_string(),
+            CommandPaletteAction::RunMacro(id) => format!("macro:{}", command_palette_id_part(id)),
+        }
+    }
+}
+
+fn command_palette_id_part(value: &str) -> String {
+    let slug = value
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else if ch == '-' || ch == '_' || ch == ':' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let compact = slug
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if compact.is_empty() {
+        format!("command-{}", command_palette_hash_part(value))
+    } else {
+        compact.chars().take(80).collect()
+    }
+}
+
+fn command_palette_hash_part(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -901,6 +969,16 @@ impl LayoutPreset {
         }
     }
 
+    fn id(self) -> &'static str {
+        match self {
+            LayoutPreset::ChatFocus => "chat_focus",
+            LayoutPreset::CodeFocus => "code_focus",
+            LayoutPreset::RoadmapFocus => "roadmap_focus",
+            LayoutPreset::ReleaseFocus => "release_focus",
+            LayoutPreset::AssetFocus => "asset_focus",
+        }
+    }
+
     fn description(self) -> &'static str {
         match self {
             LayoutPreset::ChatFocus => "Сворачивает проводник и открывает контекст агента.",
@@ -1059,6 +1137,8 @@ impl LeetcodeApp {
             command_palette_open: false,
             command_palette_query: String::new(),
             command_palette_selected: 0,
+            command_macro_name_input: String::new(),
+            command_palette_status: String::new(),
             chat,
             active_conversation_id,
             conversation_index,
@@ -1514,7 +1594,7 @@ impl LeetcodeApp {
             let items = self.filtered_command_palette_items();
             if let Some(item) = items.get(self.command_palette_selected).cloned() {
                 if item.enabled {
-                    self.execute_command_palette_action(item.action);
+                    self.execute_command_palette_item(item);
                     self.command_palette_open = false;
                 }
             }
@@ -1740,14 +1820,220 @@ impl LeetcodeApp {
             }
         }
 
+        for command_macro in &self.config.command_palette_macros {
+            let command_count = command_macro.command_ids.len();
+            items.push(CommandPaletteItem::new(
+                command_macro.name.clone(),
+                "Макросы",
+                if command_macro.description.trim().is_empty() {
+                    format!("{command_count} команд из избранного")
+                } else {
+                    command_macro.description.clone()
+                },
+                None,
+                CommandPaletteAction::RunMacro(command_macro.id.clone()),
+                command_count > 0,
+            ));
+        }
+
         items
     }
 
     fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
-        self.command_palette_items()
+        let mut items = self
+            .command_palette_items()
             .into_iter()
             .filter(|item| item.matches_query(&self.command_palette_query))
-            .collect()
+            .collect::<Vec<_>>();
+        items.sort_by_key(|item| self.command_palette_item_rank(item));
+        items
+    }
+
+    fn command_palette_item_rank(&self, item: &CommandPaletteItem) -> (u8, usize, String, String) {
+        let recent_rank = self
+            .config
+            .command_palette_recent
+            .iter()
+            .position(|id| id == &item.id)
+            .unwrap_or(usize::MAX);
+        let bucket = if self.command_palette_is_favorite(&item.id) {
+            0
+        } else if item.id.starts_with("macro:") {
+            1
+        } else if recent_rank != usize::MAX {
+            2
+        } else {
+            3
+        };
+        (
+            bucket,
+            recent_rank,
+            item.category.to_lowercase(),
+            item.title.to_lowercase(),
+        )
+    }
+
+    fn command_palette_is_favorite(&self, command_id: &str) -> bool {
+        self.config
+            .command_palette_favorites
+            .iter()
+            .any(|id| id == command_id)
+    }
+
+    fn persist_command_palette_state(&mut self) {
+        if let Err(err) = self.config.save() {
+            self.command_palette_status = format!("Не удалось сохранить палитру команд: {err}");
+        }
+    }
+
+    fn record_command_palette_use(&mut self, command_id: &str) {
+        let command_id = command_id.trim();
+        if command_id.is_empty() {
+            return;
+        }
+        self.config
+            .command_palette_recent
+            .retain(|existing| existing != command_id);
+        self.config
+            .command_palette_recent
+            .insert(0, command_id.to_string());
+        self.config.command_palette_recent.truncate(24);
+        self.persist_command_palette_state();
+    }
+
+    fn toggle_command_palette_favorite(&mut self, command_id: &str) {
+        let command_id = command_id.trim();
+        if command_id.is_empty() {
+            return;
+        }
+        if let Some(index) = self
+            .config
+            .command_palette_favorites
+            .iter()
+            .position(|id| id == command_id)
+        {
+            self.config.command_palette_favorites.remove(index);
+            self.command_palette_status = "Команда убрана из избранного".to_string();
+        } else {
+            self.config
+                .command_palette_favorites
+                .push(command_id.to_string());
+            self.config.command_palette_favorites.truncate(80);
+            self.command_palette_status = "Команда добавлена в избранное".to_string();
+        }
+        self.persist_command_palette_state();
+    }
+
+    fn find_command_palette_item_by_id(&self, command_id: &str) -> Option<CommandPaletteItem> {
+        self.command_palette_items()
+            .into_iter()
+            .find(|item| item.id == command_id)
+    }
+
+    fn create_command_macro_from_favorites(&mut self) {
+        let name = self.command_macro_name_input.trim().to_string();
+        if name.is_empty() {
+            self.command_palette_status = "Введите название макроса".to_string();
+            return;
+        }
+
+        let command_ids = self
+            .config
+            .command_palette_favorites
+            .iter()
+            .filter(|id| !id.starts_with("macro:"))
+            .filter(|id| self.find_command_palette_item_by_id(id).is_some())
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>();
+        if command_ids.is_empty() {
+            self.command_palette_status =
+                "Сначала добавьте в избранное хотя бы одну обычную команду".to_string();
+            return;
+        }
+
+        let mut id = command_palette_id_part(&name);
+        if id.starts_with("command-") {
+            id = format!("macro-{}", command_palette_hash_part(&name));
+        }
+        let base_id = id.clone();
+        let mut suffix = 2;
+        while self
+            .config
+            .command_palette_macros
+            .iter()
+            .any(|command_macro| command_macro.id == id)
+        {
+            id = format!("{base_id}-{suffix}");
+            suffix += 1;
+        }
+
+        self.config
+            .command_palette_macros
+            .push(CommandPaletteMacro {
+                id,
+                name: name.clone(),
+                description: format!("{} команд из избранного", command_ids.len()),
+                command_ids,
+            });
+        self.command_macro_name_input.clear();
+        self.command_palette_status = format!("Макрос создан: {name}");
+        self.persist_command_palette_state();
+    }
+
+    fn delete_command_macro(&mut self, macro_id: &str) {
+        let before = self.config.command_palette_macros.len();
+        self.config
+            .command_palette_macros
+            .retain(|command_macro| command_macro.id != macro_id);
+        self.config
+            .command_palette_favorites
+            .retain(|id| id != &format!("macro:{macro_id}"));
+        self.config
+            .command_palette_recent
+            .retain(|id| id != &format!("macro:{macro_id}"));
+        if self.config.command_palette_macros.len() != before {
+            self.command_palette_status = "Макрос удалён".to_string();
+            self.persist_command_palette_state();
+        }
+    }
+
+    fn execute_command_palette_item(&mut self, item: CommandPaletteItem) {
+        self.record_command_palette_use(&item.id);
+        self.execute_command_palette_action(item.action);
+    }
+
+    fn execute_command_palette_macro(&mut self, macro_id: &str) {
+        let Some(command_macro) = self
+            .config
+            .command_palette_macros
+            .iter()
+            .find(|command_macro| command_macro.id == macro_id)
+            .cloned()
+        else {
+            self.command_palette_status = "Макрос не найден".to_string();
+            return;
+        };
+
+        let mut executed = 0;
+        let mut skipped = 0;
+        for command_id in &command_macro.command_ids {
+            match self.find_command_palette_item_by_id(command_id) {
+                Some(item) if item.enabled => {
+                    self.execute_command_palette_action(item.action);
+                    executed += 1;
+                }
+                _ => skipped += 1,
+            }
+        }
+        self.command_palette_status = if skipped == 0 {
+            format!("Макрос выполнен: {} ({executed})", command_macro.name)
+        } else {
+            format!(
+                "Макрос выполнен: {} ({executed}, пропущено {skipped})",
+                command_macro.name
+            )
+        };
     }
 
     fn execute_command_palette_action(&mut self, action: CommandPaletteAction) {
@@ -1790,6 +2076,9 @@ impl LeetcodeApp {
             }
             CommandPaletteAction::StopAgent => self.stop_run(),
             CommandPaletteAction::StopProjectCommand => self.stop_project_command(),
+            CommandPaletteAction::RunMacro(macro_id) => {
+                self.execute_command_palette_macro(&macro_id);
+            }
         }
     }
 
@@ -2780,7 +3069,10 @@ impl LeetcodeApp {
         }
 
         let mut open = self.command_palette_open;
-        let mut execute_action: Option<CommandPaletteAction> = None;
+        let mut execute_item: Option<CommandPaletteItem> = None;
+        let mut toggle_favorite_id: Option<String> = None;
+        let mut delete_macro_id: Option<String> = None;
+        let mut create_macro = false;
         let items = self.filtered_command_palette_items();
         if self.command_palette_selected >= items.len() {
             self.command_palette_selected = items.len().saturating_sub(1);
@@ -2815,12 +3107,62 @@ impl LeetcodeApp {
                 ui.horizontal_wrapped(|ui| {
                     chip(ui, "Ctrl+K");
                     chip(ui, "Ctrl+Shift+P");
+                    chip(
+                        ui,
+                        format!("избранное {}", self.config.command_palette_favorites.len()),
+                    );
+                    chip(
+                        ui,
+                        format!("последние {}", self.config.command_palette_recent.len()),
+                    );
+                    chip(
+                        ui,
+                        format!("макросы {}", self.config.command_palette_macros.len()),
+                    );
                     ui.label(
                         RichText::new("Enter — выполнить, Esc — закрыть")
                             .weak()
                             .small(),
                     );
                 });
+                if let Some(selected_item) = items.get(self.command_palette_selected) {
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let is_favorite = self.command_palette_is_favorite(&selected_item.id);
+                        let favorite_label = if is_favorite {
+                            "Убрать из избранного"
+                        } else {
+                            "В избранное"
+                        };
+                        if ui.button(favorite_label).clicked() {
+                            toggle_favorite_id = Some(selected_item.id.clone());
+                        }
+                        if let CommandPaletteAction::RunMacro(macro_id) = &selected_item.action {
+                            if ui.button("Удалить макрос").clicked() {
+                                delete_macro_id = Some(macro_id.clone());
+                            }
+                        }
+                        ui.label(
+                            RichText::new(format!("id: {}", selected_item.id))
+                                .weak()
+                                .small(),
+                        );
+                    });
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        [260.0, 28.0],
+                        TextEdit::singleline(&mut self.command_macro_name_input)
+                            .hint_text("Название макроса из избранного"),
+                    );
+                    if ui.button("Создать макрос").clicked() {
+                        create_macro = true;
+                    }
+                });
+                if !self.command_palette_status.trim().is_empty() {
+                    ui.label(RichText::new(&self.command_palette_status).weak().small());
+                }
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -2890,15 +3232,24 @@ impl LeetcodeApp {
                                 self.command_palette_selected = index;
                             }
                             if row_response.clicked() && item.enabled {
-                                execute_action = Some(item.action.clone());
+                                execute_item = Some(item.clone());
                             }
                             ui.add_space(3.0);
                         }
                     });
             });
 
-        if let Some(action) = execute_action {
-            self.execute_command_palette_action(action);
+        if let Some(command_id) = toggle_favorite_id {
+            self.toggle_command_palette_favorite(&command_id);
+        }
+        if let Some(macro_id) = delete_macro_id {
+            self.delete_command_macro(&macro_id);
+        }
+        if create_macro {
+            self.create_command_macro_from_favorites();
+        }
+        if let Some(item) = execute_item {
+            self.execute_command_palette_item(item);
             open = false;
         }
         self.command_palette_open = open;

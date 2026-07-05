@@ -250,7 +250,10 @@ Leetcode развивается из минимального локальног
 - Done: Add a command palette opened by `Ctrl+K`, `Ctrl+Shift+P`, or the top-bar `Команды` button.
 - Done: Add searchable commands grouped by view, navigation, project, agent, Git, panels, prompts, and detected project commands.
 - Done: Wire palette actions to existing safe app logic: layout presets, project open/refresh, chat reset/new chat, Git status/commit, project commands, prompt templates, and stop actions.
-- Todo: Add recent commands, favorites, and user-defined command macros.
+- Done: Persist recent command history in app config and rank recent commands higher in search results.
+- Done: Persist favorite commands and expose a quick favorite toggle for the selected palette item.
+- Done: Add user-defined command macros created from favorites and executable from the same palette.
+- Todo: Add macro editing, reordering, import/export, and optional per-step confirmation for advanced workflows.
 
 ## Постоянная планка качества
 
