@@ -46,6 +46,12 @@ struct ClientConfig {
     #[serde(default = "default_remote_url")]
     remote_url: String,
     #[serde(default)]
+    agent_id: String,
+    #[serde(default = "default_device_name")]
+    device_name: String,
+    #[serde(default)]
+    device_id: String,
+    #[serde(default)]
     token: String,
     #[serde(default = "default_true")]
     remember_token: bool,
@@ -55,6 +61,9 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             remote_url: default_remote_url(),
+            agent_id: String::new(),
+            device_name: default_device_name(),
+            device_id: String::new(),
             token: String::new(),
             remember_token: true,
         }
@@ -167,15 +176,33 @@ struct ApiReply {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct PairReply {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    device_id: String,
+    #[serde(default)]
+    device_name: String,
+    #[serde(default)]
+    device_token: String,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 #[derive(Debug)]
 enum ClientEvent {
     State(Result<RemoteControlSnapshot, String>),
+    Paired(Result<PairReply, String>),
     Action(Result<String, String>),
 }
 
 struct ThinClientApp {
     config: ClientConfig,
     remote_url_input: String,
+    agent_id_input: String,
+    device_name_input: String,
+    pairing_code_input: String,
     token_input: String,
     task_input: String,
     status: String,
@@ -194,6 +221,9 @@ impl ThinClientApp {
         let config = load_config();
         let mut app = Self {
             remote_url_input: config.remote_url.clone(),
+            agent_id_input: config.agent_id.clone(),
+            device_name_input: config.device_name.clone(),
+            pairing_code_input: String::new(),
             token_input: config.token.clone(),
             config,
             task_input: String::new(),
@@ -230,6 +260,12 @@ impl ThinClientApp {
     fn sync_config_from_inputs(&mut self) {
         self.config.remote_url = normalize_remote_url(&self.remote_url_input);
         self.remote_url_input = self.config.remote_url.clone();
+        self.config.agent_id = self.agent_id_input.trim().to_string();
+        self.config.device_name = if self.device_name_input.trim().is_empty() {
+            default_device_name()
+        } else {
+            self.device_name_input.trim().to_string()
+        };
         self.config.token = if self.config.remember_token {
             self.token_input.trim().to_string()
         } else {
@@ -275,6 +311,26 @@ impl ThinClientApp {
                 ClientEvent::Action(Err(err)) => {
                     self.action_status = format!("Ошибка: {err}");
                     self.poll_now();
+                }
+                ClientEvent::Paired(Ok(reply)) => {
+                    self.config.device_id = reply.device_id.clone();
+                    self.config.device_name =
+                        empty_as(&reply.device_name, &self.config.device_name);
+                    self.device_name_input = self.config.device_name.clone();
+                    self.token_input = reply.device_token;
+                    self.pairing_code_input.clear();
+                    self.config.remember_token = true;
+                    self.sync_config_from_inputs();
+                    self.save_config();
+                    self.action_status = format!(
+                        "Устройство подключено: {} ({})",
+                        empty_as(&self.config.device_name, "Leetcode Client"),
+                        empty_as(&self.config.device_id, "device")
+                    );
+                    self.connect();
+                }
+                ClientEvent::Paired(Err(err)) => {
+                    self.action_status = format!("Ошибка подключения устройства: {err}");
                 }
             }
         }
@@ -334,6 +390,37 @@ impl ThinClientApp {
                 )
             });
             let _ = tx.send(ClientEvent::Action(result));
+        });
+    }
+
+    fn pair_device(&mut self) {
+        let code = self.pairing_code_input.trim().to_string();
+        if code.is_empty() {
+            self.action_status = "Введите pairing code из основного Leetcode.".to_string();
+            return;
+        }
+        self.sync_config_from_inputs();
+        self.save_config();
+        let remote_url = normalize_remote_url(&self.remote_url_input);
+        let agent_id = self.agent_id_input.trim().to_string();
+        let device_name = self.device_name_input.trim().to_string();
+        let (tx, rx) = mpsc::channel();
+        self.events_rx = Some(rx);
+        self.action_status = "Подключаю устройство...".to_string();
+        thread::spawn(move || {
+            let result = post_pair(
+                &remote_url,
+                json!({
+                    "agent_id": agent_id,
+                    "pairing_code": code,
+                    "device_name": if device_name.trim().is_empty() { default_device_name() } else { device_name },
+                    "role_view": true,
+                    "role_chat": true,
+                    "role_approve": true,
+                    "role_files": false
+                }),
+            );
+            let _ = tx.send(ClientEvent::Paired(result));
         });
     }
 
@@ -406,6 +493,30 @@ impl ThinClientApp {
                     );
                     ui.end_row();
 
+                    ui.label(RichText::new("Agent ID").weak());
+                    ui.add(
+                        TextEdit::singleline(&mut self.agent_id_input)
+                            .desired_width(420.0)
+                            .hint_text("LC-AB12-CD34-EF56"),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("Имя устройства").weak());
+                    ui.add(
+                        TextEdit::singleline(&mut self.device_name_input)
+                            .desired_width(420.0)
+                            .hint_text("Домашний ноутбук"),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("Pairing code").weak());
+                    ui.add(
+                        TextEdit::singleline(&mut self.pairing_code_input)
+                            .desired_width(220.0)
+                            .hint_text("ABC-123"),
+                    );
+                    ui.end_row();
+
                     ui.label(RichText::new("Token").weak());
                     ui.add(
                         TextEdit::singleline(&mut self.token_input)
@@ -417,6 +528,9 @@ impl ThinClientApp {
                 });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
+                if ui.button("Подключить по коду").clicked() {
+                    self.pair_device();
+                }
                 if ui.button("Подключиться").clicked() {
                     self.connect();
                 }
@@ -758,6 +872,31 @@ fn post_json(
     }
 }
 
+fn post_pair(remote_url: &str, body: serde_json::Value) -> Result<PairReply, String> {
+    let client = http_client()?;
+    let url = endpoint_url(remote_url, "/api/pair")?;
+    let response = client
+        .post(url)
+        .json(&body)
+        .send()
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let reply = response.json::<PairReply>().unwrap_or(PairReply {
+        ok: status.is_success(),
+        device_id: String::new(),
+        device_name: String::new(),
+        device_token: String::new(),
+        error: None,
+    });
+    if status.is_success() && reply.ok && !reply.device_token.trim().is_empty() {
+        Ok(reply)
+    } else {
+        Err(reply
+            .error
+            .unwrap_or_else(|| format!("сервер вернул {status}")))
+    }
+}
+
 fn http_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(12))
@@ -886,6 +1025,14 @@ fn accent_color() -> egui::Color32 {
 
 fn default_remote_url() -> String {
     "http://127.0.0.1:17890".to_string()
+}
+
+fn default_device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| format!("Leetcode Client · {}", name.trim()))
+        .unwrap_or_else(|| "Leetcode Client".to_string())
 }
 
 fn default_true() -> bool {

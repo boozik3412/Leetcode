@@ -52,6 +52,9 @@ pub struct AppConfig {
     pub remote_allowed_origins: String,
     pub remote_rate_limit_per_minute: u32,
     pub remote_audit_enabled: bool,
+    pub remote_pairing_code: String,
+    pub remote_pairing_expires_at: u64,
+    pub remote_devices: Vec<RemoteDeviceConfig>,
     pub update_manifest_url: String,
     pub context_recent_messages: usize,
     pub context_relevant_messages: usize,
@@ -97,6 +100,30 @@ pub struct CommandPaletteMacro {
     pub confirm_each_step: bool,
     #[serde(default)]
     pub command_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteDeviceConfig {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default = "default_true")]
+    pub role_view: bool,
+    #[serde(default = "default_true")]
+    pub role_chat: bool,
+    #[serde(default)]
+    pub role_approve: bool,
+    #[serde(default)]
+    pub role_files: bool,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub last_seen_at: u64,
+    #[serde(default)]
+    pub revoked: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -172,6 +199,12 @@ struct PersistedConfig {
     remote_rate_limit_per_minute: u32,
     #[serde(default = "default_true")]
     remote_audit_enabled: bool,
+    #[serde(default)]
+    remote_pairing_code: String,
+    #[serde(default)]
+    remote_pairing_expires_at: u64,
+    #[serde(default)]
+    remote_devices: Vec<RemoteDeviceConfig>,
     #[serde(default = "default_update_manifest_url")]
     update_manifest_url: String,
     #[serde(default = "default_context_recent_messages")]
@@ -233,6 +266,9 @@ impl Default for PersistedConfig {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            remote_pairing_code: String::new(),
+            remote_pairing_expires_at: 0,
+            remote_devices: Vec::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -342,6 +378,15 @@ impl AppConfig {
                 persisted.remote_rate_limit_per_minute,
             ),
             remote_audit_enabled: persisted.remote_audit_enabled,
+            remote_pairing_code: normalize_remote_pairing_code(
+                &persisted.remote_pairing_code,
+                persisted.remote_pairing_expires_at,
+            ),
+            remote_pairing_expires_at: normalize_remote_pairing_expires_at(
+                &persisted.remote_pairing_code,
+                persisted.remote_pairing_expires_at,
+            ),
+            remote_devices: normalize_remote_devices(persisted.remote_devices),
             update_manifest_url: normalize_update_manifest_url(&persisted.update_manifest_url),
             context_recent_messages: normalize_context_recent_messages(
                 persisted.context_recent_messages,
@@ -427,6 +472,15 @@ impl AppConfig {
                 self.remote_rate_limit_per_minute,
             ),
             remote_audit_enabled: self.remote_audit_enabled,
+            remote_pairing_code: normalize_remote_pairing_code(
+                &self.remote_pairing_code,
+                self.remote_pairing_expires_at,
+            ),
+            remote_pairing_expires_at: normalize_remote_pairing_expires_at(
+                &self.remote_pairing_code,
+                self.remote_pairing_expires_at,
+            ),
+            remote_devices: normalize_remote_devices(self.remote_devices.clone()),
             update_manifest_url: normalize_update_manifest_url(&self.update_manifest_url),
             context_recent_messages: normalize_context_recent_messages(
                 self.context_recent_messages,
@@ -781,6 +835,14 @@ pub fn generate_agent_id() -> String {
     format!("LC-{}-{}-{}", &raw[0..4], &raw[4..8], &raw[8..12])
 }
 
+pub fn generate_remote_pairing_code() -> String {
+    let raw = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .to_ascii_uppercase();
+    format!("{}-{}", &raw[0..3], &raw[3..6])
+}
+
 fn default_remote_rate_limit_per_minute() -> u32 {
     120
 }
@@ -886,6 +948,69 @@ fn normalize_remote_rate_limit_per_minute(value: u32) -> u32 {
     } else {
         value.clamp(10, 5_000)
     }
+}
+
+fn normalize_remote_pairing_code(value: &str, expires_at: u64) -> String {
+    let code = value
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .map(|ch| ch.to_ascii_uppercase())
+        .collect::<String>();
+    if code.is_empty() || expires_at <= current_unix_timestamp() {
+        String::new()
+    } else {
+        code
+    }
+}
+
+fn normalize_remote_pairing_expires_at(value: &str, expires_at: u64) -> u64 {
+    if normalize_remote_pairing_code(value, expires_at).is_empty() {
+        0
+    } else {
+        expires_at
+    }
+}
+
+fn normalize_remote_devices(devices: Vec<RemoteDeviceConfig>) -> Vec<RemoteDeviceConfig> {
+    let mut normalized = Vec::new();
+    for mut device in devices {
+        device.id = normalize_remote_device_id(&device.id);
+        device.name = device.name.trim().chars().take(80).collect::<String>();
+        device.token = device.token.trim().to_string();
+        if device.id.is_empty() || device.token.is_empty() {
+            continue;
+        }
+        if device.name.is_empty() {
+            device.name = "Устройство".to_string();
+        }
+        if normalized.iter().any(|existing: &RemoteDeviceConfig| {
+            existing.id == device.id || existing.token == device.token
+        }) {
+            continue;
+        }
+        normalized.push(device);
+        if normalized.len() >= 64 {
+            break;
+        }
+    }
+    normalized
+}
+
+fn normalize_remote_device_id(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .take(80)
+        .collect()
+}
+
+fn current_unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn normalize_update_manifest_url(value: &str) -> String {
@@ -1299,6 +1424,9 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            remote_pairing_code: String::new(),
+            remote_pairing_expires_at: 0,
+            remote_devices: Vec::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1363,6 +1491,9 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            remote_pairing_code: String::new(),
+            remote_pairing_expires_at: 0,
+            remote_devices: Vec::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1464,6 +1595,24 @@ mod tests {
         assert_eq!(normalize_remote_rate_limit_per_minute(0), 0);
         assert_eq!(normalize_remote_rate_limit_per_minute(1), 10);
         assert_eq!(normalize_remote_rate_limit_per_minute(6_000), 5_000);
+        assert!(generate_remote_pairing_code().contains('-'));
+        assert!(normalize_remote_pairing_code("abc-123", 1).is_empty());
+        assert_eq!(
+            normalize_remote_devices(vec![RemoteDeviceConfig {
+                id: " device-1 ".to_string(),
+                name: " Laptop ".to_string(),
+                token: " ldt-test ".to_string(),
+                role_view: true,
+                role_chat: true,
+                role_approve: false,
+                role_files: false,
+                created_at: 1,
+                last_seen_at: 1,
+                revoked: false,
+            }])
+            .len(),
+            1
+        );
     }
 
     #[test]
@@ -1572,6 +1721,9 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            remote_pairing_code: String::new(),
+            remote_pairing_expires_at: 0,
+            remote_devices: Vec::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1629,6 +1781,9 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            remote_pairing_code: String::new(),
+            remote_pairing_expires_at: 0,
+            remote_devices: Vec::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1689,6 +1844,9 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            remote_pairing_code: String::new(),
+            remote_pairing_expires_at: 0,
+            remote_devices: Vec::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),

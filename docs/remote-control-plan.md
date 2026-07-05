@@ -43,10 +43,10 @@
 - Leetcode Relay: облачный сервис для исходящих WSS-соединений от host app.
 - Agent ID для каждого основного агента.
 - Pairing flow:
-  - одноразовый код или QR;
-  - подтверждение на host app;
-  - device token для доверенного клиента;
-  - revoke devices.
+  - Done local-first: одноразовый код на host app;
+  - Done local-first: device token для доверенного клиента;
+  - Done local-first: device registry, роли, last seen и revoke;
+  - later product: QR, pending approval dialog и relay-подтверждение устройства.
 - Done local-first: тонкий desktop-клиент как отдельный Rust/egui binary `leetcode-client`.
 - Done local-first: Windows installer/portable package для тонкого клиента.
 - later product: тонкий desktop-клиент с Agent ID/pairing UX поверх relay.
@@ -83,17 +83,18 @@
 
 ## Текущее подключение тонкого клиента
 
-Пока relay и pairing ещё не реализованы, подключение устроено максимально прямо:
+Пока relay ещё не реализован, подключение устроено через прямой Remote URL и local-first pairing:
 
 1. На основном компьютере открыть Leetcode.
 2. Включить Remote API в настройках удалённого доступа.
-3. Скопировать Remote URL и token.
+3. Нажать `Новый код подключения` в блоке `Подключение устройств`.
 4. Установить `Leetcode Client` на другом Windows-компьютере.
-5. Ввести Remote URL и token в клиенте.
+5. Ввести Remote URL, Agent ID и pairing code в клиенте.
+6. Клиент получит отдельный device token и сохранит его локально.
 
 После подключения клиент показывает состояние агента, проект, модель, очередь удалённых действий, последние инструменты и запуски. Через него можно отправить задачу, выполнить safe remote command и подтвердить или отклонить ожидающий план/действие инструмента.
 
-Следующий продуктовый слой должен заменить ручной URL/token на Agent ID, одноразовый pairing code/QR и device token.
+Следующий продуктовый слой должен заменить ручной Remote URL на Agent ID через relay, добавить QR и pending approval dialog на host app.
 
 ## Рекомендованный порядок
 

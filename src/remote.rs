@@ -27,6 +27,8 @@ pub enum RemoteControlAction {
     RunCommand(RemoteCommandRequest),
     AnswerRunGate { approved: bool },
     AnswerApproval { approved: bool },
+    PairDevice(RemotePairedDevice),
+    DeviceSeen { device_id: String, seen_at: u64 },
     Audit(RemoteAuditEvent),
 }
 
@@ -36,6 +38,10 @@ pub struct RemoteAccessPolicy {
     pub chat: bool,
     pub approve: bool,
     pub files: bool,
+    pub agent_id: String,
+    pub pairing_code: String,
+    pub pairing_expires_at: u64,
+    pub devices: Vec<RemoteTrustedDevice>,
     pub allowed_origins: Vec<String>,
     pub rate_limit_per_minute: u32,
     pub audit: bool,
@@ -48,6 +54,10 @@ impl Default for RemoteAccessPolicy {
             chat: true,
             approve: true,
             files: true,
+            agent_id: String::new(),
+            pairing_code: String::new(),
+            pairing_expires_at: 0,
+            devices: Vec::new(),
             allowed_origins: Vec::new(),
             rate_limit_per_minute: 120,
             audit: true,
@@ -55,15 +65,43 @@ impl Default for RemoteAccessPolicy {
     }
 }
 
-impl RemoteAccessPolicy {
-    fn allows(&self, role: RemoteAccessRole) -> bool {
-        match role {
-            RemoteAccessRole::View => self.view,
-            RemoteAccessRole::Chat => self.chat,
-            RemoteAccessRole::Approve => self.approve,
-            RemoteAccessRole::Files => self.files,
-        }
-    }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteTrustedDevice {
+    pub id: String,
+    pub name: String,
+    pub token: String,
+    pub role_view: bool,
+    pub role_chat: bool,
+    pub role_approve: bool,
+    pub role_files: bool,
+    pub created_at: u64,
+    pub last_seen_at: u64,
+    pub revoked: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteDeviceSummary {
+    pub id: String,
+    pub name: String,
+    pub role_view: bool,
+    pub role_chat: bool,
+    pub role_approve: bool,
+    pub role_files: bool,
+    pub created_at: u64,
+    pub last_seen_at: u64,
+    pub revoked: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemotePairedDevice {
+    pub id: String,
+    pub name: String,
+    pub token: String,
+    pub role_view: bool,
+    pub role_chat: bool,
+    pub role_approve: bool,
+    pub role_files: bool,
+    pub created_at: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -160,6 +198,8 @@ pub struct RemoteControlSnapshot {
     pub git_changed_files: usize,
     pub remote_queue_len: usize,
     pub remote_last_action: String,
+    pub remote_devices: Vec<RemoteDeviceSummary>,
+    pub remote_pairing_expires_at: u64,
     pub pending_run_gate_summary: Option<String>,
     pub pending_approval_summary: Option<String>,
     pub remote_commands: Vec<RemoteCommandSummary>,
@@ -198,6 +238,8 @@ impl Default for RemoteControlSnapshot {
             git_changed_files: 0,
             remote_queue_len: 0,
             remote_last_action: String::new(),
+            remote_devices: Vec::new(),
+            remote_pairing_expires_at: 0,
             pending_run_gate_summary: None,
             pending_approval_summary: None,
             remote_commands: Vec::new(),
@@ -215,6 +257,10 @@ impl Default for RemoteControlSnapshot {
 
 pub fn generate_remote_access_token() -> String {
     format!("lrt-{}", uuid::Uuid::new_v4().simple())
+}
+
+pub fn generate_remote_device_token() -> String {
+    format!("ldt-{}", uuid::Uuid::new_v4().simple())
 }
 
 pub fn new_remote_shared_state() -> RemoteControlSharedState {
@@ -377,6 +423,27 @@ fn handle_client(
                 "service": "remote-control"
             }),
         ),
+        ("POST", "/api/pair") => {
+            if !origin_is_allowed(&headers, &policy) {
+                send_remote_audit(actions.as_ref(), policy.audit, "origin_denied", path);
+                write_json_response(
+                    &mut stream,
+                    403,
+                    &json!({"ok": false, "error": "origin is not allowed"}),
+                );
+                return;
+            }
+            if !check_remote_rate_limit(&rate_limit, policy.rate_limit_per_minute) {
+                send_remote_audit(actions.as_ref(), policy.audit, "rate_limited", path);
+                write_json_response(
+                    &mut stream,
+                    429,
+                    &json!({"ok": false, "error": "remote API rate limit exceeded"}),
+                );
+                return;
+            }
+            handle_pair_device(&mut stream, &body, &policy, actions.as_ref());
+        }
         ("GET", "/api/state") => {
             if !authorize_or_write(
                 &mut stream,
@@ -738,6 +805,137 @@ fn query_param(query: &str, key: &str) -> Option<String> {
     })
 }
 
+fn handle_pair_device(
+    stream: &mut TcpStream,
+    body: &[u8],
+    policy: &RemoteAccessPolicy,
+    actions: Option<&Sender<RemoteControlAction>>,
+) {
+    let Some(actions) = actions else {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "remote action queue is unavailable"}),
+        );
+        return;
+    };
+    if policy.pairing_code.trim().is_empty() || policy.pairing_expires_at <= unix_timestamp() {
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "pairing code is not active"}),
+        );
+        return;
+    }
+
+    let payload = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
+            return;
+        }
+    };
+    let code = payload
+        .get("pairing_code")
+        .or_else(|| payload.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    if code != policy.pairing_code.trim().to_ascii_uppercase() {
+        send_remote_audit(
+            Some(actions),
+            policy.audit,
+            "pairing_denied",
+            "bad pairing code",
+        );
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "pairing code is invalid"}),
+        );
+        return;
+    }
+
+    let requested_agent_id = payload
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_uppercase();
+    if !requested_agent_id.is_empty()
+        && !policy.agent_id.trim().is_empty()
+        && requested_agent_id != policy.agent_id.trim().to_ascii_uppercase()
+    {
+        send_remote_audit(
+            Some(actions),
+            policy.audit,
+            "pairing_denied",
+            "agent id mismatch",
+        );
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "agent id does not match this host"}),
+        );
+        return;
+    }
+
+    let name = payload
+        .get("device_name")
+        .or_else(|| payload.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("Leetcode Client")
+        .trim();
+    let name = if name.is_empty() {
+        "Leetcode Client".to_string()
+    } else {
+        name.chars().take(80).collect::<String>()
+    };
+    let device = RemotePairedDevice {
+        id: format!("device-{}", uuid::Uuid::new_v4().simple()),
+        name,
+        token: generate_remote_device_token(),
+        role_view: payload_bool(&payload, "role_view", true) && policy.view,
+        role_chat: payload_bool(&payload, "role_chat", true) && policy.chat,
+        role_approve: payload_bool(&payload, "role_approve", false) && policy.approve,
+        role_files: payload_bool(&payload, "role_files", false) && policy.files,
+        created_at: unix_timestamp(),
+    };
+    let response = json!({
+        "ok": true,
+        "device_id": device.id,
+        "device_name": device.name,
+        "device_token": device.token,
+        "roles": {
+            "view": device.role_view,
+            "chat": device.role_chat,
+            "approve": device.role_approve,
+            "files": device.role_files
+        },
+        "status": "paired"
+    });
+    if actions
+        .send(RemoteControlAction::PairDevice(device))
+        .is_err()
+    {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "remote action queue is closed"}),
+        );
+        return;
+    }
+    write_json_response(stream, 201, &response);
+}
+
+fn payload_bool(payload: &Value, key: &str, fallback: bool) -> bool {
+    payload
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(fallback)
+}
+
 fn handle_submit_task(
     stream: &mut TcpStream,
     body: &[u8],
@@ -966,6 +1164,46 @@ impl Default for RemoteRateLimitState {
     }
 }
 
+#[derive(Clone, Debug)]
+struct AuthorizedRemoteSubject {
+    device_id: Option<String>,
+    view: bool,
+    chat: bool,
+    approve: bool,
+    files: bool,
+}
+
+impl AuthorizedRemoteSubject {
+    fn admin(policy: &RemoteAccessPolicy) -> Self {
+        Self {
+            device_id: None,
+            view: policy.view,
+            chat: policy.chat,
+            approve: policy.approve,
+            files: policy.files,
+        }
+    }
+
+    fn from_device(device: &RemoteTrustedDevice, policy: &RemoteAccessPolicy) -> Self {
+        Self {
+            device_id: Some(device.id.clone()),
+            view: policy.view && device.role_view,
+            chat: policy.chat && device.role_chat,
+            approve: policy.approve && device.role_approve,
+            files: policy.files && device.role_files,
+        }
+    }
+
+    fn allows(&self, role: RemoteAccessRole) -> bool {
+        match role {
+            RemoteAccessRole::View => self.view,
+            RemoteAccessRole::Chat => self.chat,
+            RemoteAccessRole::Approve => self.approve,
+            RemoteAccessRole::Files => self.files,
+        }
+    }
+}
+
 fn authorize_or_write(
     stream: &mut TcpStream,
     headers: &HashMap<String, String>,
@@ -977,10 +1215,10 @@ fn authorize_or_write(
     actions: Option<&Sender<RemoteControlAction>>,
     path: &str,
 ) -> bool {
-    if !is_authorized(headers, query, token) {
+    let Some(subject) = authorized_subject(headers, query, token, policy) else {
         write_unauthorized(stream);
         return false;
-    }
+    };
 
     if !origin_is_allowed(headers, policy) {
         send_remote_audit(actions, policy.audit, "origin_denied", path);
@@ -992,7 +1230,7 @@ fn authorize_or_write(
         return false;
     }
 
-    if !policy.allows(role) {
+    if !subject.allows(role) {
         send_remote_audit(
             actions,
             policy.audit,
@@ -1015,6 +1253,15 @@ fn authorize_or_write(
             &json!({"ok": false, "error": "remote API rate limit exceeded"}),
         );
         return false;
+    }
+
+    if let Some(device_id) = subject.device_id {
+        if let Some(actions) = actions {
+            let _ = actions.send(RemoteControlAction::DeviceSeen {
+                device_id,
+                seen_at: unix_timestamp(),
+            });
+        }
     }
 
     true
@@ -1089,22 +1336,45 @@ fn split_target(target: &str) -> (&str, &str) {
     }
 }
 
+fn authorized_subject(
+    headers: &HashMap<String, String>,
+    query: &str,
+    token: &str,
+    policy: &RemoteAccessPolicy,
+) -> Option<AuthorizedRemoteSubject> {
+    if is_authorized(headers, query, token) {
+        return Some(AuthorizedRemoteSubject::admin(policy));
+    }
+    let presented_token = presented_remote_token(headers, query)?;
+    policy
+        .devices
+        .iter()
+        .find(|device| !device.revoked && device.token == presented_token)
+        .map(|device| AuthorizedRemoteSubject::from_device(device, policy))
+}
+
 fn is_authorized(headers: &HashMap<String, String>, query: &str, token: &str) -> bool {
+    presented_remote_token(headers, query).as_deref() == Some(token)
+}
+
+fn presented_remote_token(headers: &HashMap<String, String>, query: &str) -> Option<String> {
     if let Some(header) = headers.get("authorization") {
-        if header.trim() == format!("Bearer {token}") {
-            return true;
+        let header = header.trim();
+        if let Some(token) = header.strip_prefix("Bearer ") {
+            return Some(token.trim().to_string());
         }
     }
     if let Some(header) = headers.get("x-leetcode-remote-token") {
-        if header.trim() == token {
-            return true;
-        }
+        return Some(header.trim().to_string());
     }
-    query.split('&').any(|part| {
+    if let Some(header) = headers.get("x-leetcode-device-token") {
+        return Some(header.trim().to_string());
+    }
+    query.split('&').find_map(|part| {
         let Some((name, value)) = part.split_once('=') else {
-            return false;
+            return None;
         };
-        name == "token" && percent_decode(value) == token
+        (name == "token").then(|| percent_decode(value))
     })
 }
 
@@ -1150,6 +1420,7 @@ fn write_json_response<T: Serialize>(stream: &mut TcpStream, status: u16, value:
     let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
     let status_text = match status {
         200 => "OK",
+        201 => "Created",
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
@@ -1160,7 +1431,7 @@ fn write_json_response<T: Serialize>(stream: &mut TcpStream, status: u16, value:
         _ => "OK",
     };
     let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, X-Leetcode-Remote-Token, Content-Type\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, X-Leetcode-Remote-Token, X-Leetcode-Device-Token, Content-Type\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -1178,7 +1449,7 @@ fn write_html_response(stream: &mut TcpStream, body: &str) {
 
 fn write_empty_response(stream: &mut TcpStream, status: u16, status_text: &str) {
     let response = format!(
-        "HTTP/1.1 {status} {status_text}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, X-Leetcode-Remote-Token, Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "HTTP/1.1 {status} {status_text}\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, X-Leetcode-Remote-Token, X-Leetcode-Device-Token, Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     let _ = stream.write_all(response.as_bytes());
 }
@@ -1490,9 +1761,12 @@ mod tests {
     #[test]
     fn generated_remote_tokens_are_non_empty_and_prefixed() {
         let token = generate_remote_access_token();
+        let device_token = generate_remote_device_token();
 
         assert!(token.starts_with("lrt-"));
         assert!(token.len() > 16);
+        assert!(device_token.starts_with("ldt-"));
+        assert!(device_token.len() > 16);
     }
 
     #[test]
@@ -1740,6 +2014,110 @@ mod tests {
             }
             _ => panic!("expected command action"),
         }
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_server_pairs_device_with_one_time_code() {
+        let shared_state = new_remote_shared_state();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.agent_id = "LC-TEST-0000-0000".to_string();
+        policy.pairing_code = "ABC-123".to_string();
+        policy.pairing_expires_at = unix_timestamp() + 600;
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy,
+                actions: Some(tx),
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+        let body = r#"{"agent_id":"LC-TEST-0000-0000","pairing_code":"abc-123","device_name":"Laptop","role_view":true,"role_chat":true,"role_approve":true}"#;
+        let http_request = format!(
+            "POST /api/pair HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let response = request(&addr, &http_request);
+        assert!(response.starts_with("HTTP/1.1 201 Created"));
+        assert!(response.contains("device_token"));
+        let action = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("receives paired device");
+        match action {
+            RemoteControlAction::PairDevice(device) => {
+                assert_eq!(device.name, "Laptop");
+                assert!(device.token.starts_with("ldt-"));
+                assert!(device.role_view);
+                assert!(device.role_chat);
+                assert!(device.role_approve);
+                assert!(!device.role_files);
+            }
+            _ => panic!("expected paired device action"),
+        }
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_device_token_respects_device_roles() {
+        let shared_state = new_remote_shared_state();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.devices.push(RemoteTrustedDevice {
+            id: "device-1".to_string(),
+            name: "Laptop".to_string(),
+            token: "ldt-test".to_string(),
+            role_view: true,
+            role_chat: false,
+            role_approve: false,
+            role_files: false,
+            created_at: 1,
+            last_seen_at: 1,
+            revoked: false,
+        });
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-admin".to_string(),
+                policy,
+                actions: Some(tx),
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let state = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ldt-test\r\n\r\n",
+        );
+        assert!(state.starts_with("HTTP/1.1 200 OK"));
+        let seen = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("receives device seen");
+        assert!(matches!(
+            seen,
+            RemoteControlAction::DeviceSeen {
+                ref device_id,
+                ..
+            } if device_id == "device-1"
+        ));
+
+        let files = request(
+            &addr,
+            "GET /api/files HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ldt-test\r\n\r\n",
+        );
+        assert!(files.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(files.contains("files"));
 
         server.stop();
     }

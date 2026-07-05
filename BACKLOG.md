@@ -309,9 +309,10 @@ Leetcode развивается из минимального локальног
 
 - Done: Добавить постоянный `Agent ID`, который создаётся при первом запуске и сохраняется в конфиге.
 - Done: Показать `Agent ID` в UI удалённого доступа с копированием и понятным статусом.
-- Todo: Добавить device registry: доверенные устройства, роли, last seen, revoke.
-- Todo: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
+- Done: Добавить device registry: доверенные устройства, роли, last seen и revoke в основном Leetcode.
+- Done: Добавить local-first pairing flow: одноразовый код на host app, подключение thin client, отдельный device token.
 - Done: Подготовить thin-client протокол поверх уже существующего Remote API для прямого URL/token подключения.
+- Done: Обновить thin client: подключение по Remote URL + Agent ID + pairing code, автоматическое сохранение device token.
 - Todo: Подготовить Relay/Agent ID слой: исходящее WSS-соединение от агента, подключение клиента по Agent ID без ручных IP/портов.
 
 ## Постоянная планка качества

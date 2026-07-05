@@ -20,8 +20,9 @@ use crate::assets::{
     OPENAI_VIDEO_PROVIDER_ID,
 };
 use crate::config::{
-    append_journal, clear_journal, generate_agent_id, permission_mode_description,
-    policy_profile_labels, read_journal_tail, AppConfig, CommandPaletteMacro, ProjectUiState,
+    append_journal, clear_journal, generate_agent_id, generate_remote_pairing_code,
+    permission_mode_description, policy_profile_labels, read_journal_tail, AppConfig,
+    CommandPaletteMacro, ProjectUiState, RemoteDeviceConfig,
 };
 use crate::conversation::{
     archive_conversation, compile_context_snapshot_with_budget, create_new_conversation,
@@ -58,8 +59,8 @@ use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
     update_remote_shared_state, RemoteAccessPolicy, RemoteAuditEvent, RemoteCommandRequest,
     RemoteCommandSummary, RemoteControlAction, RemoteControlServer, RemoteControlServerConfig,
-    RemoteControlSharedState, RemoteControlSnapshot, RemoteRunSummary, RemoteSubmittedTask,
-    RemoteToolLogEntry,
+    RemoteControlSharedState, RemoteControlSnapshot, RemoteDeviceSummary, RemotePairedDevice,
+    RemoteRunSummary, RemoteSubmittedTask, RemoteToolLogEntry, RemoteTrustedDevice,
 };
 use crate::roadmap::{
     load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
@@ -9791,6 +9792,89 @@ impl LeetcodeApp {
             });
 
             ui.separator();
+            ui.label(RichText::new("Подключение устройств").strong());
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Новый код подключения").clicked() {
+                    self.config.remote_pairing_code = generate_remote_pairing_code();
+                    self.config.remote_pairing_expires_at = unix_timestamp() + 10 * 60;
+                    if let Err(err) = self.config.save() {
+                        self.remote_status = format!("Не удалось сохранить pairing code: {err}");
+                    } else {
+                        self.remote_status =
+                            "Pairing code создан на 10 минут. Введите его в Leetcode Client."
+                                .to_string();
+                        self.restart_remote_control_server();
+                    }
+                }
+                if ui.button("Сбросить код").clicked() {
+                    self.config.remote_pairing_code.clear();
+                    self.config.remote_pairing_expires_at = 0;
+                    if let Err(err) = self.config.save() {
+                        self.remote_status = format!("Не удалось сбросить pairing code: {err}");
+                    } else {
+                        self.restart_remote_control_server();
+                    }
+                }
+            });
+            if self.config.remote_pairing_code.trim().is_empty()
+                || self.config.remote_pairing_expires_at <= unix_timestamp()
+            {
+                status_line(ui, "Pairing", "код не активен");
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Pairing code").weak());
+                    ui.label(
+                        RichText::new(&self.config.remote_pairing_code)
+                            .monospace()
+                            .strong()
+                            .color(accent_color()),
+                    );
+                    ui.label(RichText::new(format!(
+                        "истекает через {}",
+                        format_duration(Duration::from_secs(
+                            self.config
+                                .remote_pairing_expires_at
+                                .saturating_sub(unix_timestamp())
+                        ))
+                    )));
+                });
+            }
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("Доверенные устройства").strong());
+            if self.config.remote_devices.is_empty() {
+                ui.label(RichText::new("Пока нет подключённых устройств.").weak());
+            } else {
+                let devices = self.config.remote_devices.clone();
+                for device in devices {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&device.name).strong());
+                        chip(
+                            ui,
+                            if device.revoked {
+                                "отозвано"
+                            } else if device.last_seen_at > 0 {
+                                "активно"
+                            } else {
+                                "новое"
+                            },
+                        );
+                        ui.label(RichText::new(remote_device_roles_label(&device)).weak());
+                        if device.last_seen_at > 0 {
+                            ui.label(
+                                RichText::new(format!("последний раз {}", age_label(device.last_seen_at)))
+                                    .weak()
+                                    .small(),
+                            );
+                        }
+                        if !device.revoked && ui.button("Отозвать").clicked() {
+                            self.revoke_remote_device(&device.id);
+                        }
+                    });
+                }
+            }
+
+            ui.separator();
             status_line(ui, "Статус", &self.remote_status);
             status_line(
                 ui,
@@ -9964,6 +10048,12 @@ impl LeetcodeApp {
                             "Remote: нет действия, ожидающего разрешения".to_string();
                     }
                 }
+                RemoteControlAction::PairDevice(device) => {
+                    self.add_remote_paired_device(device);
+                }
+                RemoteControlAction::DeviceSeen { device_id, seen_at } => {
+                    self.mark_remote_device_seen(&device_id, seen_at);
+                }
                 RemoteControlAction::Audit(event) => {
                     self.record_remote_audit(event);
                 }
@@ -10032,6 +10122,79 @@ impl LeetcodeApp {
             title: format!("remote audit · {}", event.event),
             content: event.detail,
         });
+        self.refresh_journal();
+    }
+
+    fn add_remote_paired_device(&mut self, device: RemotePairedDevice) {
+        let config_device = RemoteDeviceConfig {
+            id: device.id.clone(),
+            name: device.name.clone(),
+            token: device.token,
+            role_view: device.role_view,
+            role_chat: device.role_chat,
+            role_approve: device.role_approve,
+            role_files: device.role_files,
+            created_at: device.created_at,
+            last_seen_at: device.created_at,
+            revoked: false,
+        };
+        self.config
+            .remote_devices
+            .retain(|existing| existing.id != config_device.id);
+        self.config.remote_devices.push(config_device);
+        self.config.remote_pairing_code.clear();
+        self.config.remote_pairing_expires_at = 0;
+        self.remote_last_action = format!("Remote: подключено устройство {}", device.name);
+        append_journal(format!(
+            "remote_device\tpaired\t{}\t{}",
+            device.created_at,
+            compact(&device.name, 160)
+        ));
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Устройство подключено, но config не сохранён: {err}");
+        }
+        self.restart_remote_control_server();
+        self.refresh_journal();
+    }
+
+    fn mark_remote_device_seen(&mut self, device_id: &str, seen_at: u64) {
+        let Some(device) = self
+            .config
+            .remote_devices
+            .iter_mut()
+            .find(|device| device.id == device_id)
+        else {
+            return;
+        };
+        if seen_at.saturating_sub(device.last_seen_at) < 60 {
+            return;
+        }
+        device.last_seen_at = seen_at;
+        let _ = self.config.save();
+    }
+
+    fn revoke_remote_device(&mut self, device_id: &str) {
+        let Some(device) = self
+            .config
+            .remote_devices
+            .iter_mut()
+            .find(|device| device.id == device_id)
+        else {
+            return;
+        };
+        device.revoked = true;
+        device.token.clear();
+        self.remote_last_action = format!("Remote: доступ устройства {} отозван", device.name);
+        append_journal(format!(
+            "remote_device\trevoked\t{}\t{}",
+            unix_timestamp(),
+            compact(&device.name, 160)
+        ));
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Не удалось сохранить отзыв устройства: {err}");
+            return;
+        }
+        self.restart_remote_control_server();
         self.refresh_journal();
     }
 
@@ -10193,6 +10356,12 @@ impl LeetcodeApp {
                 enabled: item.enabled,
             })
             .collect::<Vec<_>>();
+        let remote_devices = self
+            .config
+            .remote_devices
+            .iter()
+            .map(remote_device_summary_from_config)
+            .collect::<Vec<_>>();
 
         update_remote_shared_state(
             &self.remote_shared_state,
@@ -10218,6 +10387,8 @@ impl LeetcodeApp {
                 git_changed_files: self.git_changed_files.len(),
                 remote_queue_len: self.remote_task_queue.len(),
                 remote_last_action: self.remote_last_action.clone(),
+                remote_devices,
+                remote_pairing_expires_at: self.config.remote_pairing_expires_at,
                 pending_run_gate_summary: self
                     .pending_run_gate
                     .as_ref()
@@ -15708,9 +15879,67 @@ fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
         chat: config.remote_role_chat,
         approve: config.remote_role_approve,
         files: config.remote_role_files,
+        agent_id: config.agent_id.clone(),
+        pairing_code: config.remote_pairing_code.clone(),
+        pairing_expires_at: config.remote_pairing_expires_at,
+        devices: config
+            .remote_devices
+            .iter()
+            .map(remote_trusted_device_from_config)
+            .collect(),
         allowed_origins,
         rate_limit_per_minute: config.remote_rate_limit_per_minute,
         audit: config.remote_audit_enabled,
+    }
+}
+
+fn remote_trusted_device_from_config(device: &RemoteDeviceConfig) -> RemoteTrustedDevice {
+    RemoteTrustedDevice {
+        id: device.id.clone(),
+        name: device.name.clone(),
+        token: device.token.clone(),
+        role_view: device.role_view,
+        role_chat: device.role_chat,
+        role_approve: device.role_approve,
+        role_files: device.role_files,
+        created_at: device.created_at,
+        last_seen_at: device.last_seen_at,
+        revoked: device.revoked,
+    }
+}
+
+fn remote_device_summary_from_config(device: &RemoteDeviceConfig) -> RemoteDeviceSummary {
+    RemoteDeviceSummary {
+        id: device.id.clone(),
+        name: device.name.clone(),
+        role_view: device.role_view,
+        role_chat: device.role_chat,
+        role_approve: device.role_approve,
+        role_files: device.role_files,
+        created_at: device.created_at,
+        last_seen_at: device.last_seen_at,
+        revoked: device.revoked,
+    }
+}
+
+fn remote_device_roles_label(device: &RemoteDeviceConfig) -> String {
+    let mut roles = Vec::new();
+    if device.role_view {
+        roles.push("обзор");
+    }
+    if device.role_chat {
+        roles.push("задачи");
+    }
+    if device.role_approve {
+        roles.push("подтверждения");
+    }
+    if device.role_files {
+        roles.push("файлы");
+    }
+    if roles.is_empty() {
+        "без ролей".to_string()
+    } else {
+        roles.join(", ")
     }
 }
 

@@ -227,7 +227,7 @@ cd dist\leetcode-client-portable
 powershell -ExecutionPolicy Bypass -File .\install-leetcode-client.ps1
 ```
 
-Current thin-client flow: enable Remote API in the main Leetcode app, copy its Remote URL and token, then enter them in Leetcode Client. The client can view agent state, submit tasks, run safe remote commands, and approve or deny pending plans/tool actions. Agent ID pairing and relay access are planned next; the current client intentionally uses the direct URL/token foundation.
+Current thin-client flow: enable Remote API in the main Leetcode app, create a short-lived pairing code in `Подключение устройств`, then enter Remote URL, Agent ID, and the pairing code in Leetcode Client. The client receives and stores its own device token. The host app shows trusted devices with roles, last seen, and revoke. Relay access by Agent ID is planned next; the current client intentionally still uses the direct Remote URL foundation.
 
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 
