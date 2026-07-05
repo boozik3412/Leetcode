@@ -51,8 +51,9 @@
 - iPhone PWA как основной мобильный клиент.
 - Позже native iOS app при необходимости APNs, Keychain/passkeys и более стабильного фонового UX.
 - Remote actions:
-  - отправить задачу агенту;
-  - approve/deny действия;
+  - Done local-first: отправить задачу агенту через `POST /api/tasks`;
+  - Done local-first: approve/deny план перед запуском через `POST /api/run-gate`;
+  - Done local-first: approve/deny действие инструмента через `POST /api/approval`;
   - смотреть tool log;
   - смотреть run timeline/history;
   - читать файлы в безопасном read-only режиме;

@@ -56,8 +56,9 @@ use crate::provider_health::{
 };
 use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
-    update_remote_shared_state, RemoteControlServer, RemoteControlServerConfig,
-    RemoteControlSharedState, RemoteControlSnapshot,
+    update_remote_shared_state, RemoteControlAction, RemoteControlServer,
+    RemoteControlServerConfig, RemoteControlSharedState, RemoteControlSnapshot,
+    RemoteSubmittedTask,
 };
 use crate::roadmap::{
     load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
@@ -79,7 +80,7 @@ use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use image::{ColorType, ImageFormat};
 use regex::Regex;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -195,6 +196,10 @@ pub struct LeetcodeApp {
     remote_host_input: String,
     remote_port_input: String,
     remote_token_input: String,
+    remote_events_tx: mpsc::Sender<RemoteControlAction>,
+    remote_events_rx: Receiver<RemoteControlAction>,
+    remote_task_queue: VecDeque<RemoteSubmittedTask>,
+    remote_last_action: String,
     orchestration_status: String,
     asset_provider_input: String,
     asset_kind_input: String,
@@ -1138,12 +1143,14 @@ impl LeetcodeApp {
         let remote_host_input = config.remote_bind_host.clone();
         let remote_port_input = config.remote_port.to_string();
         let remote_token_input = config.remote_access_token.clone();
+        let (remote_events_tx, remote_events_rx) = mpsc::channel();
         let (remote_server, remote_status) = if config.remote_enabled {
             match start_remote_control_server(
                 RemoteControlServerConfig {
                     host: config.remote_bind_host.clone(),
                     port: config.remote_port,
                     token: config.remote_access_token.clone(),
+                    actions: Some(remote_events_tx.clone()),
                 },
                 Arc::clone(&remote_shared_state),
             ) {
@@ -1266,6 +1273,10 @@ impl LeetcodeApp {
             remote_host_input,
             remote_port_input,
             remote_token_input,
+            remote_events_tx,
+            remote_events_rx,
+            remote_task_queue: VecDeque::new(),
+            remote_last_action: String::new(),
             orchestration_status: String::new(),
             asset_provider_input,
             asset_kind_input: "image".to_string(),
@@ -9597,6 +9608,14 @@ impl LeetcodeApp {
 
             ui.separator();
             status_line(ui, "Статус", &self.remote_status);
+            status_line(
+                ui,
+                "Очередь",
+                &format!("{} задач", self.remote_task_queue.len()),
+            );
+            if !self.remote_last_action.is_empty() {
+                status_line(ui, "Последнее", &self.remote_last_action);
+            }
             status_line(ui, "Web/PWA", &self.remote_control_url());
             status_line(ui, "Health", &format!("{}/health", self.remote_control_url()));
             status_line(
@@ -9671,6 +9690,7 @@ impl LeetcodeApp {
                 host: self.config.remote_bind_host.clone(),
                 port: self.config.remote_port,
                 token: self.config.remote_access_token.clone(),
+                actions: Some(self.remote_events_tx.clone()),
             },
             Arc::clone(&self.remote_shared_state),
         ) {
@@ -9682,6 +9702,124 @@ impl LeetcodeApp {
                 self.remote_status = format!("Remote API не запущен: {err}");
             }
         }
+    }
+
+    fn drain_remote_control_events(&mut self) {
+        let mut actions = Vec::new();
+        while let Ok(action) = self.remote_events_rx.try_recv() {
+            actions.push(action);
+        }
+
+        for action in actions {
+            match action {
+                RemoteControlAction::SubmitTask(task) => {
+                    self.remote_last_action = format!("Задача {} получена удалённо", task.id);
+                    self.remote_task_queue.push_back(task);
+                    append_journal(format!(
+                        "remote_task\tqueued\t{}",
+                        compact(&self.remote_last_action, 240)
+                    ));
+                    self.refresh_journal();
+                }
+                RemoteControlAction::AnswerRunGate { approved } => {
+                    if self.pending_run_gate.is_some() {
+                        self.remote_last_action = if approved {
+                            "Remote: план подтверждён".to_string()
+                        } else {
+                            "Remote: план отклонён".to_string()
+                        };
+                        self.answer_run_gate_with_action(if approved {
+                            ApprovalQuickAction::Approve
+                        } else {
+                            ApprovalQuickAction::Deny
+                        });
+                    } else {
+                        self.remote_last_action =
+                            "Remote: нет плана, ожидающего подтверждения".to_string();
+                    }
+                }
+                RemoteControlAction::AnswerApproval { approved } => {
+                    if self.pending_approval.is_some() {
+                        self.remote_last_action = if approved {
+                            "Remote: действие инструмента разрешено".to_string()
+                        } else {
+                            "Remote: действие инструмента запрещено".to_string()
+                        };
+                        self.answer_approval_with_action(if approved {
+                            ApprovalQuickAction::Approve
+                        } else {
+                            ApprovalQuickAction::Deny
+                        });
+                    } else {
+                        self.remote_last_action =
+                            "Remote: нет действия, ожидающего разрешения".to_string();
+                    }
+                }
+            }
+        }
+    }
+
+    fn process_remote_task_queue(&mut self) {
+        if self.remote_task_queue.is_empty()
+            || self.is_running
+            || self.pending_run_gate.is_some()
+            || self.pending_approval.is_some()
+        {
+            return;
+        }
+
+        let Some(task) = self.remote_task_queue.pop_front() else {
+            return;
+        };
+        if self.workspace.is_none() {
+            self.remote_last_action =
+                "Remote: задача отклонена, сначала нужно выбрать проект".to_string();
+            self.chat.push(ChatLine::system(format!(
+                "Удалённая задача `{}` отклонена: сначала выберите проект.",
+                task.id
+            )));
+            self.persist_current_conversation();
+            return;
+        }
+
+        let message = task.message.trim().to_string();
+        if message.is_empty() {
+            self.remote_last_action = "Remote: пустая задача пропущена".to_string();
+            return;
+        }
+
+        self.save_settings_from_ui();
+        let user_message_index = self.chat.len();
+        self.chat.push(ChatLine::system(format!(
+            "Удалённая задача получена через {}: {}",
+            task.source, task.id
+        )));
+        self.chat.push(ChatLine::user(message.clone()));
+        self.agent_user_message_index = Some(user_message_index + 1);
+        self.agent_chat_start_index = Some(self.chat.len());
+        self.agent_live_status = "Ждёт подтверждения удалённой задачи".to_string();
+        self.run_timeline = Some(RunTimeline::new(&message));
+        self.run_timeline_anchor_index = Some(user_message_index + 1);
+        self.active_center_tab = CenterTab::Agent;
+
+        let gated_message = format!(
+            "{}\n\nКонтекст remote: задача `{}` отправлена через `{}`. Перед выполнением требуется подтверждение.",
+            message, task.id, task.source
+        );
+        let gate = self.build_pre_run_gate(&gated_message, &[]);
+        if let Some(timeline) = &mut self.run_timeline {
+            timeline.set_plan_detail(gate.detail.clone());
+            timeline.pre_run_gate_requested(gate.summary.clone(), gate.detail.clone());
+        }
+        self.pending_run_gate = Some(gate);
+        self.remote_last_action = format!("Remote: задача {} ждёт подтверждения", task.id);
+        append_journal(format!(
+            "remote_task\tpending_gate\t{}\t{}",
+            task.id,
+            compact(&message, 300)
+        ));
+        self.refresh_journal();
+        self.persist_current_conversation();
     }
 
     fn refresh_remote_control_snapshot(&mut self) {
@@ -9740,6 +9878,16 @@ impl LeetcodeApp {
                 chat_messages: self.chat.len(),
                 tool_log_entries: self.tool_log.len(),
                 git_changed_files: self.git_changed_files.len(),
+                remote_queue_len: self.remote_task_queue.len(),
+                remote_last_action: self.remote_last_action.clone(),
+                pending_run_gate_summary: self
+                    .pending_run_gate
+                    .as_ref()
+                    .map(|gate| gate.summary.clone()),
+                pending_approval_summary: self
+                    .pending_approval
+                    .as_ref()
+                    .map(|approval| approval.summary.clone()),
                 agent_status,
                 project_status,
                 asset_status,
@@ -12999,6 +13147,8 @@ impl eframe::App for LeetcodeApp {
         self.drain_project_events();
         self.drain_asset_events();
         self.drain_provider_validation_events();
+        self.drain_remote_control_events();
+        self.process_remote_task_queue();
         self.refresh_terminal_snapshot();
         self.refresh_remote_control_snapshot();
         self.handle_command_palette_shortcuts(ctx);

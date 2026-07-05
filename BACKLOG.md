@@ -273,7 +273,9 @@ Leetcode развивается из минимального локальног
 
 - Todo: Спроектировать Leetcode Relay: исходящее WSS-соединение от host app, Agent ID, device pairing и revoke devices.
 - Todo: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
-- Todo: Добавить remote actions поверх permission system: отправить задачу, approve/deny, читать tool log, смотреть run history.
+- Done: Добавить local-first remote action API: `POST /api/tasks`, `POST /api/run-gate`, `POST /api/approval`.
+- Done: Подключить PWA-форму отправки задачи и кнопки подтверждения/отклонения к существующей permission system.
+- Todo: Расширить remote actions: читать tool log, смотреть run history, получать подробный run timeline.
 - Todo: Добавить read-only просмотр файлов и безопасные макросы/палитру команд по ролям.
 - Todo: Усилить безопасность: short-lived tokens, Origin validation, rate limiting, audit log, TLS/WSS, роли доступа.
 - Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
