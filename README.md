@@ -210,6 +210,25 @@ powershell -ExecutionPolicy Bypass -File .\install-leetcode.ps1
 
 Installed builds check `latest.json` automatically on startup and show the result in `Сводка -> Обновление приложения`. Updates are still applied only after an explicit click: open `Инструменты -> Обновление приложения...` or `Проект -> Релиз`, set the `Manifest URL` if needed, then click `Обновить и перезапустить`. Leetcode downloads `latest.json`, compares versions, downloads the zip, verifies SHA256, starts an external updater, exits, replaces the installed files, and launches the new version. Dev builds from `target/debug` or `target/release` intentionally refuse self-update.
 
+### Thin Client
+
+Leetcode also has a separate Windows thin client for connecting to a running host agent through the Remote API:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/package-client-windows.ps1
+```
+
+The output is written to `dist/leetcode-client-portable` and includes `leetcode-client.exe`, `install-leetcode-client.ps1`, `uninstall-leetcode-client.ps1`, and `client-latest.json` for the client package channel.
+
+Install it on another Windows computer:
+
+```powershell
+cd dist\leetcode-client-portable
+powershell -ExecutionPolicy Bypass -File .\install-leetcode-client.ps1
+```
+
+Current thin-client flow: enable Remote API in the main Leetcode app, copy its Remote URL and token, then enter them in Leetcode Client. The client can view agent state, submit tasks, run safe remote commands, and approve or deny pending plans/tool actions. Agent ID pairing and relay access are planned next; the current client intentionally uses the direct URL/token foundation.
+
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 
 Inside the app, open `Проект -> Релиз` to use the Release Cockpit. It shows the current version, release readiness, preflight checklist, recent check/test/build/package runs, local artifacts, and environment diagnostics. Its action buttons reuse project commands, so release runs are recorded in the same command history as normal development checks. Use `В Roadmap` to record the current release candidate, readiness checklist, artifacts, Git context, and release command history as a roadmap milestone.

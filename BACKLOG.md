@@ -284,7 +284,9 @@ Leetcode развивается из минимального локальног
 - Todo: Расширить Remote Commands до макросов/проектных команд с отдельными ролями, подтверждениями и риск-классами.
 - Todo: Усилить безопасность до product-grade: short-lived tokens, device pairing, revoke devices, TLS/WSS, per-device/per-IP rate limiting.
 - Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
-- Todo: Сделать лёгкий desktop thin client на WebView/Tauri после стабилизации API.
+- Done: Сделать лёгкий desktop thin client как отдельный `leetcode-client` binary поверх Remote API: состояние агента, отправка задач, safe commands, approvals.
+- Done: Добавить installer/portable package для тонкого клиента: `package-client-windows.ps1`, `install-leetcode-client.ps1`, `uninstall-leetcode-client.ps1`, `client-latest.json`.
+- Todo: Довести thin client до Agent ID/pairing UX после появления relay/device registry.
 
 ## Этап 26 - Installer и обновления
 
@@ -298,6 +300,7 @@ Leetcode развивается из минимального локальног
 - Done: Добавить безопасное скачивание обновления с SHA256-проверкой.
 - Done: Добавить обновление по кнопке: скачать пакет, проверить SHA256, запустить внешний updater, закрыть текущий процесс и перезапустить Leetcode.
 - Done: Подготовить release-channel `0.1.1`: bump версии, сборка portable package, GitHub Release assets и smoke-проверка обнаружения обновления с установленной `0.1.0`.
+- Done: Добавить отдельный release package foundation для тонкого клиента Windows.
 - Todo: Добавить product-grade автообновление после стабилизации release канала, подписи, rollback UI и staged rollout.
 
 ## Этап 27 - Agent ID и простое подключение
@@ -308,7 +311,7 @@ Leetcode развивается из минимального локальног
 - Done: Показать `Agent ID` в UI удалённого доступа с копированием и понятным статусом.
 - Todo: Добавить device registry: доверенные устройства, роли, last seen, revoke.
 - Todo: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
-- Todo: Подготовить thin-client протокол поверх уже существующего Remote API.
+- Done: Подготовить thin-client протокол поверх уже существующего Remote API для прямого URL/token подключения.
 - Todo: Подготовить Relay/Agent ID слой: исходящее WSS-соединение от агента, подключение клиента по Agent ID без ручных IP/портов.
 
 ## Постоянная планка качества

@@ -47,7 +47,9 @@
   - подтверждение на host app;
   - device token для доверенного клиента;
   - revoke devices.
-- Тонкий desktop-клиент на Tauri/WebView.
+- Done local-first: тонкий desktop-клиент как отдельный Rust/egui binary `leetcode-client`.
+- Done local-first: Windows installer/portable package для тонкого клиента.
+- later product: тонкий desktop-клиент с Agent ID/pairing UX поверх relay.
 - iPhone PWA как основной мобильный клиент.
 - Позже native iOS app при необходимости APNs, Keychain/passkeys и более стабильного фонового UX.
 - Remote actions:
@@ -78,6 +80,20 @@
 - iPhone PWA показывает live-состояние и позволяет подтвердить действие.
 - Desktop thin client работает на другом компьютере.
 - Все опасные действия проходят через существующую permission system.
+
+## Текущее подключение тонкого клиента
+
+Пока relay и pairing ещё не реализованы, подключение устроено максимально прямо:
+
+1. На основном компьютере открыть Leetcode.
+2. Включить Remote API в настройках удалённого доступа.
+3. Скопировать Remote URL и token.
+4. Установить `Leetcode Client` на другом Windows-компьютере.
+5. Ввести Remote URL и token в клиенте.
+
+После подключения клиент показывает состояние агента, проект, модель, очередь удалённых действий, последние инструменты и запуски. Через него можно отправить задачу, выполнить safe remote command и подтвердить или отклонить ожидающий план/действие инструмента.
+
+Следующий продуктовый слой должен заменить ручной URL/token на Agent ID, одноразовый pairing code/QR и device token.
 
 ## Рекомендованный порядок
 

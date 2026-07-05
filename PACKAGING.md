@@ -81,6 +81,63 @@ powershell -ExecutionPolicy Bypass -File .\uninstall-leetcode.ps1
 
 User data, saved API keys, conversations, project memory, and logs are intentionally kept in the OS config/data folders. Remove those manually only when you really want to reset the agent.
 
+## Thin Client Windows Build
+
+Run from the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/package-client-windows.ps1
+```
+
+The script builds only the remote desktop client binary:
+
+```text
+target/release/leetcode-client.exe
+```
+
+Then it creates:
+
+```text
+dist/leetcode-client-portable/
+dist/leetcode-client-portable.zip
+dist/leetcode-client-portable.sha256.txt
+dist/client-latest.json
+```
+
+The client package folder and zip include:
+
+```text
+leetcode-client.exe
+install-leetcode-client.ps1
+uninstall-leetcode-client.ps1
+package-info.json
+README.md
+PACKAGING.md
+```
+
+Install the client for the current Windows user:
+
+```powershell
+cd dist\leetcode-client-portable
+powershell -ExecutionPolicy Bypass -File .\install-leetcode-client.ps1
+```
+
+Default install location:
+
+```text
+%LOCALAPPDATA%\Programs\Leetcode Client
+```
+
+The client installer creates `Leetcode Client` shortcuts in the Start Menu and on the Desktop. It keeps saved remote URL/token config in the OS config/data folders when uninstalled.
+
+To uninstall the client binaries and shortcuts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall-leetcode-client.ps1
+```
+
+Current client distribution is separate from the main app update channel. Publish `client-latest.json`, `leetcode-client-portable.zip`, and `leetcode-client-portable.sha256.txt` when a separate client update channel is needed.
+
 ## Update Manifest Foundation
 
 `dist/latest.json` is the first release-channel contract for a future updater and thin client. It contains app name, version, channel, platform, archive filename, SHA256, size, installer script name, uninstaller script name, and publish timestamp.
