@@ -313,6 +313,10 @@ Leetcode развивается из минимального локальног
 - Done: Добавить local-first pairing flow: одноразовый код на host app, подключение thin client, отдельный device token.
 - Done: Подготовить thin-client протокол поверх уже существующего Remote API для прямого URL/token подключения.
 - Done: Обновить thin client: подключение по Remote URL + Agent ID + pairing code, автоматическое сохранение device token.
+- Done: Добавить UX pairing-passport: host app копирует Remote URL + Agent ID + одноразовый код, thin client вставляет эти данные из буфера.
+- Done: Добавить управление ролями доверенных устройств прямо в UI host app: обзор, задачи, подтверждения, файлы.
+- Todo: Добавить QR/pairing link для iPhone/PWA после стабилизации relay/pwa маршрута.
+- Todo: Добавить host-side approval dialog для новых устройств, когда появится async pairing через relay.
 - Todo: Подготовить Relay/Agent ID слой: исходящее WSS-соединение от агента, подключение клиента по Agent ID без ручных IP/портов.
 
 ## Постоянная планка качества

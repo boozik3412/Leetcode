@@ -9793,6 +9793,13 @@ impl LeetcodeApp {
 
             ui.separator();
             ui.label(RichText::new("Подключение устройств").strong());
+            ui.label(
+                RichText::new(
+                    "Создайте одноразовый код, скопируйте паспорт подключения и вставьте его в Leetcode Client.",
+                )
+                .weak()
+                .small(),
+            );
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Новый код подключения").clicked() {
                     self.config.remote_pairing_code = generate_remote_pairing_code();
@@ -9805,6 +9812,17 @@ impl LeetcodeApp {
                                 .to_string();
                         self.restart_remote_control_server();
                     }
+                }
+                let pairing_active = !self.config.remote_pairing_code.trim().is_empty()
+                    && self.config.remote_pairing_expires_at > unix_timestamp();
+                if ui
+                    .add_enabled(pairing_active, egui::Button::new("Копировать паспорт"))
+                    .on_hover_text(
+                        "Копирует Remote URL, Agent ID и pairing code. В тонком клиенте нажмите «Вставить паспорт».",
+                    )
+                    .clicked()
+                {
+                    self.copy_remote_pairing_passport_to_clipboard();
                 }
                 if ui.button("Сбросить код").clicked() {
                     self.config.remote_pairing_code.clear();
@@ -9821,22 +9839,47 @@ impl LeetcodeApp {
             {
                 status_line(ui, "Pairing", "код не активен");
             } else {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Pairing code").weak());
-                    ui.label(
-                        RichText::new(&self.config.remote_pairing_code)
-                            .monospace()
-                            .strong()
-                            .color(accent_color()),
-                    );
-                    ui.label(RichText::new(format!(
-                        "истекает через {}",
-                        format_duration(Duration::from_secs(
+                egui::Grid::new("remote_pairing_passport_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Remote URL").weak());
+                        ui.label(RichText::new(self.remote_control_url()).monospace());
+                        ui.end_row();
+
+                        ui.label(RichText::new("Agent ID").weak());
+                        ui.label(RichText::new(&self.config.agent_id).monospace());
+                        ui.end_row();
+
+                        ui.label(RichText::new("Pairing code").weak());
+                        ui.label(
+                            RichText::new(&self.config.remote_pairing_code)
+                                .monospace()
+                                .strong()
+                                .color(accent_color()),
+                        );
+                        ui.end_row();
+
+                        ui.label(RichText::new("Истекает").weak());
+                        ui.label(format_duration(Duration::from_secs(
                             self.config
                                 .remote_pairing_expires_at
-                                .saturating_sub(unix_timestamp())
-                        ))
-                    )));
+                                .saturating_sub(unix_timestamp()),
+                        )));
+                        ui.end_row();
+                    });
+                ui.label(
+                    RichText::new(
+                        "Паспорт не содержит постоянный token. После подключения клиент получит отдельный device-token, который можно отозвать ниже.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Шаги").weak());
+                    ui.label("1. Откройте Leetcode Client.");
+                    ui.label("2. Нажмите «Вставить паспорт».");
+                    ui.label("3. Нажмите «Подключить по коду».");
                 });
             }
 
@@ -9847,6 +9890,12 @@ impl LeetcodeApp {
             } else {
                 let devices = self.config.remote_devices.clone();
                 for device in devices {
+                    let mut role_view = device.role_view;
+                    let mut role_chat = device.role_chat;
+                    let mut role_approve = device.role_approve;
+                    let mut role_files = device.role_files;
+                    let mut roles_changed = false;
+
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new(&device.name).strong());
                         chip(
@@ -9871,6 +9920,47 @@ impl LeetcodeApp {
                             self.revoke_remote_device(&device.id);
                         }
                     });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Роли").weak());
+                        roles_changed |= ui
+                            .add_enabled(
+                                !device.revoked,
+                                egui::Checkbox::new(&mut role_view, "Обзор"),
+                            )
+                            .on_hover_text("Устройство может читать состояние агента и журналы.")
+                            .changed();
+                        roles_changed |= ui
+                            .add_enabled(
+                                !device.revoked,
+                                egui::Checkbox::new(&mut role_chat, "Задачи"),
+                            )
+                            .on_hover_text("Устройство может отправлять агенту задачи.")
+                            .changed();
+                        roles_changed |= ui
+                            .add_enabled(
+                                !device.revoked,
+                                egui::Checkbox::new(&mut role_approve, "Подтверждения"),
+                            )
+                            .on_hover_text("Устройство может подтверждать планы и запросы инструментов.")
+                            .changed();
+                        roles_changed |= ui
+                            .add_enabled(
+                                !device.revoked,
+                                egui::Checkbox::new(&mut role_files, "Файлы"),
+                            )
+                            .on_hover_text("Устройство может читать список и содержимое файлов проекта.")
+                            .changed();
+                    });
+                    if roles_changed {
+                        self.update_remote_device_roles(
+                            &device.id,
+                            role_view,
+                            role_chat,
+                            role_approve,
+                            role_files,
+                        );
+                    }
+                    ui.separator();
                 }
             }
 
@@ -9906,6 +9996,17 @@ impl LeetcodeApp {
             "http://{}:{}",
             self.config.remote_bind_host.trim(),
             self.config.remote_port
+        )
+    }
+
+    fn remote_pairing_passport(&self) -> String {
+        format!(
+            "Leetcode Remote Pairing\nremote_url={}\nagent_id={}\npairing_code={}\nexpires_at={}\ndevice_name={}\n",
+            self.remote_control_url(),
+            self.config.agent_id,
+            self.config.remote_pairing_code,
+            self.config.remote_pairing_expires_at,
+            std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Leetcode Client".to_string())
         )
     }
 
@@ -9964,6 +10065,19 @@ impl LeetcodeApp {
         {
             Ok(()) => self.remote_status = "Agent ID скопирован".to_string(),
             Err(err) => self.remote_status = format!("Не удалось скопировать Agent ID: {err}"),
+        }
+    }
+
+    fn copy_remote_pairing_passport_to_clipboard(&mut self) {
+        let passport = self.remote_pairing_passport();
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(passport)) {
+            Ok(()) => {
+                self.remote_status =
+                    "Паспорт подключения скопирован. Вставьте его в Leetcode Client.".to_string();
+            }
+            Err(err) => {
+                self.remote_status = format!("Не удалось скопировать паспорт подключения: {err}");
+            }
         }
     }
 
@@ -10192,6 +10306,47 @@ impl LeetcodeApp {
         ));
         if let Err(err) = self.config.save() {
             self.remote_status = format!("Не удалось сохранить отзыв устройства: {err}");
+            return;
+        }
+        self.restart_remote_control_server();
+        self.refresh_journal();
+    }
+
+    fn update_remote_device_roles(
+        &mut self,
+        device_id: &str,
+        role_view: bool,
+        role_chat: bool,
+        role_approve: bool,
+        role_files: bool,
+    ) {
+        let Some(device) = self
+            .config
+            .remote_devices
+            .iter_mut()
+            .find(|device| device.id == device_id)
+        else {
+            return;
+        };
+        if device.revoked {
+            return;
+        }
+        device.role_view = role_view;
+        device.role_chat = role_chat;
+        device.role_approve = role_approve;
+        device.role_files = role_files;
+        self.remote_last_action = format!("Remote: роли устройства {} обновлены", device.name);
+        append_journal(format!(
+            "remote_device\troles\t{}\t{}\tview={}\tchat={}\tapprove={}\tfiles={}",
+            unix_timestamp(),
+            compact(&device.name, 120),
+            role_view,
+            role_chat,
+            role_approve,
+            role_files
+        ));
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Не удалось сохранить роли устройства: {err}");
             return;
         }
         self.restart_remote_control_server();

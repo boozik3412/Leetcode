@@ -1,3 +1,4 @@
+use arboard::Clipboard;
 use eframe::egui::{self, RichText, TextEdit};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -424,6 +425,42 @@ impl ThinClientApp {
         });
     }
 
+    fn paste_pairing_passport_from_clipboard(&mut self) {
+        let text = match Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => text,
+            Err(err) => {
+                self.action_status = format!("Не удалось прочитать буфер обмена: {err}");
+                return;
+            }
+        };
+        let passport = parse_pairing_passport(&text);
+        if !passport.has_any_value() {
+            self.action_status = "В буфере не найден паспорт подключения Leetcode.".to_string();
+            return;
+        }
+        if let Some(remote_url) = passport.remote_url {
+            self.remote_url_input = remote_url;
+        }
+        if let Some(agent_id) = passport.agent_id {
+            self.agent_id_input = agent_id;
+        }
+        if let Some(pairing_code) = passport.pairing_code {
+            self.pairing_code_input = pairing_code;
+        }
+        if let Some(device_name) = passport.device_name {
+            if !device_name.trim().is_empty() {
+                self.device_name_input = device_name;
+            }
+        }
+        if let Some(token) = passport.token {
+            self.token_input = token;
+        }
+        self.sync_config_from_inputs();
+        self.save_config();
+        self.action_status =
+            "Паспорт подключения вставлен. Нажмите «Подключить по коду».".to_string();
+    }
+
     fn run_command(&mut self, command_id: String) {
         let remote_url = normalize_remote_url(&self.remote_url_input);
         let token = self.token_input.trim().to_string();
@@ -528,6 +565,9 @@ impl ThinClientApp {
                 });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
+                if ui.button("Вставить паспорт").clicked() {
+                    self.paste_pairing_passport_from_clipboard();
+                }
                 if ui.button("Подключить по коду").clicked() {
                     self.pair_device();
                 }
@@ -549,6 +589,13 @@ impl ThinClientApp {
                 }
             });
             ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Паспорт подключения копируется в основном Leetcode: Контроль → Удалённый доступ → Подключение устройств.",
+                )
+                .weak()
+                .small(),
+            );
             ui.label(RichText::new(&self.status).weak());
             if !self.action_status.trim().is_empty() {
                 ui.label(RichText::new(&self.action_status).color(accent_color()));
@@ -922,6 +969,80 @@ fn normalize_remote_url(value: &str) -> String {
     }
 }
 
+#[derive(Default)]
+struct PairingPassport {
+    remote_url: Option<String>,
+    agent_id: Option<String>,
+    pairing_code: Option<String>,
+    device_name: Option<String>,
+    token: Option<String>,
+}
+
+impl PairingPassport {
+    fn has_any_value(&self) -> bool {
+        self.remote_url.is_some()
+            || self.agent_id.is_some()
+            || self.pairing_code.is_some()
+            || self.device_name.is_some()
+            || self.token.is_some()
+    }
+}
+
+fn parse_pairing_passport(text: &str) -> PairingPassport {
+    let mut passport = PairingPassport::default();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        passport.remote_url = json_string(&value, &["remote_url", "url"]);
+        passport.agent_id = json_string(&value, &["agent_id", "agentId"]);
+        passport.pairing_code = json_string(&value, &["pairing_code", "code"]);
+        passport.device_name = json_string(&value, &["device_name", "name"]);
+        passport.token = json_string(&value, &["device_token", "token"]);
+        if passport.has_any_value() {
+            return passport;
+        }
+    }
+
+    for raw_line in text.lines() {
+        let line = raw_line
+            .trim()
+            .trim_start_matches(['-', '*', '•', ' '])
+            .trim();
+        let Some((key, value)) = line.split_once('=').or_else(|| line.split_once(':')) else {
+            continue;
+        };
+        let key = normalize_passport_key(key);
+        let value = value.trim().trim_matches('"').to_string();
+        if value.is_empty() {
+            continue;
+        }
+        match key.as_str() {
+            "remoteurl" | "url" => passport.remote_url = Some(value),
+            "agentid" => passport.agent_id = Some(value),
+            "pairingcode" | "code" => passport.pairing_code = Some(value.to_ascii_uppercase()),
+            "devicename" | "name" => passport.device_name = Some(value),
+            "devicetoken" | "token" => passport.token = Some(value),
+            _ => {}
+        }
+    }
+    passport
+}
+
+fn normalize_passport_key(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+fn json_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn load_config() -> ClientConfig {
     config_path()
         .and_then(|path| fs::read_to_string(path).ok())
@@ -1059,5 +1180,39 @@ fn age_label(timestamp: u64) -> String {
         60..=3599 => format!("{} мин назад", seconds / 60),
         3600..=86399 => format!("{} ч назад", seconds / 3600),
         _ => format!("{} д назад", seconds / 86400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_key_value_pairing_passport() {
+        let passport = parse_pairing_passport(
+            "Leetcode Remote Pairing\nremote_url=http://10.0.0.2:17890\nagent_id=LC-123\npairing_code=abc-123\ndevice_name=Office PC\n",
+        );
+
+        assert_eq!(
+            passport.remote_url.as_deref(),
+            Some("http://10.0.0.2:17890")
+        );
+        assert_eq!(passport.agent_id.as_deref(), Some("LC-123"));
+        assert_eq!(passport.pairing_code.as_deref(), Some("ABC-123"));
+        assert_eq!(passport.device_name.as_deref(), Some("Office PC"));
+    }
+
+    #[test]
+    fn parses_json_pairing_passport() {
+        let passport = parse_pairing_passport(
+            r#"{"remote_url":"http://127.0.0.1:17890","agent_id":"LC-XYZ","pairing_code":"QWE-777"}"#,
+        );
+
+        assert_eq!(
+            passport.remote_url.as_deref(),
+            Some("http://127.0.0.1:17890")
+        );
+        assert_eq!(passport.agent_id.as_deref(), Some("LC-XYZ"));
+        assert_eq!(passport.pairing_code.as_deref(), Some("QWE-777"));
     }
 }
