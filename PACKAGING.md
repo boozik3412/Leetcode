@@ -89,10 +89,11 @@ Run from the repository root:
 powershell -ExecutionPolicy Bypass -File scripts/package-client-windows.ps1
 ```
 
-The script builds only the remote desktop client binary:
+The script builds the remote desktop client and the lightweight relay MVP binary:
 
 ```text
 target/release/leetcode-client.exe
+target/release/leetcode-relay.exe
 ```
 
 Then it creates:
@@ -108,6 +109,7 @@ The client package folder and zip include:
 
 ```text
 leetcode-client.exe
+leetcode-relay.exe
 install-leetcode-client.ps1
 uninstall-leetcode-client.ps1
 package-info.json

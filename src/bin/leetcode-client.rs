@@ -7,6 +7,15 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[path = "../relay.rs"]
+mod relay;
+
+use relay::{
+    RelayClientApprovalRequest, RelayClientCommandRequest, RelayClientRequest,
+    RelayClientTaskRequest, RelayPairReply, RelayPairRequest, RelayQueuedReply, RelayStateReply,
+    DEFAULT_RELAY_URL,
+};
+
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/app-icon.png");
 
 fn main() -> eframe::Result<()> {
@@ -46,6 +55,10 @@ fn load_app_icon() -> Option<std::sync::Arc<egui::IconData>> {
 struct ClientConfig {
     #[serde(default = "default_remote_url")]
     remote_url: String,
+    #[serde(default = "default_relay_url")]
+    relay_url: String,
+    #[serde(default)]
+    use_relay: bool,
     #[serde(default)]
     agent_id: String,
     #[serde(default = "default_device_name")]
@@ -62,6 +75,8 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             remote_url: default_remote_url(),
+            relay_url: default_relay_url(),
+            use_relay: false,
             agent_id: String::new(),
             device_name: default_device_name(),
             device_id: String::new(),
@@ -201,6 +216,8 @@ enum ClientEvent {
 struct ThinClientApp {
     config: ClientConfig,
     remote_url_input: String,
+    relay_url_input: String,
+    use_relay: bool,
     agent_id_input: String,
     device_name_input: String,
     pairing_code_input: String,
@@ -222,6 +239,8 @@ impl ThinClientApp {
         let config = load_config();
         let mut app = Self {
             remote_url_input: config.remote_url.clone(),
+            relay_url_input: config.relay_url.clone(),
+            use_relay: config.use_relay,
             agent_id_input: config.agent_id.clone(),
             device_name_input: config.device_name.clone(),
             pairing_code_input: String::new(),
@@ -261,6 +280,9 @@ impl ThinClientApp {
     fn sync_config_from_inputs(&mut self) {
         self.config.remote_url = normalize_remote_url(&self.remote_url_input);
         self.remote_url_input = self.config.remote_url.clone();
+        self.config.relay_url = normalize_remote_url(&self.relay_url_input);
+        self.relay_url_input = self.config.relay_url.clone();
+        self.config.use_relay = self.use_relay;
         self.config.agent_id = self.agent_id_input.trim().to_string();
         self.config.device_name = if self.device_name_input.trim().is_empty() {
             default_device_name()
@@ -354,13 +376,21 @@ impl ThinClientApp {
         if self.poll_in_flight {
             return;
         }
+        self.sync_config_from_inputs();
+        let use_relay = self.use_relay;
         let remote_url = normalize_remote_url(&self.remote_url_input);
+        let relay_url = normalize_remote_url(&self.relay_url_input);
+        let agent_id = self.agent_id_input.trim().to_string();
         let token = self.token_input.trim().to_string();
         let (tx, rx) = mpsc::channel();
         self.events_rx = Some(rx);
         self.poll_in_flight = true;
         thread::spawn(move || {
-            let result = get_state(&remote_url, &token);
+            let result = if use_relay {
+                get_relay_state(&relay_url, &agent_id, &token)
+            } else {
+                get_state(&remote_url, &token)
+            };
             let _ = tx.send(ClientEvent::State(result));
         });
     }
@@ -371,19 +401,27 @@ impl ThinClientApp {
             self.action_status = "Введите задачу для агента.".to_string();
             return;
         }
+        self.sync_config_from_inputs();
+        let use_relay = self.use_relay;
         let remote_url = normalize_remote_url(&self.remote_url_input);
+        let relay_url = normalize_remote_url(&self.relay_url_input);
+        let agent_id = self.agent_id_input.trim().to_string();
         let token = self.token_input.trim().to_string();
         let (tx, rx) = mpsc::channel();
         self.events_rx = Some(rx);
         self.action_status = "Отправляю задачу...".to_string();
         self.task_input.clear();
         thread::spawn(move || {
-            let result = post_json(
-                &remote_url,
-                &token,
-                "/api/tasks",
-                json!({"message": message, "source": "leetcode-client"}),
-            )
+            let result = if use_relay {
+                post_relay_task(&relay_url, &agent_id, &token, message)
+            } else {
+                post_json(
+                    &remote_url,
+                    &token,
+                    "/api/tasks",
+                    json!({"message": message, "source": "leetcode-client"}),
+                )
+            }
             .map(|reply| {
                 format!(
                     "Задача поставлена: {}",
@@ -402,25 +440,32 @@ impl ThinClientApp {
         }
         self.sync_config_from_inputs();
         self.save_config();
+        self.sync_config_from_inputs();
+        let use_relay = self.use_relay;
         let remote_url = normalize_remote_url(&self.remote_url_input);
+        let relay_url = normalize_remote_url(&self.relay_url_input);
         let agent_id = self.agent_id_input.trim().to_string();
         let device_name = self.device_name_input.trim().to_string();
         let (tx, rx) = mpsc::channel();
         self.events_rx = Some(rx);
         self.action_status = "Подключаю устройство...".to_string();
         thread::spawn(move || {
-            let result = post_pair(
-                &remote_url,
-                json!({
-                    "agent_id": agent_id,
-                    "pairing_code": code,
-                    "device_name": if device_name.trim().is_empty() { default_device_name() } else { device_name },
-                    "role_view": true,
-                    "role_chat": true,
-                    "role_approve": true,
-                    "role_files": false
-                }),
-            );
+            let result = if use_relay {
+                post_relay_pair(&relay_url, &agent_id, &code, &device_name)
+            } else {
+                post_pair(
+                    &remote_url,
+                    json!({
+                        "agent_id": agent_id,
+                        "pairing_code": code,
+                        "device_name": if device_name.trim().is_empty() { default_device_name() } else { device_name },
+                        "role_view": true,
+                        "role_chat": true,
+                        "role_approve": true,
+                        "role_files": false
+                    }),
+                )
+            };
             let _ = tx.send(ClientEvent::Paired(result));
         });
     }
@@ -440,6 +485,10 @@ impl ThinClientApp {
         }
         if let Some(remote_url) = passport.remote_url {
             self.remote_url_input = remote_url;
+        }
+        if let Some(relay_url) = passport.relay_url {
+            self.relay_url_input = relay_url;
+            self.use_relay = true;
         }
         if let Some(agent_id) = passport.agent_id {
             self.agent_id_input = agent_id;
@@ -462,18 +511,26 @@ impl ThinClientApp {
     }
 
     fn run_command(&mut self, command_id: String) {
+        self.sync_config_from_inputs();
+        let use_relay = self.use_relay;
         let remote_url = normalize_remote_url(&self.remote_url_input);
+        let relay_url = normalize_remote_url(&self.relay_url_input);
+        let agent_id = self.agent_id_input.trim().to_string();
         let token = self.token_input.trim().to_string();
         let (tx, rx) = mpsc::channel();
         self.events_rx = Some(rx);
         self.action_status = "Отправляю команду...".to_string();
         thread::spawn(move || {
-            let result = post_json(
-                &remote_url,
-                &token,
-                "/api/commands",
-                json!({"id": command_id, "source": "leetcode-client"}),
-            )
+            let result = if use_relay {
+                post_relay_command(&relay_url, &agent_id, &token, command_id)
+            } else {
+                post_json(
+                    &remote_url,
+                    &token,
+                    "/api/commands",
+                    json!({"id": command_id, "source": "leetcode-client"}),
+                )
+            }
             .map(|reply| {
                 format!(
                     "Команда поставлена: {}",
@@ -485,18 +542,32 @@ impl ThinClientApp {
     }
 
     fn answer(&mut self, endpoint: &'static str, action: &'static str) {
+        self.sync_config_from_inputs();
+        let use_relay = self.use_relay;
         let remote_url = normalize_remote_url(&self.remote_url_input);
+        let relay_url = normalize_remote_url(&self.relay_url_input);
+        let agent_id = self.agent_id_input.trim().to_string();
         let token = self.token_input.trim().to_string();
         let (tx, rx) = mpsc::channel();
         self.events_rx = Some(rx);
         self.action_status = "Отправляю подтверждение...".to_string();
         thread::spawn(move || {
-            let result = post_json(
-                &remote_url,
-                &token,
-                endpoint,
-                json!({"action": action, "source": "leetcode-client"}),
-            )
+            let approved = action == "approve";
+            let result = if use_relay {
+                let relay_endpoint = if endpoint.contains("run-gate") {
+                    "/api/clients/run-gate"
+                } else {
+                    "/api/clients/approval"
+                };
+                post_relay_approval(&relay_url, &agent_id, &token, relay_endpoint, approved)
+            } else {
+                post_json(
+                    &remote_url,
+                    &token,
+                    endpoint,
+                    json!({"action": action, "source": "leetcode-client"}),
+                )
+            }
             .map(|reply| {
                 format!(
                     "Ответ отправлен: {}",
@@ -518,16 +589,44 @@ impl ThinClientApp {
                 }
             });
             ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .checkbox(&mut self.use_relay, "Relay по Agent ID")
+                    .changed()
+                {
+                    self.sync_config_from_inputs();
+                    self.save_config();
+                }
+                ui.label(
+                    RichText::new(if self.use_relay {
+                        "Клиент ходит в relay, host-агент сам забирает действия."
+                    } else {
+                        "Клиент подключается напрямую к Remote API host-агента."
+                    })
+                    .weak()
+                    .small(),
+                );
+            });
             egui::Grid::new("connection_grid")
                 .num_columns(2)
                 .spacing([10.0, 8.0])
                 .show(ui, |ui| {
+                    ui.label(RichText::new("Relay URL").weak());
+                    ui.add(
+                        TextEdit::singleline(&mut self.relay_url_input)
+                            .desired_width(420.0)
+                            .hint_text(DEFAULT_RELAY_URL),
+                    )
+                    .on_hover_text("Нужен только для режима Relay по Agent ID.");
+                    ui.end_row();
+
                     ui.label(RichText::new("Remote URL").weak());
                     ui.add(
                         TextEdit::singleline(&mut self.remote_url_input)
                             .desired_width(420.0)
                             .hint_text("http://127.0.0.1:17890"),
-                    );
+                    )
+                    .on_hover_text("Нужен только для прямого подключения без relay.");
                     ui.end_row();
 
                     ui.label(RichText::new("Agent ID").weak());
@@ -944,6 +1043,175 @@ fn post_pair(remote_url: &str, body: serde_json::Value) -> Result<PairReply, Str
     }
 }
 
+fn get_relay_state(
+    relay_url: &str,
+    agent_id: &str,
+    device_token: &str,
+) -> Result<RemoteControlSnapshot, String> {
+    let client = http_client()?;
+    let url = endpoint_url(relay_url, "/api/clients/state")?;
+    let response = client
+        .post(url)
+        .json(&RelayClientRequest {
+            agent_id: agent_id.trim().to_string(),
+            device_token: device_token.trim().to_string(),
+        })
+        .send()
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let reply = response.json::<RelayStateReply>().map_err(|err| {
+        if status.is_success() {
+            err.to_string()
+        } else {
+            format!("relay вернул {status}: {err}")
+        }
+    })?;
+    if status.is_success() && reply.ok {
+        serde_json::from_value::<RemoteControlSnapshot>(reply.state).map_err(|err| err.to_string())
+    } else {
+        Err(reply
+            .error
+            .unwrap_or_else(|| format!("relay вернул {status}")))
+    }
+}
+
+fn post_relay_pair(
+    relay_url: &str,
+    agent_id: &str,
+    pairing_code: &str,
+    device_name: &str,
+) -> Result<PairReply, String> {
+    let client = http_client()?;
+    let url = endpoint_url(relay_url, "/api/clients/pair")?;
+    let response = client
+        .post(url)
+        .json(&RelayPairRequest {
+            agent_id: agent_id.trim().to_string(),
+            pairing_code: pairing_code.trim().to_string(),
+            device_name: if device_name.trim().is_empty() {
+                default_device_name()
+            } else {
+                device_name.trim().to_string()
+            },
+            role_view: true,
+            role_chat: true,
+            role_approve: true,
+            role_files: false,
+        })
+        .send()
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let reply = response.json::<RelayPairReply>().unwrap_or(RelayPairReply {
+        ok: status.is_success(),
+        device_id: String::new(),
+        device_name: String::new(),
+        device_token: String::new(),
+        error: None,
+    });
+    if status.is_success() && reply.ok && !reply.device_token.trim().is_empty() {
+        Ok(PairReply {
+            ok: true,
+            device_id: reply.device_id,
+            device_name: reply.device_name,
+            device_token: reply.device_token,
+            error: None,
+        })
+    } else {
+        Err(reply
+            .error
+            .unwrap_or_else(|| format!("relay вернул {status}")))
+    }
+}
+
+fn post_relay_task(
+    relay_url: &str,
+    agent_id: &str,
+    device_token: &str,
+    message: String,
+) -> Result<ApiReply, String> {
+    post_relay_queued(
+        relay_url,
+        "/api/clients/tasks",
+        &RelayClientTaskRequest {
+            agent_id: agent_id.trim().to_string(),
+            device_token: device_token.trim().to_string(),
+            message,
+            source: "leetcode-client-relay".to_string(),
+        },
+    )
+}
+
+fn post_relay_command(
+    relay_url: &str,
+    agent_id: &str,
+    device_token: &str,
+    command_id: String,
+) -> Result<ApiReply, String> {
+    post_relay_queued(
+        relay_url,
+        "/api/clients/commands",
+        &RelayClientCommandRequest {
+            agent_id: agent_id.trim().to_string(),
+            device_token: device_token.trim().to_string(),
+            id: command_id,
+            source: "leetcode-client-relay".to_string(),
+        },
+    )
+}
+
+fn post_relay_approval(
+    relay_url: &str,
+    agent_id: &str,
+    device_token: &str,
+    endpoint: &str,
+    approved: bool,
+) -> Result<ApiReply, String> {
+    post_relay_queued(
+        relay_url,
+        endpoint,
+        &RelayClientApprovalRequest {
+            agent_id: agent_id.trim().to_string(),
+            device_token: device_token.trim().to_string(),
+            approved,
+        },
+    )
+}
+
+fn post_relay_queued<T: Serialize>(
+    relay_url: &str,
+    endpoint: &str,
+    body: &T,
+) -> Result<ApiReply, String> {
+    let client = http_client()?;
+    let url = endpoint_url(relay_url, endpoint)?;
+    let response = client
+        .post(url)
+        .json(body)
+        .send()
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let reply = response
+        .json::<RelayQueuedReply>()
+        .unwrap_or(RelayQueuedReply {
+            ok: status.is_success(),
+            id: None,
+            status: Some(status.to_string()),
+            error: None,
+        });
+    if status.is_success() && reply.ok {
+        Ok(ApiReply {
+            ok: true,
+            id: reply.id,
+            status: reply.status,
+            error: None,
+        })
+    } else {
+        Err(reply
+            .error
+            .unwrap_or_else(|| format!("relay вернул {status}")))
+    }
+}
+
 fn http_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(12))
@@ -972,6 +1240,7 @@ fn normalize_remote_url(value: &str) -> String {
 #[derive(Default)]
 struct PairingPassport {
     remote_url: Option<String>,
+    relay_url: Option<String>,
     agent_id: Option<String>,
     pairing_code: Option<String>,
     device_name: Option<String>,
@@ -981,6 +1250,7 @@ struct PairingPassport {
 impl PairingPassport {
     fn has_any_value(&self) -> bool {
         self.remote_url.is_some()
+            || self.relay_url.is_some()
             || self.agent_id.is_some()
             || self.pairing_code.is_some()
             || self.device_name.is_some()
@@ -992,6 +1262,7 @@ fn parse_pairing_passport(text: &str) -> PairingPassport {
     let mut passport = PairingPassport::default();
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
         passport.remote_url = json_string(&value, &["remote_url", "url"]);
+        passport.relay_url = json_string(&value, &["relay_url", "relayUrl"]);
         passport.agent_id = json_string(&value, &["agent_id", "agentId"]);
         passport.pairing_code = json_string(&value, &["pairing_code", "code"]);
         passport.device_name = json_string(&value, &["device_name", "name"]);
@@ -1016,6 +1287,7 @@ fn parse_pairing_passport(text: &str) -> PairingPassport {
         }
         match key.as_str() {
             "remoteurl" | "url" => passport.remote_url = Some(value),
+            "relayurl" => passport.relay_url = Some(value),
             "agentid" => passport.agent_id = Some(value),
             "pairingcode" | "code" => passport.pairing_code = Some(value.to_ascii_uppercase()),
             "devicename" | "name" => passport.device_name = Some(value),
@@ -1146,6 +1418,10 @@ fn accent_color() -> egui::Color32 {
 
 fn default_remote_url() -> String {
     "http://127.0.0.1:17890".to_string()
+}
+
+fn default_relay_url() -> String {
+    DEFAULT_RELAY_URL.to_string()
 }
 
 fn default_device_name() -> String {

@@ -7,6 +7,7 @@ use crate::assets::{
     GEMINI_IMAGE_PROVIDER_ID, OPENAI_AUDIO_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID,
     OPENAI_VIDEO_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID, STABILITY_IMAGE_PROVIDER_ID,
 };
+use crate::relay::DEFAULT_RELAY_URL;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -55,6 +56,9 @@ pub struct AppConfig {
     pub remote_pairing_code: String,
     pub remote_pairing_expires_at: u64,
     pub remote_devices: Vec<RemoteDeviceConfig>,
+    pub relay_enabled: bool,
+    pub relay_url: String,
+    pub relay_host_token: String,
     pub update_manifest_url: String,
     pub context_recent_messages: usize,
     pub context_relevant_messages: usize,
@@ -205,6 +209,12 @@ struct PersistedConfig {
     remote_pairing_expires_at: u64,
     #[serde(default)]
     remote_devices: Vec<RemoteDeviceConfig>,
+    #[serde(default)]
+    relay_enabled: bool,
+    #[serde(default = "default_relay_url")]
+    relay_url: String,
+    #[serde(default)]
+    relay_host_token: String,
     #[serde(default = "default_update_manifest_url")]
     update_manifest_url: String,
     #[serde(default = "default_context_recent_messages")]
@@ -269,6 +279,9 @@ impl Default for PersistedConfig {
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
             remote_devices: Vec::new(),
+            relay_enabled: false,
+            relay_url: default_relay_url(),
+            relay_host_token: String::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -387,6 +400,9 @@ impl AppConfig {
                 persisted.remote_pairing_expires_at,
             ),
             remote_devices: normalize_remote_devices(persisted.remote_devices),
+            relay_enabled: persisted.relay_enabled,
+            relay_url: normalize_relay_url(&persisted.relay_url),
+            relay_host_token: persisted.relay_host_token.trim().to_string(),
             update_manifest_url: normalize_update_manifest_url(&persisted.update_manifest_url),
             context_recent_messages: normalize_context_recent_messages(
                 persisted.context_recent_messages,
@@ -481,6 +497,9 @@ impl AppConfig {
                 self.remote_pairing_expires_at,
             ),
             remote_devices: normalize_remote_devices(self.remote_devices.clone()),
+            relay_enabled: self.relay_enabled,
+            relay_url: normalize_relay_url(&self.relay_url),
+            relay_host_token: self.relay_host_token.trim().to_string(),
             update_manifest_url: normalize_update_manifest_url(&self.update_manifest_url),
             context_recent_messages: normalize_context_recent_messages(
                 self.context_recent_messages,
@@ -847,6 +866,10 @@ fn default_remote_rate_limit_per_minute() -> u32 {
     120
 }
 
+fn default_relay_url() -> String {
+    DEFAULT_RELAY_URL.to_string()
+}
+
 fn default_update_manifest_url() -> String {
     "https://github.com/boozik3412/Leetcode/releases/latest/download/latest.json".to_string()
 }
@@ -947,6 +970,18 @@ fn normalize_remote_rate_limit_per_minute(value: u32) -> u32 {
         0
     } else {
         value.clamp(10, 5_000)
+    }
+}
+
+fn normalize_relay_url(value: &str) -> String {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return default_relay_url();
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        value.to_string()
+    } else {
+        format!("http://{value}")
     }
 }
 
@@ -1427,6 +1462,9 @@ mod tests {
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
             remote_devices: Vec::new(),
+            relay_enabled: false,
+            relay_url: default_relay_url(),
+            relay_host_token: String::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1494,6 +1532,9 @@ mod tests {
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
             remote_devices: Vec::new(),
+            relay_enabled: false,
+            relay_url: default_relay_url(),
+            relay_host_token: String::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1724,6 +1765,9 @@ mod tests {
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
             remote_devices: Vec::new(),
+            relay_enabled: false,
+            relay_url: default_relay_url(),
+            relay_host_token: String::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1784,6 +1828,9 @@ mod tests {
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
             remote_devices: Vec::new(),
+            relay_enabled: false,
+            relay_url: default_relay_url(),
+            relay_host_token: String::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
@@ -1847,6 +1894,9 @@ mod tests {
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
             remote_devices: Vec::new(),
+            relay_enabled: false,
+            relay_url: default_relay_url(),
+            relay_host_token: String::new(),
             update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),

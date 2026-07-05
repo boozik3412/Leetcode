@@ -219,6 +219,7 @@ powershell -ExecutionPolicy Bypass -File scripts/package-client-windows.ps1
 ```
 
 The output is written to `dist/leetcode-client-portable` and includes `leetcode-client.exe`, `install-leetcode-client.ps1`, `uninstall-leetcode-client.ps1`, and `client-latest.json` for the client package channel.
+The package also includes `leetcode-relay.exe`, a lightweight HTTP relay MVP for Agent ID based tests on a LAN/VPS.
 
 Install it on another Windows computer:
 
@@ -227,7 +228,9 @@ cd dist\leetcode-client-portable
 powershell -ExecutionPolicy Bypass -File .\install-leetcode-client.ps1
 ```
 
-Current thin-client flow: enable Remote API in the main Leetcode app, create a short-lived pairing code in `Подключение устройств`, then click `Копировать паспорт`. In Leetcode Client click `Вставить паспорт`, then `Подключить по коду`. The passport contains only Remote URL, Agent ID, and the short-lived pairing code; the client receives and stores its own device token after pairing. The host app shows trusted devices with roles, last seen, revoke, and per-device role editing. Relay access by Agent ID is planned next; the current client intentionally still uses the direct Remote URL foundation.
+Direct thin-client flow: enable Remote API in the main Leetcode app, create a short-lived pairing code in `Подключение устройств`, then click `Копировать паспорт`. In Leetcode Client click `Вставить паспорт`, then `Подключить по коду`. The passport contains Remote URL, Agent ID, and the short-lived pairing code; the client receives and stores its own device token after pairing. The host app shows trusted devices with roles, last seen, revoke, and per-device role editing.
+
+Relay MVP flow: run `leetcode-relay.exe --bind 0.0.0.0:17990` on a reachable machine. In the main Leetcode app open `Контроль -> Удалённый доступ`, enable `Relay`, set the Relay URL, and save. Create a short-lived pairing code and copy the passport. In Leetcode Client enable `Relay по Agent ID`, paste the passport, and connect by code. The client then talks to relay by Agent ID/device token; the host app pulls queued actions from relay through outgoing polling.
 
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 

@@ -317,7 +317,22 @@ Leetcode развивается из минимального локальног
 - Done: Добавить управление ролями доверенных устройств прямо в UI host app: обзор, задачи, подтверждения, файлы.
 - Todo: Добавить QR/pairing link для iPhone/PWA после стабилизации relay/pwa маршрута.
 - Todo: Добавить host-side approval dialog для новых устройств, когда появится async pairing через relay.
-- Todo: Подготовить Relay/Agent ID слой: исходящее WSS-соединение от агента, подключение клиента по Agent ID без ручных IP/портов.
+- Done: Подготовить Relay/Agent ID foundation: исходящий poll от агента, подключение клиента через relay по Agent ID без прямого Remote URL.
+
+## Этап 28 - Relay MVP
+
+Цель: дать рабочий прототип подключения по Agent ID без входящего порта на машине агента: host app сама делает исходящий poll на relay, thin client отправляет задачи и approvals через relay.
+
+- Done: Добавить общий relay protocol module: host poll, pairing, client state, tasks, commands, approvals.
+- Done: Добавить отдельный `leetcode-relay` HTTP binary для локального/VPS relay MVP.
+- Done: Добавить host-side relay settings: включение, relay URL, host token, статус синхронизации.
+- Done: Добавить периодический outgoing relay poll из основного Leetcode и преобразование relay actions в обычные remote actions.
+- Done: Добавить relay mode в `leetcode-client`: Agent ID + device token, pairing через relay, state polling, задачи, команды и approvals.
+- Done: Включить `leetcode-relay.exe` в portable package тонкого клиента.
+- Todo: Заменить HTTP long-poll на WSS/TLS relay с reconnect/backoff и server-side expiry.
+- Todo: Добавить host-side approval dialog для новых relay devices вместо автопары по коду.
+- Todo: Добавить публичный relay deployment/update channel или настройку своего relay URL через installer.
+- Todo: Добавить iPhone/PWA pairing link/QR поверх relay.
 
 ## Постоянная планка качества
 

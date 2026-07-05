@@ -55,6 +55,10 @@ use crate::provider_health::{
     load_provider_validation_history, provider_health_report, provider_validation_plan,
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
+use crate::relay::{
+    generate_relay_host_token, RelayAction, RelayActionKind, RelayHostPollReply,
+    RelayHostPollRequest, DEFAULT_RELAY_URL,
+};
 use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
     update_remote_shared_state, RemoteAccessPolicy, RemoteAuditEvent, RemoteCommandRequest,
@@ -209,6 +213,12 @@ pub struct LeetcodeApp {
     remote_events_rx: Receiver<RemoteControlAction>,
     remote_task_queue: VecDeque<RemoteSubmittedTask>,
     remote_last_action: String,
+    relay_url_input: String,
+    relay_host_token_input: String,
+    relay_status: String,
+    relay_sync_rx: Option<Receiver<Result<RelayHostPollReply, String>>>,
+    relay_sync_in_flight: bool,
+    relay_last_sync: Option<Instant>,
     orchestration_status: String,
     asset_provider_input: String,
     asset_kind_input: String,
@@ -1155,12 +1165,18 @@ impl LeetcodeApp {
             config.remote_access_token = generate_remote_access_token();
             let _ = config.save();
         }
+        if config.relay_host_token.trim().is_empty() {
+            config.relay_host_token = generate_relay_host_token();
+            let _ = config.save();
+        }
         let remote_shared_state = new_remote_shared_state();
         let remote_host_input = config.remote_bind_host.clone();
         let remote_port_input = config.remote_port.to_string();
         let remote_token_input = config.remote_access_token.clone();
         let remote_allowed_origins_input = config.remote_allowed_origins.clone();
         let remote_rate_limit_input = config.remote_rate_limit_per_minute.to_string();
+        let relay_url_input = config.relay_url.clone();
+        let relay_host_token_input = config.relay_host_token.clone();
         let (remote_events_tx, remote_events_rx) = mpsc::channel();
         let (remote_server, remote_status) = if config.remote_enabled {
             match start_remote_control_server(
@@ -1302,6 +1318,12 @@ impl LeetcodeApp {
             remote_events_rx,
             remote_task_queue: VecDeque::new(),
             remote_last_action: String::new(),
+            relay_url_input,
+            relay_host_token_input,
+            relay_status: "Relay выключен".to_string(),
+            relay_sync_rx: None,
+            relay_sync_in_flight: false,
+            relay_last_sync: None,
             orchestration_status: String::new(),
             asset_provider_input,
             asset_kind_input: "image".to_string(),
@@ -9722,6 +9744,59 @@ impl LeetcodeApp {
             );
             ui.add_space(6.0);
 
+            ui.separator();
+            ui.label(RichText::new("Relay по Agent ID").strong());
+            ui.label(
+                RichText::new(
+                    "MVP-режим: основной Leetcode сам опрашивает relay, а тонкий клиент подключается к relay по Agent ID без прямого доступа к вашему IP/порту.",
+                )
+                .weak()
+                .small(),
+            );
+            let relay_changed = ui
+                .checkbox(&mut self.config.relay_enabled, "Включить Relay")
+                .on_hover_text(
+                    "Нужен запущенный leetcode-relay. Для локальной проверки используйте http://127.0.0.1:17990.",
+                )
+                .changed();
+            if relay_changed {
+                self.save_relay_settings();
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Relay URL");
+                ui.add(TextEdit::singleline(&mut self.relay_url_input).desired_width(260.0))
+                    .on_hover_text("Адрес leetcode-relay. Позже здесь будет публичный relay URL.");
+            });
+            ui.label(RichText::new("Host token").weak());
+            ui.add(
+                TextEdit::singleline(&mut self.relay_host_token_input)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text("Секрет основного агента для регистрации на relay. Клиентам он не передаётся.");
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Сохранить Relay").clicked() {
+                    self.save_relay_settings();
+                }
+                if ui.button("Новый host token").clicked() {
+                    self.regenerate_relay_host_token();
+                }
+                if ui.button("Выключить Relay").clicked() {
+                    self.config.relay_enabled = false;
+                    self.save_relay_settings();
+                }
+            });
+            status_line(ui, "Relay", &self.relay_status);
+            status_line(ui, "Relay URL", &self.config.relay_url);
+            ui.label(
+                RichText::new(
+                    "Запуск локального relay: leetcode-relay.exe --bind 0.0.0.0:17990. Для интернета нужен сервер/VPS или защищённый tunnel.",
+                )
+                .weak()
+                .small(),
+            );
+
+            ui.separator();
             let enabled_changed = ui
                 .checkbox(&mut self.config.remote_enabled, "Включить Remote API")
                 .on_hover_text(
@@ -10000,9 +10075,15 @@ impl LeetcodeApp {
     }
 
     fn remote_pairing_passport(&self) -> String {
+        let relay_url = if self.config.relay_enabled {
+            self.config.relay_url.as_str()
+        } else {
+            ""
+        };
         format!(
-            "Leetcode Remote Pairing\nremote_url={}\nagent_id={}\npairing_code={}\nexpires_at={}\ndevice_name={}\n",
+            "Leetcode Remote Pairing\nremote_url={}\nrelay_url={}\nagent_id={}\npairing_code={}\nexpires_at={}\ndevice_name={}\n",
             self.remote_control_url(),
+            relay_url,
             self.config.agent_id,
             self.config.remote_pairing_code,
             self.config.remote_pairing_expires_at,
@@ -10047,6 +10128,40 @@ impl LeetcodeApp {
             return;
         }
         self.restart_remote_control_server();
+    }
+
+    fn relay_url(&self) -> String {
+        normalize_http_url(&self.config.relay_url, DEFAULT_RELAY_URL)
+    }
+
+    fn save_relay_settings(&mut self) {
+        self.config.relay_url = normalize_http_url(&self.relay_url_input, DEFAULT_RELAY_URL);
+        self.relay_url_input = self.config.relay_url.clone();
+        if self.relay_host_token_input.trim().is_empty() {
+            self.relay_host_token_input = generate_relay_host_token();
+        }
+        self.config.relay_host_token = self.relay_host_token_input.trim().to_string();
+        if let Err(err) = self.config.save() {
+            self.relay_status = format!("Не удалось сохранить Relay: {err}");
+            return;
+        }
+        self.relay_last_sync = None;
+        self.relay_status = if self.config.relay_enabled {
+            "Relay включён, ожидаю синхронизацию".to_string()
+        } else {
+            "Relay выключен".to_string()
+        };
+    }
+
+    fn regenerate_relay_host_token(&mut self) {
+        self.relay_host_token_input = generate_relay_host_token();
+        self.config.relay_host_token = self.relay_host_token_input.clone();
+        if let Err(err) = self.config.save() {
+            self.relay_status = format!("Не удалось сохранить новый Relay token: {err}");
+            return;
+        }
+        self.relay_last_sync = None;
+        self.relay_status = "Relay host token обновлён".to_string();
     }
 
     fn regenerate_remote_control_token(&mut self) {
@@ -10171,6 +10286,149 @@ impl LeetcodeApp {
                 RemoteControlAction::Audit(event) => {
                     self.record_remote_audit(event);
                 }
+            }
+        }
+    }
+
+    fn maybe_sync_remote_relay(&mut self) {
+        if !self.config.relay_enabled || self.relay_sync_in_flight {
+            return;
+        }
+        let due = self
+            .relay_last_sync
+            .map(|last| last.elapsed() >= Duration::from_secs(2))
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        if self.config.agent_id.trim().is_empty() || self.config.relay_host_token.trim().is_empty()
+        {
+            self.relay_status = "Relay ждёт Agent ID и host token".to_string();
+            return;
+        }
+        let snapshot = self
+            .remote_shared_state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default();
+        let request = RelayHostPollRequest {
+            agent_id: self.config.agent_id.clone(),
+            host_token: self.config.relay_host_token.clone(),
+            pairing_code: self.config.remote_pairing_code.clone(),
+            pairing_expires_at: self.config.remote_pairing_expires_at,
+            state: serde_json::to_value(snapshot).unwrap_or_else(|_| serde_json::json!({})),
+        };
+        let relay_url = self.relay_url();
+        let (tx, rx) = mpsc::channel();
+        self.relay_sync_rx = Some(rx);
+        self.relay_sync_in_flight = true;
+        self.relay_last_sync = Some(Instant::now());
+        thread::spawn(move || {
+            let result = post_relay_host_poll(&relay_url, &request);
+            let _ = tx.send(result);
+        });
+    }
+
+    fn drain_relay_sync(&mut self) {
+        let Some(rx) = self.relay_sync_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(reply)) => {
+                self.relay_sync_in_flight = false;
+                let action_count = reply.actions.len();
+                for action in reply.actions {
+                    self.handle_relay_action(action);
+                }
+                self.relay_status = if action_count == 0 {
+                    "Relay синхронизирован".to_string()
+                } else {
+                    format!("Relay синхронизирован: {} действий", action_count)
+                };
+            }
+            Ok(Err(err)) => {
+                self.relay_sync_in_flight = false;
+                self.relay_status = format!("Relay недоступен: {err}");
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.relay_sync_rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.relay_sync_in_flight = false;
+                self.relay_status = "Relay sync прерван".to_string();
+            }
+        }
+    }
+
+    fn handle_relay_action(&mut self, action: RelayAction) {
+        match action.kind {
+            RelayActionKind::SubmitTask {
+                task_id,
+                message,
+                source,
+            } => {
+                self.remote_last_action = format!("Relay: задача {task_id} получена");
+                self.remote_task_queue.push_back(RemoteSubmittedTask {
+                    id: task_id,
+                    message,
+                    source,
+                    created_at: action.created_at,
+                });
+                append_journal(format!(
+                    "relay_task\tqueued\t{}",
+                    compact(&self.remote_last_action, 240)
+                ));
+                self.refresh_journal();
+            }
+            RelayActionKind::RunCommand { id, source } => {
+                self.run_remote_command(RemoteCommandRequest {
+                    id,
+                    source,
+                    created_at: action.created_at,
+                });
+            }
+            RelayActionKind::AnswerRunGate { approved } => {
+                if self.pending_run_gate.is_some() {
+                    self.remote_last_action = if approved {
+                        "Relay: план подтверждён".to_string()
+                    } else {
+                        "Relay: план отклонён".to_string()
+                    };
+                    self.answer_run_gate_with_action(if approved {
+                        ApprovalQuickAction::Approve
+                    } else {
+                        ApprovalQuickAction::Deny
+                    });
+                }
+            }
+            RelayActionKind::AnswerApproval { approved } => {
+                if self.pending_approval.is_some() {
+                    self.remote_last_action = if approved {
+                        "Relay: действие подтверждено".to_string()
+                    } else {
+                        "Relay: действие отклонено".to_string()
+                    };
+                    self.answer_approval_with_action(if approved {
+                        ApprovalQuickAction::Approve
+                    } else {
+                        ApprovalQuickAction::Deny
+                    });
+                }
+            }
+            RelayActionKind::PairDevice { device } => {
+                self.add_remote_paired_device(RemotePairedDevice {
+                    id: device.id,
+                    name: device.name,
+                    token: device.token,
+                    role_view: device.role_view,
+                    role_chat: device.role_chat,
+                    role_approve: device.role_approve,
+                    role_files: device.role_files,
+                    created_at: device.created_at,
+                });
+            }
+            RelayActionKind::DeviceSeen { device_id } => {
+                self.mark_remote_device_seen(&device_id, action.created_at);
             }
         }
     }
@@ -14014,9 +14272,11 @@ impl eframe::App for LeetcodeApp {
         self.drain_provider_validation_events();
         self.drain_update_events();
         self.drain_remote_control_events();
+        self.drain_relay_sync();
         self.process_remote_task_queue();
         self.refresh_terminal_snapshot();
         self.refresh_remote_control_snapshot();
+        self.maybe_sync_remote_relay();
         self.handle_command_palette_shortcuts(ctx);
         self.show_menu_bar(ctx);
         self.show_top_bar(ctx);
@@ -14037,6 +14297,7 @@ impl eframe::App for LeetcodeApp {
             || self.provider_validation_running
             || self.update_is_running
             || self.terminal_running
+            || self.relay_sync_in_flight
             || self.pending_command_macro_run.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -17850,6 +18111,52 @@ fn project_error_summary(output: &str) -> Vec<String> {
     summary
 }
 
+fn normalize_http_url(value: &str, fallback: &str) -> String {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() {
+        return fallback.to_string();
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        value.to_string()
+    } else {
+        format!("http://{value}")
+    }
+}
+
+fn post_relay_host_poll(
+    relay_url: &str,
+    request: &RelayHostPollRequest,
+) -> Result<RelayHostPollReply, String> {
+    let url = format!(
+        "{}/api/hosts/poll",
+        normalize_http_url(relay_url, DEFAULT_RELAY_URL)
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let response = client
+        .post(url)
+        .json(request)
+        .send()
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let reply = response.json::<RelayHostPollReply>().map_err(|err| {
+        if status.is_success() {
+            err.to_string()
+        } else {
+            format!("relay вернул {status}: {err}")
+        }
+    })?;
+    if status.is_success() && reply.ok {
+        Ok(reply)
+    } else {
+        Err(reply
+            .error
+            .unwrap_or_else(|| format!("relay вернул {status}")))
+    }
+}
+
 #[cfg(test)]
 mod project_diagnostic_tests {
     use super::*;
@@ -17956,5 +18263,17 @@ SyntaxError: invalid syntax
         assert!(item.matches_query("prompt"));
         assert!(item.matches_query("артефакты публикацией"));
         assert!(!item.matches_query("gemini"));
+    }
+
+    #[test]
+    fn normalizes_relay_urls_for_host_poll() {
+        assert_eq!(
+            normalize_http_url("127.0.0.1:17990/", DEFAULT_RELAY_URL),
+            "http://127.0.0.1:17990"
+        );
+        assert_eq!(
+            normalize_http_url("", DEFAULT_RELAY_URL),
+            DEFAULT_RELAY_URL.to_string()
+        );
     }
 }

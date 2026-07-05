@@ -16,6 +16,8 @@ $hashPath = Join-Path $distRoot "leetcode-client-portable.sha256.txt"
 $manifestPath = Join-Path $distRoot "client-latest.json"
 $exeSource = Join-Path $repoRoot "target\release\leetcode-client.exe"
 $exeTarget = Join-Path $packageRoot "leetcode-client.exe"
+$relaySource = Join-Path $repoRoot "target\release\leetcode-relay.exe"
+$relayTarget = Join-Path $packageRoot "leetcode-relay.exe"
 $cargoToml = Get-Content -Raw -Path (Join-Path $repoRoot "Cargo.toml")
 $versionMatch = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"')
 $version = if ($versionMatch.Success) { $versionMatch.Groups[1].Value } else { "0.0.0" }
@@ -37,6 +39,15 @@ if ($LASTEXITCODE -ne 0) {
     }
 }
 
+cargo +stable build --release --bin leetcode-relay
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "cargo +stable build leetcode-relay failed, retrying with the default cargo toolchain."
+    cargo build --release --bin leetcode-relay
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+
 $distRootFull = [System.IO.Path]::GetFullPath($distRoot)
 $packageRootFull = [System.IO.Path]::GetFullPath($packageRoot)
 if (-not $packageRootFull.StartsWith($distRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -48,6 +59,7 @@ if (Test-Path $packageRoot) {
 }
 New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
 Copy-Item -Force $exeSource $exeTarget
+Copy-Item -Force $relaySource $relayTarget
 
 if ($Sign) {
     if ([string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
@@ -57,6 +69,7 @@ if ($Sign) {
         $SignToolPath = "signtool.exe"
     }
     & $SignToolPath sign /fd SHA256 /sha1 $CertificateThumbprint /tr $TimestampServer /td SHA256 $exeTarget
+    & $SignToolPath sign /fd SHA256 /sha1 $CertificateThumbprint /tr $TimestampServer /td SHA256 $relayTarget
 }
 
 foreach ($file in @("README.md", "PACKAGING.md")) {
@@ -80,6 +93,7 @@ $packageInfo = [ordered]@{
     channel = "stable"
     platform = "windows-x64"
     binary = "leetcode-client.exe"
+    relay_binary = "leetcode-relay.exe"
     packaged_at = (Get-Date).ToUniversalTime().ToString("o")
 }
 $packageInfo | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -Path (Join-Path $packageRoot "package-info.json")

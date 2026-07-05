@@ -81,9 +81,9 @@
 - Desktop thin client работает на другом компьютере.
 - Все опасные действия проходят через существующую permission system.
 
-## Текущее подключение тонкого клиента
+## Direct-подключение тонкого клиента
 
-Пока relay ещё не реализован, подключение устроено через прямой Remote URL и local-first pairing:
+Direct-режим остаётся полезным для локальной сети, VPN и отладки:
 
 1. На основном компьютере открыть Leetcode.
 2. Включить Remote API в настройках удалённого доступа.
@@ -95,7 +95,19 @@
 
 Паспорт подключения содержит только Remote URL, Agent ID и короткоживущий pairing code. После подключения host app показывает доверенное устройство, last seen, revoke и роли устройства: обзор, задачи, подтверждения, файлы. Через клиент можно отправить задачу, выполнить safe remote command и подтвердить или отклонить ожидающий план/действие инструмента.
 
-Следующий продуктовый слой должен заменить ручной Remote URL на Agent ID через relay, добавить QR и pending approval dialog на host app.
+## Relay MVP
+
+Stage 28 добавляет первый рабочий relay-слой без ручного Remote URL:
+
+1. Запустить `leetcode-relay.exe --bind 0.0.0.0:17990` на доступной машине.
+2. В основном Leetcode открыть `Контроль -> Удалённый доступ`.
+3. Включить `Relay`, указать Relay URL и сохранить.
+4. Создать `Новый код подключения` и нажать `Копировать паспорт`.
+5. В Leetcode Client включить `Relay по Agent ID`, вставить паспорт и нажать `Подключить по коду`.
+
+Архитектура MVP: host app отправляет на relay `POST /api/hosts/poll` с Agent ID, host token, snapshot и активным pairing code. Клиент вызывает `/api/clients/pair`, `/api/clients/state`, `/api/clients/tasks`, `/api/clients/commands`, `/api/clients/run-gate`, `/api/clients/approval`. Relay хранит только оперативное состояние в памяти и очередь действий; после перезапуска relay устройства нужно переподключить.
+
+Следующий продуктовый слой должен заменить HTTP long-poll на WSS/TLS, добавить публичный relay deployment, QR/pairing link и pending approval dialog на host app.
 
 ## Рекомендованный порядок
 
