@@ -88,8 +88,30 @@ User data, saved API keys, conversations, project memory, and logs are intention
 Current behavior:
 
 - Manual distribution can publish `leetcode-portable.zip`, `leetcode-portable.sha256.txt`, and `latest.json` together.
-- A future updater can download `latest.json`, compare versions, download the zip, verify SHA256, and run the installer.
-- This is not silent auto-update yet. Code signing, rollback, staged channels, and in-app update UX are still planned work.
+- The in-app Release Cockpit can download `latest.json`, compare versions, download the zip, verify SHA256, stage the update, launch an external updater process, close Leetcode, copy the new files into the install folder, and restart Leetcode.
+- The default update channel is `https://github.com/boozik3412/Leetcode/releases/latest/download/latest.json`. Publish `latest.json`, `leetcode-portable.zip`, and `leetcode-portable.sha256.txt` as GitHub Release assets to use the default channel.
+- Dev builds running from `target/debug` or `target/release` intentionally refuse self-update. Test updater behavior from an installed build under `%LOCALAPPDATA%\Programs\Leetcode`.
+- Code signing, rollback UI, staged channels, and silent background updates are still planned work.
+
+## In-App Update Button
+
+Open `Project -> Release` inside Leetcode and use `Обновить и перезапустить` in the `Автообновление` block.
+
+The button does this:
+
+1. Reads the configured `Manifest URL`.
+2. Downloads and validates `latest.json`.
+3. Compares the manifest version with the running app version.
+4. Downloads `leetcode-portable.zip`.
+5. Verifies the archive SHA256 and optional size.
+6. Writes a temporary updater script.
+7. Starts that updater, exits the current app process, replaces files in the install directory, and starts Leetcode again.
+
+The last updater log is written to the OS data directory:
+
+```text
+leetcode/updates/last-update.log
+```
 
 To sign the packaged executable before the archive is created, install Windows SignTool and run:
 
@@ -127,7 +149,6 @@ If `signtool.exe` is not on `PATH`, set `SIGNTOOL_PATH` or pass `-SignToolPath`.
 ## Still To Add
 
 - Installer UI for non-technical users.
-- In-app update checker and SHA256-verified update installer.
-- Code signing and rollback.
+- Code signing, rollback UI, staged channels, and optional silent background checks.
 - Optional GPU/backend diagnostics.
 - Optional native minidumps beyond Rust panic reports.

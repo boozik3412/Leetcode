@@ -77,6 +77,7 @@ use crate::terminal::{
 use crate::tools::desktop::capture_screenshot_file;
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::shell::{run_shell, RunShellArgs};
+use crate::updater::{update_and_restart, UpdateEvent};
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use image::{ColorType, ImageFormat};
@@ -161,6 +162,10 @@ pub struct LeetcodeApp {
     project_is_running: bool,
     project_cancel: Option<Arc<AtomicBool>>,
     project_status: String,
+    update_manifest_input: String,
+    update_status: String,
+    update_events_rx: Option<Receiver<UpdateEvent>>,
+    update_is_running: bool,
     project_task_title_input: String,
     project_task_workstream_input: String,
     project_task_milestone_input: String,
@@ -1103,6 +1108,7 @@ impl LeetcodeApp {
         let api_key_input = config.api_key.clone();
         let model_input = config.model.clone();
         let provider_input = config.provider.clone();
+        let update_manifest_input = config.update_manifest_url.clone();
         let asset_provider_input = OPENAI_IMAGE_PROVIDER_ID.to_string();
         let asset_api_key_input = image_api_key_from_config(&config, &asset_provider_input);
         let asset_model_input = image_model_from_config(&config, &asset_provider_input);
@@ -1247,6 +1253,10 @@ impl LeetcodeApp {
             project_is_running: false,
             project_cancel: None,
             project_status: String::new(),
+            update_manifest_input,
+            update_status: String::new(),
+            update_events_rx: None,
+            update_is_running: false,
             project_task_title_input: String::new(),
             project_task_workstream_input: String::new(),
             project_task_milestone_input: String::new(),
@@ -5913,6 +5923,63 @@ impl LeetcodeApp {
         }
     }
 
+    fn drain_update_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(rx) = &self.update_events_rx {
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+        }
+
+        for event in events {
+            append_journal(format!(
+                "updater\t{}",
+                compact(&format!("{event:?}"), 2_000)
+            ));
+            match event {
+                UpdateEvent::Progress(message) => {
+                    self.update_status = message.clone();
+                    self.tool_log.push(ToolLogLine {
+                        title: "updater".to_string(),
+                        content: message,
+                    });
+                }
+                UpdateEvent::AlreadyCurrent {
+                    current_version,
+                    latest_version,
+                } => {
+                    self.update_is_running = false;
+                    self.update_events_rx = None;
+                    self.update_status = format!(
+                        "Уже установлена актуальная версия: {current_version} (latest: {latest_version})"
+                    );
+                }
+                UpdateEvent::Restarting {
+                    latest_version,
+                    install_dir,
+                } => {
+                    self.update_status = format!(
+                        "Обновление до {latest_version} подготовлено. Перезапуск из {install_dir}..."
+                    );
+                    self.tool_log.push(ToolLogLine {
+                        title: "updater restart".to_string(),
+                        content: self.update_status.clone(),
+                    });
+                    std::process::exit(0);
+                }
+                UpdateEvent::Error(err) => {
+                    self.update_is_running = false;
+                    self.update_events_rx = None;
+                    self.update_status = format!("Ошибка обновления: {err}");
+                    self.tool_log.push(ToolLogLine {
+                        title: "updater error".to_string(),
+                        content: err,
+                    });
+                }
+            }
+        }
+    }
+
     fn start_asset_smoke_validation(&mut self, provider_id: &str) {
         if self.asset_is_running {
             self.provider_health_status =
@@ -10516,6 +10583,60 @@ impl LeetcodeApp {
         };
     }
 
+    fn start_update_and_restart(&mut self) {
+        if self.update_is_running {
+            return;
+        }
+        let manifest_url = self.update_manifest_input.trim().to_string();
+        if manifest_url.is_empty() {
+            self.update_status = "Укажите URL manifest обновления.".to_string();
+            return;
+        }
+
+        self.sync_config_from_inputs();
+        self.sync_asset_provider_settings();
+        self.config.update_manifest_url = manifest_url.clone();
+        if let Err(err) = self.config.save() {
+            self.update_status = format!("Не удалось сохранить настройки обновления: {err}");
+            return;
+        }
+
+        let current_exe = match std::env::current_exe() {
+            Ok(path) => path,
+            Err(err) => {
+                self.update_status = format!("Не удалось определить текущий exe: {err}");
+                return;
+            }
+        };
+        let config = self.config.clone();
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let current_pid = std::process::id();
+        let (tx, rx) = mpsc::channel();
+        self.update_events_rx = Some(rx);
+        self.update_is_running = true;
+        self.update_status = "Проверяю обновления...".to_string();
+        self.tool_log.push(ToolLogLine {
+            title: "updater".to_string(),
+            content: format!("manifest: {manifest_url}"),
+        });
+
+        thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new()
+                .expect("не удалось запустить tokio runtime")
+                .block_on(update_and_restart(
+                    config,
+                    manifest_url,
+                    current_version,
+                    current_exe,
+                    current_pid,
+                    tx.clone(),
+                ));
+            if let Err(err) = result {
+                let _ = tx.send(UpdateEvent::Error(err.to_string()));
+            }
+        });
+    }
+
     fn show_release_cockpit(&mut self, ui: &mut egui::Ui) {
         let workspace = self.workspace.clone();
         let diagnostics = environment_diagnostics(&self.config, workspace.as_ref());
@@ -10636,6 +10757,55 @@ impl LeetcodeApp {
         if !self.project_status.trim().is_empty() {
             full_width_wrapped_label(ui, RichText::new(&self.project_status).weak().small());
         }
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Автообновление",
+                "Проверяет latest.json, скачивает zip, сверяет SHA256, применяет обновление и перезапускает Leetcode.",
+            );
+            ui.label(RichText::new("Manifest URL").weak().small());
+            ui.add(
+                TextEdit::singleline(&mut self.update_manifest_input)
+                    .desired_width(safe_available_width(ui, 160.0))
+                    .hint_text("https://.../latest.json"),
+            )
+            .on_hover_text(
+                "Адрес latest.json из release-канала. По умолчанию используется GitHub Releases latest/download/latest.json.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                let button = if self.update_is_running {
+                    egui::Button::new("Обновление...")
+                } else {
+                    egui::Button::new("Обновить и перезапустить")
+                };
+                if ui
+                    .add_enabled(!self.update_is_running, button)
+                    .on_hover_text(
+                        "Скачивает новую версию, проверяет SHA256 и запускает внешний updater. Текущая dev-сборка из target не обновляется.",
+                    )
+                    .clicked()
+                {
+                    self.start_update_and_restart();
+                }
+                if self.update_is_running {
+                    ui.spinner();
+                }
+            });
+            if !self.update_status.trim().is_empty() {
+                full_width_wrapped_label(ui, RichText::new(&self.update_status).weak().small());
+            } else {
+                full_width_wrapped_label(
+                    ui,
+                    RichText::new(
+                        "Для публикации положите рядом в GitHub Release: latest.json, leetcode-portable.zip и leetcode-portable.sha256.txt.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
+        });
 
         if workspace.is_none() {
             empty_state(
@@ -13370,6 +13540,7 @@ impl eframe::App for LeetcodeApp {
         self.drain_project_events();
         self.drain_asset_events();
         self.drain_provider_validation_events();
+        self.drain_update_events();
         self.drain_remote_control_events();
         self.process_remote_task_queue();
         self.refresh_terminal_snapshot();
@@ -13392,6 +13563,7 @@ impl eframe::App for LeetcodeApp {
             || self.project_is_running
             || self.asset_is_running
             || self.provider_validation_running
+            || self.update_is_running
             || self.terminal_running
             || self.pending_command_macro_run.is_some()
         {

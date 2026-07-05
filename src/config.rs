@@ -52,6 +52,7 @@ pub struct AppConfig {
     pub remote_allowed_origins: String,
     pub remote_rate_limit_per_minute: u32,
     pub remote_audit_enabled: bool,
+    pub update_manifest_url: String,
     pub context_recent_messages: usize,
     pub context_relevant_messages: usize,
     pub context_recent_runs: usize,
@@ -171,6 +172,8 @@ struct PersistedConfig {
     remote_rate_limit_per_minute: u32,
     #[serde(default = "default_true")]
     remote_audit_enabled: bool,
+    #[serde(default = "default_update_manifest_url")]
+    update_manifest_url: String,
     #[serde(default = "default_context_recent_messages")]
     context_recent_messages: usize,
     #[serde(default = "default_context_relevant_messages")]
@@ -230,6 +233,7 @@ impl Default for PersistedConfig {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -338,6 +342,7 @@ impl AppConfig {
                 persisted.remote_rate_limit_per_minute,
             ),
             remote_audit_enabled: persisted.remote_audit_enabled,
+            update_manifest_url: normalize_update_manifest_url(&persisted.update_manifest_url),
             context_recent_messages: normalize_context_recent_messages(
                 persisted.context_recent_messages,
             ),
@@ -422,6 +427,7 @@ impl AppConfig {
                 self.remote_rate_limit_per_minute,
             ),
             remote_audit_enabled: self.remote_audit_enabled,
+            update_manifest_url: normalize_update_manifest_url(&self.update_manifest_url),
             context_recent_messages: normalize_context_recent_messages(
                 self.context_recent_messages,
             ),
@@ -779,6 +785,10 @@ fn default_remote_rate_limit_per_minute() -> u32 {
     120
 }
 
+fn default_update_manifest_url() -> String {
+    "https://github.com/boozik3412/Leetcode/releases/latest/download/latest.json".to_string()
+}
+
 fn default_context_recent_messages() -> usize {
     14
 }
@@ -875,6 +885,15 @@ fn normalize_remote_rate_limit_per_minute(value: u32) -> u32 {
         0
     } else {
         value.clamp(10, 5_000)
+    }
+}
+
+fn normalize_update_manifest_url(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        default_update_manifest_url()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -1280,6 +1299,7 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1343,6 +1363,7 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1459,6 +1480,18 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_update_manifest_url() {
+        assert_eq!(
+            normalize_update_manifest_url(""),
+            default_update_manifest_url()
+        );
+        assert_eq!(
+            normalize_update_manifest_url(" https://example.com/latest.json "),
+            "https://example.com/latest.json"
+        );
+    }
+
+    #[test]
     fn normalizes_command_palette_state() {
         let macros = normalize_command_palette_macros(vec![
             CommandPaletteMacro {
@@ -1539,6 +1572,7 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1595,6 +1629,7 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1654,6 +1689,7 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
+            update_manifest_url: default_update_manifest_url(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),

@@ -23,6 +23,7 @@ mod run_timeline;
 mod self_modification;
 mod terminal;
 mod tools;
+mod updater;
 mod workspace;
 
 use app::LeetcodeApp;

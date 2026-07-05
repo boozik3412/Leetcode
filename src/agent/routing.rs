@@ -401,6 +401,7 @@ mod tests {
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: 120,
             remote_audit_enabled: true,
+            update_manifest_url: String::new(),
             context_recent_messages: 14,
             context_relevant_messages: 8,
             context_recent_runs: 5,

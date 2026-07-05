@@ -293,9 +293,10 @@ Leetcode развивается из минимального локальног
 - Done: Добавить Windows installer foundation: install/uninstall scripts, установка в user-local app directory, ярлыки Start Menu/Desktop и install metadata.
 - Done: Расширить packaging script так, чтобы он собирал portable package, installer bundle и update manifest `latest.json`.
 - Done: Добавить Release Cockpit/diagnostics видимость installer/update артефактов.
-- Todo: Добавить ручную проверку обновлений по manifest URL.
-- Todo: Добавить безопасное скачивание обновления с SHA256-проверкой.
-- Todo: Добавить product-grade автообновление после стабилизации release канала и подписи.
+- Done: Добавить ручную проверку обновлений по manifest URL.
+- Done: Добавить безопасное скачивание обновления с SHA256-проверкой.
+- Done: Добавить обновление по кнопке: скачать пакет, проверить SHA256, запустить внешний updater, закрыть текущий процесс и перезапустить Leetcode.
+- Todo: Добавить product-grade автообновление после стабилизации release канала, подписи, rollback UI и staged rollout.
 
 ## Этап 27 - Agent ID и простое подключение
 

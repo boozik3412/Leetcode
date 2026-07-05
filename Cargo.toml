@@ -18,6 +18,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "io-util", "time"] }
 uuid = { version = "1", features = ["v4"] }
