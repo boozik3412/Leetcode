@@ -243,6 +243,15 @@ Leetcode развивается из минимального локальног
 - Done: Add compact analytics for run duration, tool usage, failures, and provider/model reliability.
 - Done: Add Markdown export for selected runs and filtered history for external review.
 
+## Этап 24 - Палитра команд и навигация
+
+Цель: дать Leetcode единый быстрый вход ко всем основным действиям, чтобы пользователь мог управлять агентом, проектом, панелями и prompt-шаблонами без поиска по интерфейсу.
+
+- Done: Add a command palette opened by `Ctrl+K`, `Ctrl+Shift+P`, or the top-bar `Команды` button.
+- Done: Add searchable commands grouped by view, navigation, project, agent, Git, panels, prompts, and detected project commands.
+- Done: Wire palette actions to existing safe app logic: layout presets, project open/refresh, chat reset/new chat, Git status/commit, project commands, prompt templates, and stop actions.
+- Todo: Add recent commands, favorites, and user-defined command macros.
+
 ## Постоянная планка качества
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

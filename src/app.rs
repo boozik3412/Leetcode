@@ -112,6 +112,9 @@ pub struct LeetcodeApp {
     input_attachments: Vec<InputAttachment>,
     input_attachment_status: String,
     input_paste_shortcut_down: bool,
+    command_palette_open: bool,
+    command_palette_query: String,
+    command_palette_selected: usize,
     chat: Vec<ChatLine>,
     active_conversation_id: Option<String>,
     conversation_index: ConversationIndex,
@@ -372,6 +375,72 @@ enum LayoutPreset {
     RoadmapFocus,
     ReleaseFocus,
     AssetFocus,
+}
+
+#[derive(Clone, Debug)]
+enum CommandPaletteAction {
+    ApplyLayout(LayoutPreset),
+    SetWorkspaceMode(WorkspaceMode),
+    SetRightPanel(RightPanelView),
+    ToggleFilePanel,
+    OpenProject,
+    RefreshWorkspace,
+    NewChat,
+    ResetConversation,
+    SetPrompt(&'static str),
+    StartProjectCommand(ProjectCommand),
+    GitStatus,
+    GitCommit,
+    StopAgent,
+    StopProjectCommand,
+}
+
+#[derive(Clone, Debug)]
+struct CommandPaletteItem {
+    title: String,
+    category: &'static str,
+    description: String,
+    shortcut: Option<&'static str>,
+    action: CommandPaletteAction,
+    enabled: bool,
+}
+
+impl CommandPaletteItem {
+    fn new(
+        title: impl Into<String>,
+        category: &'static str,
+        description: impl Into<String>,
+        shortcut: Option<&'static str>,
+        action: CommandPaletteAction,
+        enabled: bool,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            category,
+            description: description.into(),
+            shortcut,
+            action,
+            enabled,
+        }
+    }
+
+    fn matches_query(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return true;
+        }
+        let haystack = format!(
+            "{} {} {} {}",
+            self.title,
+            self.category,
+            self.description,
+            self.shortcut.unwrap_or_default()
+        )
+        .to_lowercase();
+        query
+            .split_whitespace()
+            .all(|needle| haystack.contains(needle))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -987,6 +1056,9 @@ impl LeetcodeApp {
             input_attachments: Vec::new(),
             input_attachment_status: String::new(),
             input_paste_shortcut_down: false,
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_selected: 0,
             chat,
             active_conversation_id,
             conversation_index,
@@ -1389,6 +1461,352 @@ impl LeetcodeApp {
         if let Err(err) = self.config.save() {
             self.journal_status = format!("не удалось сохранить вид интерфейса: {err}");
         }
+    }
+
+    fn open_command_palette(&mut self) {
+        self.command_palette_open = true;
+        self.command_palette_query.clear();
+        self.command_palette_selected = 0;
+    }
+
+    fn handle_command_palette_shortcuts(&mut self, ctx: &egui::Context) {
+        let open_pressed = ctx.input(|input| {
+            let command_modifier =
+                input.modifiers.ctrl || input.modifiers.command || input.modifiers.mac_cmd;
+            command_modifier
+                && (input.key_pressed(egui::Key::K)
+                    || (input.key_pressed(egui::Key::P) && input.modifiers.shift))
+        });
+        if open_pressed {
+            self.open_command_palette();
+            return;
+        }
+
+        if !self.command_palette_open {
+            return;
+        }
+
+        let (escape, up, down, enter) = ctx.input(|input| {
+            (
+                input.key_pressed(egui::Key::Escape),
+                input.key_pressed(egui::Key::ArrowUp),
+                input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::Enter),
+            )
+        });
+        if escape {
+            self.command_palette_open = false;
+            return;
+        }
+
+        let count = self.filtered_command_palette_items().len();
+        if count == 0 {
+            self.command_palette_selected = 0;
+            return;
+        }
+        if down {
+            self.command_palette_selected = (self.command_palette_selected + 1).min(count - 1);
+        }
+        if up {
+            self.command_palette_selected = self.command_palette_selected.saturating_sub(1);
+        }
+        if enter {
+            let items = self.filtered_command_palette_items();
+            if let Some(item) = items.get(self.command_palette_selected).cloned() {
+                if item.enabled {
+                    self.execute_command_palette_action(item.action);
+                    self.command_palette_open = false;
+                }
+            }
+        }
+    }
+
+    fn command_palette_items(&self) -> Vec<CommandPaletteItem> {
+        let workspace_ready = self.workspace.is_some();
+        let mut items = vec![
+            CommandPaletteItem::new(
+                "Фокус на чат",
+                "Вид",
+                "Свернуть проводник и открыть контекст агента.",
+                Some("Ctrl+K"),
+                CommandPaletteAction::ApplyLayout(LayoutPreset::ChatFocus),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Код и файлы",
+                "Вид",
+                "Открыть проводник, вкладку кода и проектные инструменты.",
+                None,
+                CommandPaletteAction::ApplyLayout(LayoutPreset::CodeFocus),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Roadmap",
+                "Вид",
+                "Показать живую дорожную карту проекта.",
+                None,
+                CommandPaletteAction::ApplyLayout(LayoutPreset::RoadmapFocus),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Релиз",
+                "Вид",
+                "Открыть release cockpit и preflight.",
+                None,
+                CommandPaletteAction::ApplyLayout(LayoutPreset::ReleaseFocus),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Ассеты",
+                "Вид",
+                "Перейти в студию ассетов.",
+                None,
+                CommandPaletteAction::ApplyLayout(LayoutPreset::AssetFocus),
+                true,
+            ),
+            CommandPaletteItem::new(
+                if self.file_panel_collapsed {
+                    "Показать проводник"
+                } else {
+                    "Свернуть проводник"
+                },
+                "Вид",
+                "Скрыть или вернуть левую область проектов.",
+                None,
+                CommandPaletteAction::ToggleFilePanel,
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Открыть проект",
+                "Проект",
+                "Выбрать рабочую папку проекта.",
+                None,
+                CommandPaletteAction::OpenProject,
+                !self.is_running,
+            ),
+            CommandPaletteItem::new(
+                "Обновить проект",
+                "Проект",
+                "Обновить дерево файлов, Git-сводку и профили команд.",
+                None,
+                CommandPaletteAction::RefreshWorkspace,
+                workspace_ready,
+            ),
+            CommandPaletteItem::new(
+                "Новый чат",
+                "Агент",
+                "Создать новый диалог в текущем проекте.",
+                None,
+                CommandPaletteAction::NewChat,
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Сбросить диалог",
+                "Агент",
+                "Очистить текущий диалог и агентное состояние.",
+                None,
+                CommandPaletteAction::ResetConversation,
+                !self.is_running,
+            ),
+            CommandPaletteItem::new(
+                "Остановить агента",
+                "Агент",
+                "Запросить остановку текущего агентного запуска.",
+                None,
+                CommandPaletteAction::StopAgent,
+                self.is_running,
+            ),
+            CommandPaletteItem::new(
+                "Остановить команду проекта",
+                "Проект",
+                "Остановить текущий shell-запуск проекта.",
+                None,
+                CommandPaletteAction::StopProjectCommand,
+                self.project_is_running,
+            ),
+            CommandPaletteItem::new(
+                "Git status",
+                "Git",
+                "Обновить Git-сводку и открыть журнал.",
+                None,
+                CommandPaletteAction::GitStatus,
+                workspace_ready,
+            ),
+            CommandPaletteItem::new(
+                "Git commit",
+                "Git",
+                "Открыть окно комментария коммита.",
+                None,
+                CommandPaletteAction::GitCommit,
+                workspace_ready,
+            ),
+            CommandPaletteItem::new(
+                "Открыть контекст",
+                "Панели",
+                "Показать, что агент помнит и что попадёт в prompt.",
+                None,
+                CommandPaletteAction::SetRightPanel(RightPanelView::Context),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Открыть контроль",
+                "Панели",
+                "Разрешения, провайдеры, проверки и окружение.",
+                None,
+                CommandPaletteAction::SetRightPanel(RightPanelView::Control),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Открыть логи",
+                "Панели",
+                "Журнал действий агента, git и история запусков.",
+                None,
+                CommandPaletteAction::SetRightPanel(RightPanelView::Logs),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Проверить проект",
+                "Prompt",
+                "Подставить запрос на безопасную проверку проекта.",
+                None,
+                CommandPaletteAction::SetPrompt(
+                    "Проверь текущий проект: определи тип, запусти безопасные проверки и дай краткий статус.",
+                ),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Следующий шаг",
+                "Prompt",
+                "Подставить запрос на анализ roadmap и backlog.",
+                None,
+                CommandPaletteAction::SetPrompt(
+                    "Посмотри roadmap, backlog и состояние проекта. Предложи следующий самый полезный шаг.",
+                ),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Релизный preflight",
+                "Prompt",
+                "Подставить запрос на проверку перед публикацией.",
+                None,
+                CommandPaletteAction::SetPrompt(
+                    "Проведи релизный preflight: проверь версию, готовность, команды сборки, артефакты и риски перед публикацией.",
+                ),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Зафиксировать milestone",
+                "Prompt",
+                "Подставить запрос на запись этапа в Roadmap.",
+                None,
+                CommandPaletteAction::SetPrompt(
+                    "Подготовь краткий milestone для Roadmap: что сделано, какие файлы затронуты, что осталось дальше.",
+                ),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Создать ассет",
+                "Prompt",
+                "Подставить запрос на подготовку ассета.",
+                None,
+                CommandPaletteAction::SetPrompt(
+                    "Помоги подготовить ассет для текущего проекта: уточни назначение, формат и предложи prompt для генерации.",
+                ),
+                true,
+            ),
+        ];
+
+        for mode in WorkspaceMode::ALL {
+            items.push(CommandPaletteItem::new(
+                format!("Перейти: {}", mode.label()),
+                "Навигация",
+                mode.subtitle(),
+                None,
+                CommandPaletteAction::SetWorkspaceMode(mode),
+                true,
+            ));
+        }
+
+        for profile in &self.project_profiles {
+            for command in &profile.commands {
+                items.push(CommandPaletteItem::new(
+                    format!("Запустить: {} · {}", command.label, profile.kind),
+                    "Команды проекта",
+                    format!("{} · {}", command.description, command.command),
+                    None,
+                    CommandPaletteAction::StartProjectCommand(command.clone()),
+                    workspace_ready && !self.project_is_running,
+                ));
+            }
+        }
+
+        items
+    }
+
+    fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
+        self.command_palette_items()
+            .into_iter()
+            .filter(|item| item.matches_query(&self.command_palette_query))
+            .collect()
+    }
+
+    fn execute_command_palette_action(&mut self, action: CommandPaletteAction) {
+        match action {
+            CommandPaletteAction::ApplyLayout(preset) => self.apply_layout_preset(preset),
+            CommandPaletteAction::SetWorkspaceMode(mode) => self.set_workspace_mode(mode),
+            CommandPaletteAction::SetRightPanel(view) => self.open_right_panel_from_command(view),
+            CommandPaletteAction::ToggleFilePanel => {
+                self.set_file_panel_collapsed(!self.file_panel_collapsed);
+            }
+            CommandPaletteAction::OpenProject => self.choose_workspace(),
+            CommandPaletteAction::RefreshWorkspace => {
+                self.refresh_file_rows();
+                self.refresh_git_summary();
+                self.refresh_project_profiles();
+                self.project_status = "проект обновлён из палитры команд".to_string();
+            }
+            CommandPaletteAction::NewChat => {
+                self.create_new_chat();
+                self.active_center_tab = CenterTab::Agent;
+            }
+            CommandPaletteAction::ResetConversation => self.reset_conversation(),
+            CommandPaletteAction::SetPrompt(prompt) => {
+                self.input = prompt.to_string();
+                self.active_center_tab = CenterTab::Agent;
+            }
+            CommandPaletteAction::StartProjectCommand(command) => {
+                self.set_workspace_mode(WorkspaceMode::Project);
+                self.right_panel_view = RightPanelView::Project;
+                self.persist_layout_state();
+                self.start_project_command(command);
+            }
+            CommandPaletteAction::GitStatus => {
+                self.open_right_panel_from_command(RightPanelView::Logs);
+                self.show_git_status_from_ui();
+            }
+            CommandPaletteAction::GitCommit => {
+                self.open_right_panel_from_command(RightPanelView::Logs);
+                self.git_commit_dialog_open = true;
+            }
+            CommandPaletteAction::StopAgent => self.stop_run(),
+            CommandPaletteAction::StopProjectCommand => self.stop_project_command(),
+        }
+    }
+
+    fn open_right_panel_from_command(&mut self, view: RightPanelView) {
+        if !self.workspace_mode.panels().contains(&view) {
+            self.workspace_mode = match view {
+                RightPanelView::Release | RightPanelView::Project => WorkspaceMode::Project,
+                RightPanelView::Assets => WorkspaceMode::Assets,
+                RightPanelView::Overview
+                | RightPanelView::Context
+                | RightPanelView::Roadmap
+                | RightPanelView::Control
+                | RightPanelView::Logs => WorkspaceMode::Chat,
+            };
+        }
+        self.right_panel_view = view;
+        self.persist_layout_state();
     }
 
     fn refresh_file_rows(&mut self) {
@@ -2354,6 +2772,136 @@ impl LeetcodeApp {
         if should_commit {
             self.commit_git_from_ui();
         }
+    }
+
+    fn show_command_palette(&mut self, ctx: &egui::Context) {
+        if !self.command_palette_open {
+            return;
+        }
+
+        let mut open = self.command_palette_open;
+        let mut execute_action: Option<CommandPaletteAction> = None;
+        let items = self.filtered_command_palette_items();
+        if self.command_palette_selected >= items.len() {
+            self.command_palette_selected = items.len().saturating_sub(1);
+        }
+
+        egui::Window::new("Палитра команд")
+            .id(egui::Id::new("command_palette_window"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 72.0))
+            .default_width(680.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(620.0);
+                ui.label(
+                    RichText::new("Быстрый переход, команды проекта и готовые запросы.")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(8.0);
+                let query_response = ui.add_sized(
+                    [safe_available_width(ui, 320.0), 32.0],
+                    TextEdit::singleline(&mut self.command_palette_query)
+                        .id_salt("command_palette_query")
+                        .hint_text("Найти команду: roadmap, test, ассет, вид..."),
+                );
+                query_response.request_focus();
+                if query_response.changed() {
+                    self.command_palette_selected = 0;
+                }
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, "Ctrl+K");
+                    chip(ui, "Ctrl+Shift+P");
+                    ui.label(
+                        RichText::new("Enter — выполнить, Esc — закрыть")
+                            .weak()
+                            .small(),
+                    );
+                });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                if items.is_empty() {
+                    empty_state(
+                        ui,
+                        "Команда не найдена",
+                        "Попробуйте другое слово: проект, roadmap, test, git, ассет, вид.",
+                    );
+                    return;
+                }
+
+                egui::ScrollArea::vertical()
+                    .id_salt("command_palette_results")
+                    .max_height(420.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (index, item) in items.iter().enumerate() {
+                            let selected = index == self.command_palette_selected;
+                            let fill = if selected {
+                                egui::Color32::from_rgb(30, 67, 82)
+                            } else {
+                                panel_bg()
+                            };
+                            let text_color = if item.enabled {
+                                text_color()
+                            } else {
+                                muted_color()
+                            };
+                            let row = egui::Frame::none()
+                                .fill(fill)
+                                .rounding(egui::Rounding::same(6.0))
+                                .inner_margin(egui::Margin::symmetric(10.0, 7.0))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(safe_available_width(ui, 320.0));
+                                    ui.horizontal(|ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                RichText::new(&item.title)
+                                                    .strong()
+                                                    .color(text_color),
+                                            );
+                                            ui.label(
+                                                RichText::new(&item.description).weak().small(),
+                                            );
+                                        });
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                chip(ui, item.category);
+                                                if let Some(shortcut) = item.shortcut {
+                                                    chip(ui, shortcut);
+                                                }
+                                            },
+                                        );
+                                    });
+                                });
+                            let row_response = ui
+                                .interact(
+                                    row.response.rect,
+                                    ui.id().with(("command_palette_row", index)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_text(&item.description);
+                            if row_response.hovered() {
+                                self.command_palette_selected = index;
+                            }
+                            if row_response.clicked() && item.enabled {
+                                execute_action = Some(item.action.clone());
+                            }
+                            ui.add_space(3.0);
+                        }
+                    });
+            });
+
+        if let Some(action) = execute_action {
+            self.execute_command_palette_action(action);
+            open = false;
+        }
+        self.command_palette_open = open;
     }
 
     fn refresh_journal(&mut self) {
@@ -4992,6 +5540,13 @@ impl LeetcodeApp {
                     })
                     .response
                     .on_hover_text("Сохранённые виды рабочего места и проводник.");
+                    if ui
+                        .button("Команды")
+                        .on_hover_text("Открыть палитру команд: Ctrl+K или Ctrl+Shift+P.")
+                        .clicked()
+                    {
+                        self.open_command_palette();
+                    }
                     ui.separator();
 
                     let ai_menu_label = format!(
@@ -11378,6 +11933,7 @@ impl eframe::App for LeetcodeApp {
         self.drain_asset_events();
         self.drain_provider_validation_events();
         self.refresh_terminal_snapshot();
+        self.handle_command_palette_shortcuts(ctx);
         self.show_menu_bar(ctx);
         self.show_top_bar(ctx);
         self.show_file_panel(ctx);
@@ -11388,6 +11944,7 @@ impl eframe::App for LeetcodeApp {
         self.show_input_bar(ctx);
         self.show_chat_panel(ctx);
         self.show_git_commit_dialog(ctx);
+        self.show_command_palette(ctx);
 
         if self.is_running
             || self.project_is_running
@@ -15186,5 +15743,22 @@ SyntaxError: invalid syntax
         assert!(section.contains("## Этап 18"));
         assert!(section.contains("Confirmation gate"));
         assert!(!section.contains("Living roadmap"));
+    }
+
+    #[test]
+    fn command_palette_item_matches_title_category_and_description() {
+        let item = CommandPaletteItem::new(
+            "Релизный preflight",
+            "Prompt",
+            "Проверить версию, сборку и артефакты перед публикацией.",
+            Some("Ctrl+K"),
+            CommandPaletteAction::ApplyLayout(LayoutPreset::ReleaseFocus),
+            true,
+        );
+
+        assert!(item.matches_query("релиз"));
+        assert!(item.matches_query("prompt"));
+        assert!(item.matches_query("артефакты публикацией"));
+        assert!(!item.matches_query("gemini"));
     }
 }
