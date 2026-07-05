@@ -12,15 +12,32 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug)]
 pub enum UpdateEvent {
     Progress(String),
+    Available {
+        current_version: String,
+        latest_version: String,
+    },
     AlreadyCurrent {
         current_version: String,
         latest_version: String,
     },
+    CheckFailed(String),
     Restarting {
         latest_version: String,
         install_dir: String,
     },
     Error(String),
+}
+
+#[derive(Clone, Debug)]
+pub enum UpdateCheck {
+    Available {
+        current_version: String,
+        latest_version: String,
+    },
+    AlreadyCurrent {
+        current_version: String,
+        latest_version: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -53,6 +70,31 @@ pub struct UpdateManifest {
 enum UpdateLocation {
     Http(reqwest::Url),
     File(PathBuf),
+}
+
+pub async fn check_for_update(
+    config: AppConfig,
+    manifest_location: String,
+    current_version: String,
+) -> anyhow::Result<UpdateCheck> {
+    let client = build_http_client(&config)?;
+    let manifest_location = parse_update_location(&manifest_location)?;
+    let manifest_bytes = read_location(&client, &manifest_location).await?;
+    let manifest: UpdateManifest =
+        serde_json::from_slice(&manifest_bytes).context("latest.json не является валидным JSON")?;
+    validate_manifest(&manifest)?;
+
+    if version_is_newer(&manifest.version, &current_version) {
+        Ok(UpdateCheck::Available {
+            current_version,
+            latest_version: manifest.version,
+        })
+    } else {
+        Ok(UpdateCheck::AlreadyCurrent {
+            current_version,
+            latest_version: manifest.version,
+        })
+    }
 }
 
 pub async fn update_and_restart(
@@ -444,5 +486,45 @@ mod tests {
         let path = PathBuf::from(r"C:\repo\target\debug\leetcode.exe");
 
         assert!(validate_install_dir(&path).is_err());
+    }
+
+    #[test]
+    fn check_for_update_reports_available_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("latest.json");
+        let manifest = UpdateManifest {
+            schema_version: 1,
+            app: "Leetcode".to_string(),
+            version: "0.1.1".to_string(),
+            channel: "test".to_string(),
+            platform: "windows-x64".to_string(),
+            package: "leetcode-portable.zip".to_string(),
+            sha256: "a".repeat(64),
+            size_bytes: None,
+            installer: None,
+            uninstaller: None,
+            published_at: None,
+        };
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(check_for_update(
+                AppConfig::load(),
+                manifest_path.display().to_string(),
+                "0.1.0".to_string(),
+            ))
+            .unwrap();
+
+        match result {
+            UpdateCheck::Available {
+                current_version,
+                latest_version,
+            } => {
+                assert_eq!(current_version, "0.1.0");
+                assert_eq!(latest_version, "0.1.1");
+            }
+            UpdateCheck::AlreadyCurrent { .. } => panic!("expected available update"),
+        }
     }
 }

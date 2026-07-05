@@ -77,7 +77,7 @@ use crate::terminal::{
 use crate::tools::desktop::capture_screenshot_file;
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::shell::{run_shell, RunShellArgs};
-use crate::updater::{update_and_restart, UpdateEvent};
+use crate::updater::{check_for_update, update_and_restart, UpdateCheck, UpdateEvent};
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use image::{ColorType, ImageFormat};
@@ -413,6 +413,7 @@ enum CommandPaletteAction {
     ApplyLayout(LayoutPreset),
     SetWorkspaceMode(WorkspaceMode),
     SetRightPanel(RightPanelView),
+    OpenUpdater,
     ToggleFilePanel,
     OpenProject,
     RefreshWorkspace,
@@ -494,6 +495,7 @@ impl CommandPaletteAction {
             CommandPaletteAction::ApplyLayout(preset) => format!("layout:{}", preset.id()),
             CommandPaletteAction::SetWorkspaceMode(mode) => format!("mode:{}", mode.id()),
             CommandPaletteAction::SetRightPanel(view) => format!("panel:{}", view.id()),
+            CommandPaletteAction::OpenUpdater => "updater:open".to_string(),
             CommandPaletteAction::ToggleFilePanel => "view:toggle_file_panel".to_string(),
             CommandPaletteAction::OpenProject => "project:open".to_string(),
             CommandPaletteAction::RefreshWorkspace => "project:refresh".to_string(),
@@ -1180,7 +1182,7 @@ impl LeetcodeApp {
             (None, "Remote API выключен".to_string())
         };
 
-        Self {
+        let mut app = Self {
             config,
             provider_input,
             api_key_input,
@@ -1337,7 +1339,9 @@ impl LeetcodeApp {
             roadmap_status: String::new(),
             active_center_tab: CenterTab::Agent,
             file_tabs: Vec::new(),
-        }
+        };
+        app.start_update_check_on_launch();
+        app
     }
 
     fn choose_workspace(&mut self) {
@@ -1729,6 +1733,14 @@ impl LeetcodeApp {
                 "Открыть release cockpit и preflight.",
                 None,
                 CommandPaletteAction::ApplyLayout(LayoutPreset::ReleaseFocus),
+                true,
+            ),
+            CommandPaletteItem::new(
+                "Обновление приложения",
+                "Обновление",
+                "Открыть автообновление: latest.json, проверка версии, SHA256 и перезапуск.",
+                None,
+                CommandPaletteAction::OpenUpdater,
                 true,
             ),
             CommandPaletteItem::new(
@@ -2392,6 +2404,7 @@ impl LeetcodeApp {
             CommandPaletteAction::ApplyLayout(preset) => self.apply_layout_preset(preset),
             CommandPaletteAction::SetWorkspaceMode(mode) => self.set_workspace_mode(mode),
             CommandPaletteAction::SetRightPanel(view) => self.open_right_panel_from_command(view),
+            CommandPaletteAction::OpenUpdater => self.open_update_panel(),
             CommandPaletteAction::ToggleFilePanel => {
                 self.set_file_panel_collapsed(!self.file_panel_collapsed);
             }
@@ -2447,6 +2460,14 @@ impl LeetcodeApp {
         }
         self.right_panel_view = view;
         self.persist_layout_state();
+    }
+
+    fn open_update_panel(&mut self) {
+        self.open_right_panel_from_command(RightPanelView::Release);
+        if self.update_status.trim().is_empty() {
+            self.update_status =
+                "Проверьте Manifest URL и нажмите «Обновить и перезапустить».".to_string();
+        }
     }
 
     fn refresh_file_rows(&mut self) {
@@ -5954,6 +5975,29 @@ impl LeetcodeApp {
                         "Уже установлена актуальная версия: {current_version} (latest: {latest_version})"
                     );
                 }
+                UpdateEvent::Available {
+                    current_version,
+                    latest_version,
+                } => {
+                    self.update_is_running = false;
+                    self.update_events_rx = None;
+                    self.update_status = format!(
+                        "Доступно обновление: {current_version} -> {latest_version}. Нажмите «Обновить и перезапустить»."
+                    );
+                    self.tool_log.push(ToolLogLine {
+                        title: "updater available".to_string(),
+                        content: self.update_status.clone(),
+                    });
+                }
+                UpdateEvent::CheckFailed(err) => {
+                    self.update_is_running = false;
+                    self.update_events_rx = None;
+                    self.update_status = format!("Автопроверка обновлений не удалась: {err}");
+                    self.tool_log.push(ToolLogLine {
+                        title: "updater check".to_string(),
+                        content: self.update_status.clone(),
+                    });
+                }
                 UpdateEvent::Restarting {
                     latest_version,
                     install_dir,
@@ -6330,6 +6374,10 @@ impl LeetcodeApp {
                             self.right_panel_view = RightPanelView::Overview;
                             ui.close_menu();
                         }
+                        if ui.button("Обновление приложения...").clicked() {
+                            self.open_update_panel();
+                            ui.close_menu();
+                        }
                         if ui.button("Проект").clicked() {
                             self.right_panel_view = RightPanelView::Project;
                             ui.close_menu();
@@ -6439,6 +6487,11 @@ impl LeetcodeApp {
                         ui.set_min_width(320.0);
                         ui.label(RichText::new("Leetcode").strong());
                         ui.label("Локальный AI-агент для кода, ассетов и рабочего стола.");
+                        ui.separator();
+                        if ui.button("Проверить обновления...").clicked() {
+                            self.open_update_panel();
+                            ui.close_menu();
+                        }
                         ui.separator();
                         ui.label(format!("Версия {}", env!("CARGO_PKG_VERSION")));
                     });
@@ -10583,6 +10636,55 @@ impl LeetcodeApp {
         };
     }
 
+    fn start_update_check_on_launch(&mut self) {
+        if self.update_is_running || self.update_events_rx.is_some() {
+            return;
+        }
+        let manifest_url = self.update_manifest_input.trim().to_string();
+        if manifest_url.is_empty() {
+            return;
+        }
+
+        let config = self.config.clone();
+        let current_version = env!("CARGO_PKG_VERSION").to_string();
+        let (tx, rx) = mpsc::channel();
+        self.update_events_rx = Some(rx);
+        self.update_is_running = true;
+        self.update_status = "Проверяю обновления при запуске...".to_string();
+
+        thread::spawn(move || {
+            let _ = tx.send(UpdateEvent::Progress(
+                "Проверяю обновления при запуске...".to_string(),
+            ));
+            let result = tokio::runtime::Runtime::new()
+                .expect("не удалось запустить tokio runtime")
+                .block_on(check_for_update(config, manifest_url, current_version));
+            match result {
+                Ok(UpdateCheck::Available {
+                    current_version,
+                    latest_version,
+                }) => {
+                    let _ = tx.send(UpdateEvent::Available {
+                        current_version,
+                        latest_version,
+                    });
+                }
+                Ok(UpdateCheck::AlreadyCurrent {
+                    current_version,
+                    latest_version,
+                }) => {
+                    let _ = tx.send(UpdateEvent::AlreadyCurrent {
+                        current_version,
+                        latest_version,
+                    });
+                }
+                Err(err) => {
+                    let _ = tx.send(UpdateEvent::CheckFailed(err.to_string()));
+                }
+            }
+        });
+    }
+
     fn start_update_and_restart(&mut self) {
         if self.update_is_running {
             return;
@@ -11139,6 +11241,50 @@ impl LeetcodeApp {
         flat_section(ui, |ui| {
             panel_header(
                 ui,
+                "Обновление приложения",
+                "Проверка release-канала и запуск автообновления.",
+            );
+            status_line(ui, "Текущая версия", env!("CARGO_PKG_VERSION"));
+            status_line(
+                ui,
+                "Канал",
+                &compact_inline(&self.config.update_manifest_url, 44),
+            );
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("Открыть обновление")
+                    .on_hover_text("Открывает раздел «Релиз» с блоком «Автообновление».")
+                    .clicked()
+                {
+                    self.open_update_panel();
+                }
+                let update_button = if self.update_is_running {
+                    egui::Button::new("Обновление...")
+                } else {
+                    egui::Button::new("Обновить и перезапустить")
+                };
+                if ui
+                    .add_enabled(!self.update_is_running, update_button)
+                    .on_hover_text(
+                        "Скачивает latest.json, сравнивает версию, проверяет SHA256 и запускает внешний updater.",
+                    )
+                    .clicked()
+                {
+                    self.start_update_and_restart();
+                }
+                if self.update_is_running {
+                    ui.spinner();
+                }
+            });
+            if !self.update_status.trim().is_empty() {
+                full_width_wrapped_label(ui, RichText::new(&self.update_status).weak().small());
+            }
+        });
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
                 "Быстрые переходы",
                 "Открыть нужную группу инструментов.",
             );
@@ -11153,7 +11299,7 @@ impl LeetcodeApp {
                     RightPanelView::Logs,
                 ] {
                     if ui.link(view.label()).clicked() {
-                        self.right_panel_view = view;
+                        self.open_right_panel_from_command(view);
                     }
                 }
             });
@@ -15574,6 +15720,7 @@ fn remote_command_action_allowed(action: &CommandPaletteAction) -> bool {
         CommandPaletteAction::ApplyLayout(_)
             | CommandPaletteAction::SetWorkspaceMode(_)
             | CommandPaletteAction::SetRightPanel(_)
+            | CommandPaletteAction::OpenUpdater
             | CommandPaletteAction::ToggleFilePanel
             | CommandPaletteAction::RefreshWorkspace
             | CommandPaletteAction::NewChat

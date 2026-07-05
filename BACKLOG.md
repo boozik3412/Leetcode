@@ -294,6 +294,7 @@ Leetcode развивается из минимального локальног
 - Done: Расширить packaging script так, чтобы он собирал portable package, installer bundle и update manifest `latest.json`.
 - Done: Добавить Release Cockpit/diagnostics видимость installer/update артефактов.
 - Done: Добавить ручную проверку обновлений по manifest URL.
+- Done: Добавить автопроверку обновлений при запуске: Leetcode читает `latest.json`, сравнивает версию и показывает статус без автоматической установки.
 - Done: Добавить безопасное скачивание обновления с SHA256-проверкой.
 - Done: Добавить обновление по кнопке: скачать пакет, проверить SHA256, запустить внешний updater, закрыть текущий процесс и перезапустить Leetcode.
 - Todo: Добавить product-grade автообновление после стабилизации release канала, подписи, rollback UI и staged rollout.

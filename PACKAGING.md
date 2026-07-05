@@ -89,6 +89,7 @@ Current behavior:
 
 - Manual distribution can publish `leetcode-portable.zip`, `leetcode-portable.sha256.txt`, and `latest.json` together.
 - The in-app Release Cockpit can download `latest.json`, compare versions, download the zip, verify SHA256, stage the update, launch an external updater process, close Leetcode, copy the new files into the install folder, and restart Leetcode.
+- Leetcode checks the configured `latest.json` once on startup and reports whether a newer version is available. The startup check never installs anything by itself.
 - The default update channel is `https://github.com/boozik3412/Leetcode/releases/latest/download/latest.json`. Publish `latest.json`, `leetcode-portable.zip`, and `leetcode-portable.sha256.txt` as GitHub Release assets to use the default channel.
 - Dev builds running from `target/debug` or `target/release` intentionally refuse self-update. Test updater behavior from an installed build under `%LOCALAPPDATA%\Programs\Leetcode`.
 - Code signing, rollback UI, staged channels, and silent background updates are still planned work.

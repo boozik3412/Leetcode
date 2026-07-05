@@ -208,7 +208,7 @@ powershell -ExecutionPolicy Bypass -File .\install-leetcode.ps1
 
 `latest.json` is the update-manifest foundation for the future in-app updater and thin-client distribution flow: version, platform, archive filename, SHA256, size, and publish timestamp. Pass `-Sign` with `LEETCODE_SIGN_CERT_THUMBPRINT` when a Windows code-signing certificate is available.
 
-Installed builds can update from inside the app: open `Проект -> Релиз`, set the `Manifest URL` if needed, then click `Обновить и перезапустить`. Leetcode downloads `latest.json`, compares versions, downloads the zip, verifies SHA256, starts an external updater, exits, replaces the installed files, and launches the new version. Dev builds from `target/debug` or `target/release` intentionally refuse self-update.
+Installed builds check `latest.json` automatically on startup and show the result in `Сводка -> Обновление приложения`. Updates are still applied only after an explicit click: open `Инструменты -> Обновление приложения...` or `Проект -> Релиз`, set the `Manifest URL` if needed, then click `Обновить и перезапустить`. Leetcode downloads `latest.json`, compares versions, downloads the zip, verifies SHA256, starts an external updater, exits, replaces the installed files, and launches the new version. Dev builds from `target/debug` or `target/release` intentionally refuse self-update.
 
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 
