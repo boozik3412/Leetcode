@@ -17,6 +17,7 @@ mod memory;
 mod orchestration;
 mod project;
 mod provider_health;
+mod remote;
 mod roadmap;
 mod run_timeline;
 mod self_modification;

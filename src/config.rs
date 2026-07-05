@@ -40,6 +40,10 @@ pub struct AppConfig {
     pub proxy_username: String,
     pub proxy_password: String,
     pub proxy_no_proxy: String,
+    pub remote_enabled: bool,
+    pub remote_bind_host: String,
+    pub remote_port: u16,
+    pub remote_access_token: String,
     pub context_recent_messages: usize,
     pub context_relevant_messages: usize,
     pub context_recent_runs: usize,
@@ -135,6 +139,14 @@ struct PersistedConfig {
     proxy_password: String,
     #[serde(default)]
     proxy_no_proxy: String,
+    #[serde(default)]
+    remote_enabled: bool,
+    #[serde(default = "default_remote_bind_host")]
+    remote_bind_host: String,
+    #[serde(default = "default_remote_port")]
+    remote_port: u16,
+    #[serde(default)]
+    remote_access_token: String,
     #[serde(default = "default_context_recent_messages")]
     context_recent_messages: usize,
     #[serde(default = "default_context_relevant_messages")]
@@ -182,6 +194,10 @@ impl Default for PersistedConfig {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            remote_enabled: false,
+            remote_bind_host: default_remote_bind_host(),
+            remote_port: default_remote_port(),
+            remote_access_token: String::new(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -274,6 +290,10 @@ impl AppConfig {
             proxy_username,
             proxy_password,
             proxy_no_proxy: persisted.proxy_no_proxy.trim().to_string(),
+            remote_enabled: persisted.remote_enabled,
+            remote_bind_host: normalize_remote_bind_host(&persisted.remote_bind_host),
+            remote_port: normalize_remote_port(persisted.remote_port),
+            remote_access_token: persisted.remote_access_token.trim().to_string(),
             context_recent_messages: normalize_context_recent_messages(
                 persisted.context_recent_messages,
             ),
@@ -344,6 +364,10 @@ impl AppConfig {
             proxy_username: self.proxy_username.trim().to_string(),
             proxy_password: self.proxy_password.clone(),
             proxy_no_proxy: self.proxy_no_proxy.trim().to_string(),
+            remote_enabled: self.remote_enabled,
+            remote_bind_host: normalize_remote_bind_host(&self.remote_bind_host),
+            remote_port: normalize_remote_port(self.remote_port),
+            remote_access_token: self.remote_access_token.trim().to_string(),
             context_recent_messages: normalize_context_recent_messages(
                 self.context_recent_messages,
             ),
@@ -681,6 +705,14 @@ fn default_proxy_scheme() -> String {
     "http".to_string()
 }
 
+fn default_remote_bind_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_remote_port() -> u16 {
+    17890
+}
+
 fn default_context_recent_messages() -> usize {
     14
 }
@@ -728,6 +760,23 @@ fn normalize_task_route(task_route: &str) -> String {
         ROUTE_AUTO.to_string()
     } else {
         task_route
+    }
+}
+
+fn normalize_remote_bind_host(host: &str) -> String {
+    let host = host.trim();
+    if host.is_empty() {
+        default_remote_bind_host()
+    } else {
+        host.to_string()
+    }
+}
+
+fn normalize_remote_port(port: u16) -> u16 {
+    if port == 0 {
+        default_remote_port()
+    } else {
+        port
     }
 }
 
@@ -1121,6 +1170,10 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            remote_enabled: false,
+            remote_bind_host: default_remote_bind_host(),
+            remote_port: default_remote_port(),
+            remote_access_token: String::new(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1172,6 +1225,10 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            remote_enabled: false,
+            remote_bind_host: default_remote_bind_host(),
+            remote_port: default_remote_port(),
+            remote_access_token: String::new(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1260,6 +1317,14 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_remote_control_defaults() {
+        assert_eq!(normalize_remote_bind_host(""), "127.0.0.1");
+        assert_eq!(normalize_remote_bind_host(" 0.0.0.0 "), "0.0.0.0");
+        assert_eq!(normalize_remote_port(0), 17890);
+        assert_eq!(normalize_remote_port(18080), 18080);
+    }
+
+    #[test]
     fn normalizes_command_palette_state() {
         let macros = normalize_command_palette_macros(vec![
             CommandPaletteMacro {
@@ -1328,6 +1393,10 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            remote_enabled: false,
+            remote_bind_host: default_remote_bind_host(),
+            remote_port: default_remote_port(),
+            remote_access_token: String::new(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1372,6 +1441,10 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            remote_enabled: false,
+            remote_bind_host: default_remote_bind_host(),
+            remote_port: default_remote_port(),
+            remote_access_token: String::new(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),
@@ -1419,6 +1492,10 @@ mod tests {
             proxy_username: String::new(),
             proxy_password: String::new(),
             proxy_no_proxy: String::new(),
+            remote_enabled: false,
+            remote_bind_host: default_remote_bind_host(),
+            remote_port: default_remote_port(),
+            remote_access_token: String::new(),
             context_recent_messages: default_context_recent_messages(),
             context_relevant_messages: default_context_relevant_messages(),
             context_recent_runs: default_context_recent_runs(),

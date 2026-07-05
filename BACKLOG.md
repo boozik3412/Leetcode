@@ -255,6 +255,30 @@ Leetcode развивается из минимального локальног
 - Done: Add user-defined command macros created from favorites and executable from the same palette.
 - Done: Add macro editing, step reordering/removal, JSON import/export, and optional per-step confirmation for advanced workflows.
 
+## Этап 25A - Remote Control Foundation
+
+Цель: заложить безопасный приватный фундамент удалённого доступа к уже запущенному локальному агенту без AnyDesk/VNC.
+
+- Done: Составить двухэтапный план remote control в `docs/remote-control-plan.md`.
+- Done: Добавить настройки Remote API в локальный конфиг: включение, host, port, access token.
+- Done: Добавить встроенный локальный Remote API server, выключенный по умолчанию.
+- Done: Добавить token-protected `GET /api/state` и `GET /api/events` для live-состояния агента.
+- Done: Добавить `GET /health`, `GET /` и `GET /manifest.webmanifest` для проверки и мобильной PWA-панели.
+- Done: Добавить UI в панель контроля: запуск/остановка, перезапуск, новый token, URL и статус.
+- Todo: Добавить ручную инструкцию для Tailscale Serve / Cloudflare Tunnel после тестирования на реальной машине.
+
+## Этап 25B - Product Remote Access
+
+Цель: превратить foundation в полноценный сценарий удалённого управления с тонким клиентом, iPhone-доступом и подключением по Agent ID.
+
+- Todo: Спроектировать Leetcode Relay: исходящее WSS-соединение от host app, Agent ID, device pairing и revoke devices.
+- Todo: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
+- Todo: Добавить remote actions поверх permission system: отправить задачу, approve/deny, читать tool log, смотреть run history.
+- Todo: Добавить read-only просмотр файлов и безопасные макросы/палитру команд по ролям.
+- Todo: Усилить безопасность: short-lived tokens, Origin validation, rate limiting, audit log, TLS/WSS, роли доступа.
+- Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
+- Todo: Сделать лёгкий desktop thin client на WebView/Tauri после стабилизации API.
+
 ## Постоянная планка качества
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

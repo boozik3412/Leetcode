@@ -54,6 +54,11 @@ use crate::provider_health::{
     load_provider_validation_history, provider_health_report, provider_validation_plan,
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
+use crate::remote::{
+    generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
+    update_remote_shared_state, RemoteControlServer, RemoteControlServerConfig,
+    RemoteControlSharedState, RemoteControlSnapshot,
+};
 use crate::roadmap::{
     load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
     RoadmapStatus, UpdateRoadmapItemArgs,
@@ -184,6 +189,12 @@ pub struct LeetcodeApp {
     provider_validation_rx: Option<Receiver<ProviderValidationRun>>,
     provider_validation_running: bool,
     provider_validation_results: Vec<ProviderValidationRun>,
+    remote_server: Option<RemoteControlServer>,
+    remote_shared_state: RemoteControlSharedState,
+    remote_status: String,
+    remote_host_input: String,
+    remote_port_input: String,
+    remote_token_input: String,
     orchestration_status: String,
     asset_provider_input: String,
     asset_kind_input: String,
@@ -1119,6 +1130,32 @@ impl LeetcodeApp {
             right_panel_view = workspace_mode.default_panel();
         }
         let file_panel_collapsed = config.layout_file_panel_collapsed;
+        if config.remote_access_token.trim().is_empty() {
+            config.remote_access_token = generate_remote_access_token();
+            let _ = config.save();
+        }
+        let remote_shared_state = new_remote_shared_state();
+        let remote_host_input = config.remote_bind_host.clone();
+        let remote_port_input = config.remote_port.to_string();
+        let remote_token_input = config.remote_access_token.clone();
+        let (remote_server, remote_status) = if config.remote_enabled {
+            match start_remote_control_server(
+                RemoteControlServerConfig {
+                    host: config.remote_bind_host.clone(),
+                    port: config.remote_port,
+                    token: config.remote_access_token.clone(),
+                },
+                Arc::clone(&remote_shared_state),
+            ) {
+                Ok(server) => {
+                    let status = format!("Remote API слушает http://{}", server.bind_addr());
+                    (Some(server), status)
+                }
+                Err(err) => (None, format!("Remote API не запущен: {err}")),
+            }
+        } else {
+            (None, "Remote API выключен".to_string())
+        };
 
         Self {
             config,
@@ -1223,6 +1260,12 @@ impl LeetcodeApp {
             provider_validation_rx: None,
             provider_validation_running: false,
             provider_validation_results,
+            remote_server,
+            remote_shared_state,
+            remote_status,
+            remote_host_input,
+            remote_port_input,
+            remote_token_input,
             orchestration_status: String::new(),
             asset_provider_input,
             asset_kind_input: "image".to_string(),
@@ -9504,6 +9547,207 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_remote_control_panel(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Удалённое управление", |ui| {
+            panel_header(
+                ui,
+                "Remote Control",
+                "Локальный API и мобильная PWA-панель для доступа к запущенному агенту.",
+            );
+
+            let enabled_changed = ui
+                .checkbox(&mut self.config.remote_enabled, "Включить Remote API")
+                .on_hover_text(
+                    "По умолчанию сервер выключен. Включайте его только для приватной сети, VPN или tunnel с доступом по token.",
+                )
+                .changed();
+            if enabled_changed {
+                self.save_remote_control_settings();
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Host");
+                ui.add(TextEdit::singleline(&mut self.remote_host_input).desired_width(140.0))
+                    .on_hover_text("127.0.0.1 безопасен для локальной машины. 0.0.0.0 открывает порт для сети и требует VPN/Zero Trust.");
+                ui.label("Port");
+                ui.add(TextEdit::singleline(&mut self.remote_port_input).desired_width(88.0))
+                    .on_hover_text("Локальный порт Remote API. Рекомендуемый порт по умолчанию: 17890.");
+            });
+
+            ui.label(RichText::new("Access token").weak());
+            ui.add(
+                TextEdit::singleline(&mut self.remote_token_input)
+                    .password(true)
+                    .desired_width(f32::INFINITY),
+            )
+            .on_hover_text("Этот token нужен для /api/state и /api/events. Не отправляйте его в чат и не храните в публичных файлах.");
+
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Сохранить и перезапустить").clicked() {
+                    self.save_remote_control_settings();
+                }
+                if ui.button("Новый token").clicked() {
+                    self.regenerate_remote_control_token();
+                }
+                if ui.button("Остановить").clicked() {
+                    self.config.remote_enabled = false;
+                    self.save_remote_control_settings();
+                }
+            });
+
+            ui.separator();
+            status_line(ui, "Статус", &self.remote_status);
+            status_line(ui, "Web/PWA", &self.remote_control_url());
+            status_line(ui, "Health", &format!("{}/health", self.remote_control_url()));
+            status_line(
+                ui,
+                "State API",
+                &format!("{}/api/state", self.remote_control_url()),
+            );
+            ui.label(
+                RichText::new(
+                    "Stage 25A: удалённая панель пока читает состояние. Отправка задач, approvals и файловые действия пойдут в Stage 25B поверх этого же API.",
+                )
+                .weak()
+                .small(),
+            );
+        });
+    }
+
+    fn remote_control_url(&self) -> String {
+        format!(
+            "http://{}:{}",
+            self.config.remote_bind_host.trim(),
+            self.config.remote_port
+        )
+    }
+
+    fn save_remote_control_settings(&mut self) {
+        let host = self.remote_host_input.trim();
+        self.config.remote_bind_host = if host.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            host.to_string()
+        };
+
+        let Ok(port) = self.remote_port_input.trim().parse::<u16>() else {
+            self.remote_status = "Порт должен быть числом от 1 до 65535".to_string();
+            return;
+        };
+        self.config.remote_port = if port == 0 { 17890 } else { port };
+        self.remote_port_input = self.config.remote_port.to_string();
+
+        if self.remote_token_input.trim().is_empty() {
+            self.remote_token_input = generate_remote_access_token();
+        }
+        self.config.remote_access_token = self.remote_token_input.trim().to_string();
+
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Не удалось сохранить настройки remote: {err}");
+            return;
+        }
+        self.restart_remote_control_server();
+    }
+
+    fn regenerate_remote_control_token(&mut self) {
+        self.remote_token_input = generate_remote_access_token();
+        self.config.remote_access_token = self.remote_token_input.clone();
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Не удалось сохранить новый token: {err}");
+            return;
+        }
+        self.restart_remote_control_server();
+    }
+
+    fn restart_remote_control_server(&mut self) {
+        self.remote_server = None;
+        if !self.config.remote_enabled {
+            self.remote_status = "Remote API выключен".to_string();
+            return;
+        }
+
+        match start_remote_control_server(
+            RemoteControlServerConfig {
+                host: self.config.remote_bind_host.clone(),
+                port: self.config.remote_port,
+                token: self.config.remote_access_token.clone(),
+            },
+            Arc::clone(&self.remote_shared_state),
+        ) {
+            Ok(server) => {
+                self.remote_status = format!("Remote API слушает http://{}", server.bind_addr());
+                self.remote_server = Some(server);
+            }
+            Err(err) => {
+                self.remote_status = format!("Remote API не запущен: {err}");
+            }
+        }
+    }
+
+    fn refresh_remote_control_snapshot(&mut self) {
+        let workspace_path = self
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.root().display().to_string());
+        let project_name = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.root().file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("нет проекта")
+            .to_string();
+        let agent_status = if self.pending_approval.is_some() || self.pending_run_gate.is_some() {
+            "ждёт подтверждения"
+        } else if self.is_running {
+            "работает"
+        } else {
+            "ожидает"
+        }
+        .to_string();
+        let project_status = if !self.project_status.trim().is_empty() {
+            self.project_status.clone()
+        } else if self.project_is_running {
+            "выполняется".to_string()
+        } else {
+            "ожидает".to_string()
+        };
+        let asset_status = if !self.asset_status.trim().is_empty() {
+            self.asset_status.clone()
+        } else if self.asset_is_running {
+            "генерируется".to_string()
+        } else {
+            "ожидает".to_string()
+        };
+
+        update_remote_shared_state(
+            &self.remote_shared_state,
+            RemoteControlSnapshot {
+                app: "Leetcode".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                remote_enabled: self.config.remote_enabled,
+                project_name,
+                workspace_path,
+                provider: provider_name(self.config.provider_id()).to_string(),
+                model: self.config.model.clone(),
+                workspace_mode: self.workspace_mode.id().to_string(),
+                right_panel: self.right_panel_view.id().to_string(),
+                is_running: self.is_running,
+                project_is_running: self.project_is_running,
+                asset_is_running: self.asset_is_running,
+                terminal_running: self.terminal_running,
+                pending_approval: self.pending_approval.is_some(),
+                pending_run_gate: self.pending_run_gate.is_some(),
+                chat_messages: self.chat.len(),
+                tool_log_entries: self.tool_log.len(),
+                git_changed_files: self.git_changed_files.len(),
+                agent_status,
+                project_status,
+                asset_status,
+                updated_at: unix_timestamp(),
+            },
+        );
+    }
+
     fn show_tool_panel(&mut self, ctx: &egui::Context) {
         let allowed_panels = self.workspace_mode.panels();
         if !allowed_panels.contains(&self.right_panel_view) {
@@ -9599,6 +9843,7 @@ impl LeetcodeApp {
                         }
                         RightPanelView::Control => {
                             flat_section(ui, |ui| self.show_governance_panel(ui));
+                            flat_section(ui, |ui| self.show_remote_control_panel(ui));
                             flat_section(ui, |ui| self.show_memory_panel(ui));
                             flat_section(ui, |ui| self.show_provider_health_panel(ui));
                             flat_section(ui, |ui| self.show_evals_panel(ui));
@@ -12755,6 +13000,7 @@ impl eframe::App for LeetcodeApp {
         self.drain_asset_events();
         self.drain_provider_validation_events();
         self.refresh_terminal_snapshot();
+        self.refresh_remote_control_snapshot();
         self.handle_command_palette_shortcuts(ctx);
         self.show_menu_bar(ctx);
         self.show_top_bar(ctx);
