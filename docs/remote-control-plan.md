@@ -58,7 +58,9 @@
   - Done local-first: смотреть run history через `GET /api/history`;
   - Done local-first: смотреть подробный run timeline через `GET /api/history/run?id=...`;
   - Done local-first: читать UTF-8 файлы текущей workspace в безопасном read-only режиме через `GET /api/files/content?path=...`;
-  - запускать макросы/палитру команд по разрешениям.
+  - Done local-first: смотреть safe-команды палитры через `GET /api/commands`;
+  - Done local-first: запускать safe-команды палитры через `POST /api/commands`;
+  - later product: запускать макросы/проектные команды по отдельным ролям, risk-классам и подтверждениям.
 - Security hardening:
   - short-lived access tokens;
   - passkeys/WebAuthn;

@@ -24,6 +24,7 @@ pub type RemoteControlSharedState = Arc<Mutex<RemoteControlSnapshot>>;
 #[derive(Clone, Debug)]
 pub enum RemoteControlAction {
     SubmitTask(RemoteSubmittedTask),
+    RunCommand(RemoteCommandRequest),
     AnswerRunGate { approved: bool },
     AnswerApproval { approved: bool },
     Audit(RemoteAuditEvent),
@@ -100,6 +101,22 @@ pub struct RemoteSubmittedTask {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteCommandRequest {
+    pub id: String,
+    pub source: String,
+    pub created_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteCommandSummary {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemoteToolLogEntry {
     pub title: String,
     pub content: String,
@@ -144,6 +161,7 @@ pub struct RemoteControlSnapshot {
     pub remote_last_action: String,
     pub pending_run_gate_summary: Option<String>,
     pub pending_approval_summary: Option<String>,
+    pub remote_commands: Vec<RemoteCommandSummary>,
     pub tool_log_tail: Vec<RemoteToolLogEntry>,
     pub agent_history_tail: Vec<RemoteRunSummary>,
     #[serde(skip_serializing, default)]
@@ -180,6 +198,7 @@ impl Default for RemoteControlSnapshot {
             remote_last_action: String::new(),
             pending_run_gate_summary: None,
             pending_approval_summary: None,
+            remote_commands: Vec::new(),
             tool_log_tail: Vec::new(),
             agent_history_tail: Vec::new(),
             agent_history_details: Vec::new(),
@@ -514,6 +533,27 @@ fn handle_client(
             let snapshot = snapshot_or_default(&shared_state);
             write_file_content_response(&mut stream, &snapshot, query);
         }
+        ("GET", "/api/commands") => {
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::View,
+                actions.as_ref(),
+                path,
+            ) {
+                return;
+            }
+            let snapshot = snapshot_or_default(&shared_state);
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({"ok": true, "commands": snapshot.remote_commands}),
+            );
+        }
         ("POST", "/api/tasks") => {
             if !authorize_or_write(
                 &mut stream,
@@ -529,6 +569,22 @@ fn handle_client(
                 return;
             }
             handle_submit_task(&mut stream, &body, actions.as_ref());
+        }
+        ("POST", "/api/commands") => {
+            if !authorize_or_write(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                RemoteAccessRole::Chat,
+                actions.as_ref(),
+                path,
+            ) {
+                return;
+            }
+            handle_run_command(&mut stream, &body, actions.as_ref(), policy.audit);
         }
         ("POST", "/api/run-gate") => {
             if !authorize_or_write(
@@ -735,6 +791,81 @@ fn handle_submit_task(
     };
     let id = task.id.clone();
     if actions.send(RemoteControlAction::SubmitTask(task)).is_err() {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "remote action queue is closed"}),
+        );
+        return;
+    }
+    write_json_response(
+        stream,
+        202,
+        &json!({"ok": true, "id": id, "status": "queued"}),
+    );
+}
+
+fn handle_run_command(
+    stream: &mut TcpStream,
+    body: &[u8],
+    actions: Option<&Sender<RemoteControlAction>>,
+    _audit_enabled: bool,
+) {
+    let Some(actions) = actions else {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "remote action queue is unavailable"}),
+        );
+        return;
+    };
+    let payload = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(payload) => payload,
+        Err(_) => {
+            write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
+            return;
+        }
+    };
+    let Some(command_id) = payload
+        .get("id")
+        .or_else(|| payload.get("command_id"))
+        .and_then(|value| value.as_str())
+    else {
+        write_json_response(
+            stream,
+            400,
+            &json!({"ok": false, "error": "command id is required"}),
+        );
+        return;
+    };
+    let command_id = command_id.trim();
+    if command_id.is_empty() {
+        write_json_response(
+            stream,
+            400,
+            &json!({"ok": false, "error": "command id is empty"}),
+        );
+        return;
+    }
+    let source = payload
+        .get("source")
+        .and_then(|value| value.as_str())
+        .unwrap_or("remote-api")
+        .trim();
+    let request = RemoteCommandRequest {
+        id: compact_remote_text(command_id, 200),
+        source: if source.is_empty() {
+            "remote-api".to_string()
+        } else {
+            source.chars().take(80).collect()
+        },
+        created_at: unix_timestamp(),
+    };
+    let id = request.id.clone();
+    if actions
+        .send(RemoteControlAction::RunCommand(request))
+        .is_err()
+    {
         write_json_response(
             stream,
             503,
@@ -1125,7 +1256,7 @@ pre { white-space:pre-wrap; overflow:auto; background:#070b10; border:1px solid 
 <main>
   <section>
     <h1>Leetcode Remote</h1>
-    <p>Лёгкая панель состояния локального агента. Действия и approvals будут добавлены следующим этапом.</p>
+    <p>Лёгкая панель состояния локального агента: задачи, approvals, наблюдение и безопасные команды.</p>
   </section>
   <section class="panel">
     <h2>Задача агенту</h2>
@@ -1170,11 +1301,12 @@ pre { white-space:pre-wrap; overflow:auto; background:#070b10; border:1px solid 
   </section>
   <section class="panel">
     <h2>Наблюдение</h2>
-    <p>Read-only обзор того, что делает агент: логи, история запусков и файлы текущего проекта.</p>
+    <p>Read-only обзор и безопасные remote-команды для текущего проекта.</p>
     <div class="row">
       <button onclick="loadToolLog()">Логи</button>
       <button onclick="loadHistory()">История</button>
       <button onclick="loadFiles()">Файлы</button>
+      <button onclick="loadCommands()">Команды</button>
     </div>
     <div id="observerList" class="list"></div>
     <pre id="observerView" class="viewer">Выберите раздел.</pre>
@@ -1279,6 +1411,29 @@ async function openFile(path) {
     const data = await getJson('/api/files/content?path=' + encodeURIComponent(path));
     document.getElementById('observerView').textContent = `${data.path} · ${data.bytes} bytes\n\n${data.content}`;
   } catch (error) { document.getElementById('observerView').textContent = 'Ошибка: ' + error.message; }
+}
+async function loadCommands() {
+  try {
+    const data = await getJson('/api/commands');
+    const commands = data.commands || [];
+    const items = commands.map((command) => {
+      const button = document.createElement('button');
+      button.textContent = `${command.enabled ? '▶' : '·'} ${command.title} · ${command.category}`;
+      button.disabled = !command.enabled;
+      button.onclick = () => runCommand(command.id);
+      return button;
+    });
+    setObserver(items, JSON.stringify(commands, null, 2));
+  } catch (error) { setObserver([], 'Ошибка: ' + error.message); }
+}
+async function runCommand(id) {
+  try {
+    const data = await postJson('/api/commands', {id, source:'pwa'});
+    document.getElementById('taskStatus').textContent = 'Команда поставлена: ' + data.id;
+    await loadCommands();
+  } catch (error) {
+    document.getElementById('taskStatus').textContent = 'Ошибка команды: ' + error.message;
+  }
 }
 async function submitTask() {
   const text = document.getElementById('task').value.trim();
@@ -1529,6 +1684,65 @@ mod tests {
     }
 
     #[test]
+    fn remote_server_lists_and_queues_commands() {
+        let shared_state = new_remote_shared_state();
+        update_remote_shared_state(
+            &shared_state,
+            RemoteControlSnapshot {
+                remote_commands: vec![RemoteCommandSummary {
+                    id: "git:status".to_string(),
+                    title: "Git status".to_string(),
+                    category: "Git".to_string(),
+                    description: "Refresh Git status".to_string(),
+                    enabled: true,
+                }],
+                ..RemoteControlSnapshot::default()
+            },
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy: RemoteAccessPolicy::default(),
+                actions: Some(tx),
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let list = request(
+            &addr,
+            "GET /api/commands HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(list.starts_with("HTTP/1.1 200 OK"));
+        assert!(list.contains("git:status"));
+
+        let body = r#"{"id":"git:status","source":"test"}"#;
+        let http_request = format!(
+            "POST /api/commands HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let response = request(&addr, &http_request);
+        assert!(response.starts_with("HTTP/1.1 202 Accepted"));
+        let action = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("receives remote command");
+        match action {
+            RemoteControlAction::RunCommand(command) => {
+                assert_eq!(command.id, "git:status");
+                assert_eq!(command.source, "test");
+            }
+            _ => panic!("expected command action"),
+        }
+
+        server.stop();
+    }
+
+    #[test]
     fn remote_security_denies_missing_role_and_bad_origin() {
         let shared_state = new_remote_shared_state();
         let mut policy = RemoteAccessPolicy::default();
@@ -1559,6 +1773,37 @@ mod tests {
         );
         assert!(denied_origin.starts_with("HTTP/1.1 403 Forbidden"));
         assert!(denied_origin.contains("origin"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_security_denies_command_without_chat_role() {
+        let shared_state = new_remote_shared_state();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.chat = false;
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy,
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+        let body = r#"{"id":"git:status"}"#;
+        let http_request = format!(
+            "POST /api/commands HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let denied = request(&addr, &http_request);
+        assert!(denied.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(denied.contains("chat"));
 
         server.stop();
     }

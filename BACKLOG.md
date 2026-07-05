@@ -280,7 +280,8 @@ Leetcode развивается из минимального локальног
 - Done: Добавить PWA-блок "Наблюдение" для логов, истории запусков и файлов.
 - Done: Расширить observer до подробного run timeline через `GET /api/history/run?id=...` и PWA drill-down по выбранному запуску.
 - Done: Добавить security baseline для local Remote API: роли доступа, Origin allowlist, глобальный rate limit и audit-события удалённых действий.
-- Todo: Добавить безопасные макросы/палитру команд по ролям.
+- Done: Добавить safe Remote Commands: `GET /api/commands`, `POST /api/commands`, PWA-кнопки и app-side allowlist для безопасных команд палитры.
+- Todo: Расширить Remote Commands до макросов/проектных команд с отдельными ролями, подтверждениями и риск-классами.
 - Todo: Усилить безопасность до product-grade: short-lived tokens, device pairing, revoke devices, TLS/WSS, per-device/per-IP rate limiting.
 - Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Todo: Сделать лёгкий desktop thin client на WebView/Tauri после стабилизации API.

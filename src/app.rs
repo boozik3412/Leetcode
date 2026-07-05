@@ -56,9 +56,10 @@ use crate::provider_health::{
 };
 use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
-    update_remote_shared_state, RemoteAccessPolicy, RemoteAuditEvent, RemoteControlAction,
-    RemoteControlServer, RemoteControlServerConfig, RemoteControlSharedState,
-    RemoteControlSnapshot, RemoteRunSummary, RemoteSubmittedTask, RemoteToolLogEntry,
+    update_remote_shared_state, RemoteAccessPolicy, RemoteAuditEvent, RemoteCommandRequest,
+    RemoteCommandSummary, RemoteControlAction, RemoteControlServer, RemoteControlServerConfig,
+    RemoteControlSharedState, RemoteControlSnapshot, RemoteRunSummary, RemoteSubmittedTask,
+    RemoteToolLogEntry,
 };
 use crate::roadmap::{
     load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
@@ -1917,6 +1918,13 @@ impl LeetcodeApp {
         }
 
         items
+    }
+
+    fn remote_command_palette_items(&self) -> Vec<CommandPaletteItem> {
+        self.command_palette_items()
+            .into_iter()
+            .filter(|item| remote_command_action_allowed(&item.action))
+            .collect()
     }
 
     fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
@@ -9770,6 +9778,9 @@ impl LeetcodeApp {
                     ));
                     self.refresh_journal();
                 }
+                RemoteControlAction::RunCommand(command) => {
+                    self.run_remote_command(command);
+                }
                 RemoteControlAction::AnswerRunGate { approved } => {
                     if self.pending_run_gate.is_some() {
                         self.remote_last_action = if approved {
@@ -9809,6 +9820,51 @@ impl LeetcodeApp {
                 }
             }
         }
+    }
+
+    fn run_remote_command(&mut self, command: RemoteCommandRequest) {
+        let command_id = command.id.trim().to_string();
+        let Some(item) = self
+            .remote_command_palette_items()
+            .into_iter()
+            .find(|item| item.id == command_id)
+        else {
+            self.remote_last_action = format!("Remote: команда недоступна: {command_id}");
+            append_journal(format!(
+                "remote_command\tdenied\t{}\t{}",
+                compact(&command.source, 120),
+                compact(&command_id, 240)
+            ));
+            self.refresh_journal();
+            return;
+        };
+
+        if !item.enabled {
+            self.remote_last_action = format!("Remote: команда сейчас выключена: {}", item.title);
+            append_journal(format!(
+                "remote_command\tdisabled\t{}\t{}",
+                compact(&command.source, 120),
+                compact(&item.id, 240)
+            ));
+            self.refresh_journal();
+            return;
+        }
+
+        let title = item.title.clone();
+        let id = item.id.clone();
+        self.execute_command_palette_item(item);
+        self.remote_last_action = format!("Remote: выполнена команда {title}");
+        append_journal(format!(
+            "remote_command\texecuted\t{}\t{}\t{}",
+            command.created_at,
+            compact(&command.source, 120),
+            compact(&id, 240)
+        ));
+        self.tool_log.push(ToolLogLine {
+            title: "remote command".to_string(),
+            content: format!("{title}\n{id}\nsource: {}", command.source),
+        });
+        self.refresh_journal();
     }
 
     fn record_remote_audit(&mut self, event: RemoteAuditEvent) {
@@ -9977,6 +10033,17 @@ impl LeetcodeApp {
             .filter_map(|record| serde_json::to_value(record).ok())
             .collect::<Vec<_>>();
         let file_rows = self.file_rows.iter().take(600).cloned().collect::<Vec<_>>();
+        let remote_commands = self
+            .remote_command_palette_items()
+            .into_iter()
+            .map(|item| RemoteCommandSummary {
+                id: item.id,
+                title: item.title,
+                category: item.category.to_string(),
+                description: item.description,
+                enabled: item.enabled,
+            })
+            .collect::<Vec<_>>();
 
         update_remote_shared_state(
             &self.remote_shared_state,
@@ -10009,6 +10076,7 @@ impl LeetcodeApp {
                     .pending_approval
                     .as_ref()
                     .map(|approval| approval.summary.clone()),
+                remote_commands,
                 tool_log_tail,
                 agent_history_tail,
                 agent_history_details,
@@ -15283,6 +15351,22 @@ fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
         rate_limit_per_minute: config.remote_rate_limit_per_minute,
         audit: config.remote_audit_enabled,
     }
+}
+
+fn remote_command_action_allowed(action: &CommandPaletteAction) -> bool {
+    matches!(
+        action,
+        CommandPaletteAction::ApplyLayout(_)
+            | CommandPaletteAction::SetWorkspaceMode(_)
+            | CommandPaletteAction::SetRightPanel(_)
+            | CommandPaletteAction::ToggleFilePanel
+            | CommandPaletteAction::RefreshWorkspace
+            | CommandPaletteAction::NewChat
+            | CommandPaletteAction::SetPrompt(_)
+            | CommandPaletteAction::GitStatus
+            | CommandPaletteAction::StopAgent
+            | CommandPaletteAction::StopProjectCommand
+    )
 }
 
 fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {
