@@ -348,9 +348,10 @@ Leetcode развивается из минимального локальног
 
 Цель: дать простой доступ с телефона без полноценного desktop-клиента.
 
-- Todo: Сделать mobile-first PWA поверх relay: статус агента, отправка задачи, approvals, история запусков.
-- Todo: Добавить QR/pairing link в host app для iPhone.
-- Todo: Ограничить мобильный UI безопасными действиями и отдельными ролями.
+- Done: Сделать mobile-first PWA поверх relay: статус агента, отправка задачи, approvals, история запусков.
+- Done: Добавить pairing link в host app для iPhone: ссылка открывает Relay PWA с Agent ID и временным pairing code.
+- Done: Ограничить мобильный UI безопасными действиями и отдельными ролями: view/chat/approve без файлового доступа по умолчанию.
+- Todo: Добавить QR-код для iPhone поверх pairing link без внешнего сервиса.
 
 ## Этап 30 - Product-grade Pairing
 

@@ -124,7 +124,22 @@ Stage 28B добавляет слой диагностики поверх Relay 
 5. Отправить `/api/clients/tasks`, затем снова `/api/hosts/poll`: host должен получить действие `submit_task`.
 6. Подождать больше 15 секунд без host poll и повторить `/api/clients/state`: relay должен вернуть offline-состояние.
 
-Следующий продуктовый слой должен заменить HTTP long-poll на WSS/TLS, добавить публичный relay deployment, QR/pairing link и pending approval dialog на host app.
+## iPhone/PWA через Relay
+
+Stage 29 добавляет мобильную PWA прямо в `leetcode-relay`:
+
+1. Запустить `leetcode-relay.exe --bind 0.0.0.0:17990` на доступной машине.
+2. В основном Leetcode включить `Relay` и дождаться успешной синхронизации.
+3. Создать новый pairing code в `Контроль -> Удалённый доступ -> Подключение устройств`.
+4. Нажать `Ссылка iPhone`.
+5. Открыть скопированную ссылку на iPhone. Она заполнит Agent ID и временный pairing code.
+6. Нажать `Подключить по коду`; PWA сохранит device token в localStorage iPhone.
+
+Мобильная PWA показывает online/offline статус host, возраст snapshot, текущий проект, модель, последние запуски, tail логов и безопасные команды. Через неё можно отправить задачу агенту и подтвердить или отклонить ожидающий план/действие. По умолчанию iPhone получает роли `view`, `chat`, `approve` без файлового доступа; роли можно отозвать или изменить в host app.
+
+Прямой URL PWA: `http://relay-host:17990/`. Если ссылка открыта без query-параметров, Agent ID, pairing code и device token можно ввести вручную.
+
+Следующий продуктовый слой должен заменить HTTP long-poll на WSS/TLS, добавить публичный relay deployment, QR-код поверх pairing link и pending approval dialog на host app.
 
 ## Рекомендованный порядок
 

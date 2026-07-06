@@ -9910,6 +9910,18 @@ impl LeetcodeApp {
                 {
                     self.copy_remote_pairing_passport_to_clipboard();
                 }
+                if ui
+                    .add_enabled(
+                        pairing_active && self.config.relay_enabled,
+                        egui::Button::new("Ссылка iPhone"),
+                    )
+                    .on_hover_text(
+                        "Копирует ссылку на мобильную Relay PWA с Agent ID и временным pairing code.",
+                    )
+                    .clicked()
+                {
+                    self.copy_relay_mobile_pairing_link_to_clipboard();
+                }
                 if ui.button("Сбросить код").clicked() {
                     self.config.remote_pairing_code.clear();
                     self.config.remote_pairing_expires_at = 0;
@@ -9967,6 +9979,15 @@ impl LeetcodeApp {
                     ui.label("2. Нажмите «Вставить паспорт».");
                     ui.label("3. Нажмите «Подключить по коду».");
                 });
+                if self.config.relay_enabled {
+                    ui.label(
+                        RichText::new(
+                            "Для iPhone нажмите «Ссылка iPhone» и откройте ссылку на телефоне. Relay PWA получит Agent ID и временный код из ссылки.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
             }
 
             ui.add_space(6.0);
@@ -10102,6 +10123,17 @@ impl LeetcodeApp {
         )
     }
 
+    fn relay_mobile_pairing_link(&self) -> String {
+        let relay_url = self.relay_url().trim_end_matches('/').to_string();
+        format!(
+            "{}?agent_id={}&pairing_code={}&device_name={}",
+            relay_url,
+            url_query_escape(&self.config.agent_id),
+            url_query_escape(&self.config.remote_pairing_code),
+            url_query_escape("iPhone")
+        )
+    }
+
     fn save_remote_control_settings(&mut self) {
         let host = self.remote_host_input.trim();
         self.config.remote_bind_host = if host.is_empty() {
@@ -10203,6 +10235,25 @@ impl LeetcodeApp {
             }
             Err(err) => {
                 self.remote_status = format!("Не удалось скопировать паспорт подключения: {err}");
+            }
+        }
+    }
+
+    fn copy_relay_mobile_pairing_link_to_clipboard(&mut self) {
+        if !self.config.relay_enabled {
+            self.remote_status =
+                "Relay выключен: включите Relay, чтобы создать iPhone-ссылку.".to_string();
+            return;
+        }
+        let link = self.relay_mobile_pairing_link();
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(link)) {
+            Ok(()) => {
+                self.remote_status =
+                    "Ссылка iPhone скопирована. Откройте её на телефоне до истечения pairing code."
+                        .to_string();
+            }
+            Err(err) => {
+                self.remote_status = format!("Не удалось скопировать iPhone-ссылку: {err}");
             }
         }
     }
@@ -18136,6 +18187,20 @@ fn normalize_http_url(value: &str, fallback: &str) -> String {
     }
 }
 
+fn url_query_escape(value: &str) -> String {
+    let mut output = String::new();
+    for byte in value.as_bytes() {
+        match *byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                output.push(*byte as char)
+            }
+            b' ' => output.push_str("%20"),
+            other => output.push_str(&format!("%{other:02X}")),
+        }
+    }
+    output
+}
+
 fn post_relay_host_poll(
     relay_url: &str,
     request: &RelayHostPollRequest,
@@ -18287,6 +18352,14 @@ SyntaxError: invalid syntax
         assert_eq!(
             normalize_http_url("", DEFAULT_RELAY_URL),
             DEFAULT_RELAY_URL.to_string()
+        );
+    }
+
+    #[test]
+    fn escapes_relay_mobile_pairing_link_params() {
+        assert_eq!(
+            url_query_escape("LC 123/тест"),
+            "LC%20123%2F%D1%82%D0%B5%D1%81%D1%82"
         );
     }
 }

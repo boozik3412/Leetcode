@@ -101,6 +101,19 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
     }
 
     match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/") => write_html_response(&mut stream, relay_mobile_pwa_html()),
+        ("GET", "/manifest.webmanifest") => write_json_response(
+            &mut stream,
+            200,
+            &json!({
+                "name": "Leetcode Relay",
+                "short_name": "Leetcode",
+                "start_url": "/",
+                "display": "standalone",
+                "background_color": "#090d12",
+                "theme_color": "#1f9fc4"
+            }),
+        ),
         ("GET", "/health") => handle_health(&mut stream, state),
         ("POST", "/api/hosts/poll") => handle_host_poll(&mut stream, &request.body, state),
         ("POST", "/api/clients/pair") => handle_client_pair(&mut stream, &request.body, state),
@@ -577,6 +590,7 @@ fn write_json_response(stream: &mut TcpStream, status: u16, body: &impl serde::S
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     let body = if status == 204 {
@@ -592,12 +606,263 @@ fn write_json_response(stream: &mut TcpStream, status: u16, body: &impl serde::S
     let _ = stream.write_all(&body);
 }
 
+fn write_html_response(stream: &mut TcpStream, body: &str) {
+    let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(headers.as_bytes());
+    let _ = stream.write_all(body.as_bytes());
+}
+
 fn empty_as(value: &str, fallback: &str) -> String {
     if value.trim().is_empty() {
         fallback.to_string()
     } else {
         value.trim().to_string()
     }
+}
+
+fn relay_mobile_pwa_html() -> &'static str {
+    r##"<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Leetcode" />
+<meta name="theme-color" content="#0b1118" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<title>Leetcode Relay</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#090d12;color:#e7eef6}
+*{box-sizing:border-box} body{margin:0;min-height:100vh;background:#090d12;color:#e7eef6}
+main{width:min(760px,100%);margin:0 auto;padding:18px 14px calc(24px + env(safe-area-inset-bottom));display:grid;gap:14px}
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:8px 2px 2px}
+h1{margin:0;font-size:25px;line-height:1.05;font-weight:680;letter-spacing:0}
+h2{margin:0 0 8px;font-size:16px;font-weight:650}.muted{color:#8d99a8}.small{font-size:12px}
+.status{display:inline-flex;align-items:center;gap:8px;border:1px solid #26303d;background:#121923;border-radius:999px;padding:7px 10px;font-size:13px;color:#cbd6e2;white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:#8d99a8}.dot.online{background:#59c38d}.dot.offline{background:#d66969}
+.panel{border-top:1px solid #26303d;padding:14px 0}.panel:first-of-type{border-top:0}
+.connect{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+input,textarea{width:100%;background:#070b10;color:#e7eef6;border:1px solid #2d3a49;border-radius:10px;padding:12px;font:inherit;font-size:16px;outline:none}
+textarea{min-height:118px;resize:vertical;line-height:1.35}
+input:focus,textarea:focus{border-color:#2aa7ca;box-shadow:0 0 0 2px rgba(42,167,202,.14)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+button{border:1px solid #2d3a49;background:#1c2633;color:#e7eef6;border-radius:10px;padding:11px 13px;font:inherit;font-size:15px}
+button.primary{background:#2289a7;border-color:#2ba8ca;color:white}button.good{background:#1f7d57;border-color:#2da875}button.warn{background:#56333a;border-color:#8b4651}
+button:disabled{opacity:.45}.metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.metric{min-width:0}.metric b{display:block;font-size:22px;line-height:1.1;font-weight:640;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.metric span{display:block;margin-top:3px;color:#8d99a8;font-size:12px}
+.taskbar{position:sticky;bottom:0;background:linear-gradient(180deg,rgba(9,13,18,0),#090d12 16px);padding-top:18px}
+.pending{display:none;margin-top:10px;border-left:3px solid #59c38d;padding:8px 0 8px 12px}
+.list{display:grid;gap:8px}.item{display:block;width:100%;text-align:left;background:#111821;border:1px solid #26303d;border-radius:10px;padding:10px;color:#d9e3ed}
+.tabs{display:flex;gap:8px;overflow:auto;padding-bottom:2px}.tab{white-space:nowrap;background:transparent}.tab.active{background:#1f6f87;border-color:#2aa7ca}
+pre{white-space:pre-wrap;word-break:break-word;margin:10px 0 0;background:#05080c;border:1px solid #26303d;border-radius:10px;padding:10px;max-height:280px;overflow:auto;color:#cfd9e5}
+@media(max-width:620px){main{padding-left:12px;padding-right:12px}.connect{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}h1{font-size:23px}.top{align-items:center}}
+</style>
+</head>
+<body>
+<main>
+  <section class="top">
+    <div>
+      <h1>Leetcode Relay</h1>
+      <p class="muted small">мобильный доступ к агенту по Agent ID</p>
+    </div>
+    <div class="status"><span id="onlineDot" class="dot"></span><span id="onlineText">не подключено</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Подключение</h2>
+    <div class="connect">
+      <input id="agentId" placeholder="Agent ID" autocomplete="off" autocapitalize="characters" />
+      <input id="pairingCode" placeholder="Pairing code" autocomplete="one-time-code" autocapitalize="characters" />
+      <input id="deviceName" placeholder="Имя устройства" />
+      <input id="deviceToken" type="password" placeholder="Device token появится после пары" />
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="pairDevice()">Подключить по коду</button>
+      <button onclick="saveConnection()">Сохранить</button>
+      <button onclick="loadState()">Обновить</button>
+    </div>
+    <p id="status" class="muted small">Откройте ссылку из Leetcode или введите Agent ID и pairing code.</p>
+  </section>
+
+  <section class="panel">
+    <div class="metrics">
+      <div class="metric"><b id="agentStatus">-</b><span>агент</span></div>
+      <div class="metric"><b id="projectName">-</b><span>проект</span></div>
+      <div class="metric"><b id="snapshotAge">-</b><span>snapshot</span></div>
+      <div class="metric"><b id="modelName">-</b><span>модель</span></div>
+      <div class="metric"><b id="queueCount">0</b><span>очередь relay</span></div>
+      <div class="metric"><b id="runCount">0</b><span>запуски</span></div>
+    </div>
+    <div id="runGate" class="pending">
+      <b>План ждёт подтверждения</b>
+      <p id="runGateSummary" class="muted"></p>
+      <div class="actions"><button class="good" onclick="answer('/api/clients/run-gate',true)">Подтверждаю</button><button class="warn" onclick="answer('/api/clients/run-gate',false)">Отклонить</button></div>
+    </div>
+    <div id="approval" class="pending">
+      <b>Инструмент ждёт разрешения</b>
+      <p id="approvalSummary" class="muted"></p>
+      <div class="actions"><button class="good" onclick="answer('/api/clients/approval',true)">Разрешить</button><button class="warn" onclick="answer('/api/clients/approval',false)">Запретить</button></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="tabs">
+      <button id="tab-runs" class="tab active" onclick="showTab('runs')">Запуски</button>
+      <button id="tab-commands" class="tab" onclick="showTab('commands')">Команды</button>
+      <button id="tab-log" class="tab" onclick="showTab('log')">Логи</button>
+    </div>
+    <div id="list" class="list"></div>
+    <pre id="details">Пока нет данных.</pre>
+  </section>
+
+  <section class="taskbar">
+    <textarea id="task" placeholder="Что сделать агенту?"></textarea>
+    <div class="actions">
+      <button class="primary" onclick="submitTask()">Отправить</button>
+      <button onclick="document.getElementById('task').value=''">Очистить</button>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let lastState = null;
+let activeTab = 'runs';
+let timer = null;
+function params(){return new URLSearchParams(location.search)}
+function loadConnection(){
+  $('agentId').value = params().get('agent_id') || localStorage.getItem('leetcode_relay_agent_id') || '';
+  $('pairingCode').value = params().get('pairing_code') || '';
+  $('deviceName').value = params().get('device_name') || localStorage.getItem('leetcode_relay_device_name') || (navigator.platform || 'iPhone');
+  $('deviceToken').value = localStorage.getItem('leetcode_relay_device_token_' + $('agentId').value.trim().toUpperCase()) || '';
+}
+function saveConnection(){
+  const agent = $('agentId').value.trim().toUpperCase();
+  localStorage.setItem('leetcode_relay_agent_id', agent);
+  localStorage.setItem('leetcode_relay_device_name', $('deviceName').value.trim() || 'iPhone');
+  if ($('deviceToken').value.trim()) localStorage.setItem('leetcode_relay_device_token_' + agent, $('deviceToken').value.trim());
+  setStatus('сохранено');
+}
+function requestBase(){
+  return {agent_id:$('agentId').value.trim().toUpperCase(), device_token:$('deviceToken').value.trim()};
+}
+async function relayPost(path, payload, allowOfflineState=false){
+  const res = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const data = await res.json().catch(()=>({}));
+  if (!res.ok && !(allowOfflineState && data && Object.prototype.hasOwnProperty.call(data,'host_online'))) throw new Error(data.error || ('HTTP ' + res.status));
+  return data;
+}
+function setStatus(text, online){
+  $('status').textContent = text;
+  $('onlineText').textContent = text;
+  $('onlineDot').className = 'dot ' + (online === true ? 'online' : online === false ? 'offline' : '');
+}
+async function pairDevice(){
+  try{
+    const body = {
+      agent_id:$('agentId').value.trim().toUpperCase(),
+      pairing_code:$('pairingCode').value.trim().toUpperCase(),
+      device_name:$('deviceName').value.trim() || 'iPhone',
+      role_view:true, role_chat:true, role_approve:true, role_files:false
+    };
+    const data = await relayPost('/api/clients/pair', body);
+    $('deviceToken').value = data.device_token || '';
+    saveConnection();
+    $('pairingCode').value = '';
+    await loadState();
+  }catch(error){setStatus('ошибка пары: ' + error.message, false)}
+}
+async function loadState(){
+  const agent = $('agentId').value.trim();
+  const token = $('deviceToken').value.trim();
+  if(!agent || !token){setStatus('нужен Agent ID и device token');return}
+  try{
+    const data = await relayPost('/api/clients/state', requestBase(), true);
+    lastState = data;
+    render(data);
+  }catch(error){setStatus('ошибка: ' + error.message, false)}
+}
+function render(data){
+  const s = data.state || {};
+  const online = !!data.host_online;
+  setStatus(online ? 'relay online' : 'relay offline', online);
+  $('agentStatus').textContent = s.agent_status || 'ожидает';
+  $('projectName').textContent = s.project_name || 'нет проекта';
+  $('snapshotAge').textContent = (data.host_age_secs ?? 0) + ' c';
+  $('modelName').textContent = [s.provider,s.model].filter(Boolean).join(' · ') || '-';
+  $('queueCount').textContent = data.queued_actions ?? 0;
+  $('runCount').textContent = (s.agent_history_tail || []).length;
+  $('runGate').style.display = s.pending_run_gate_summary ? 'block' : 'none';
+  $('runGateSummary').textContent = s.pending_run_gate_summary || '';
+  $('approval').style.display = s.pending_approval_summary ? 'block' : 'none';
+  $('approvalSummary').textContent = s.pending_approval_summary || '';
+  showTab(activeTab);
+}
+function showTab(tab){
+  activeTab = tab;
+  for (const name of ['runs','commands','log']) $('tab-' + name).classList.toggle('active', name === tab);
+  const list = $('list'); list.innerHTML = '';
+  const s = (lastState && lastState.state) || {};
+  if(tab === 'runs'){
+    for(const run of (s.agent_history_tail || []).slice().reverse()){
+      const b = document.createElement('button'); b.className='item';
+      b.textContent = `${run.status || 'run'} · ${run.provider || ''}/${run.model || ''} · ${new Date((run.started_at||0)*1000).toLocaleString()}`;
+      b.onclick = () => $('details').textContent = JSON.stringify(run,null,2);
+      list.appendChild(b);
+    }
+    if(!list.children.length) $('details').textContent = 'Истории запусков пока нет.';
+  }
+  if(tab === 'commands'){
+    for(const cmd of (s.remote_commands || []).filter(c=>c.enabled).slice(0,20)){
+      const b = document.createElement('button'); b.className='item';
+      b.textContent = `${cmd.title} · ${cmd.category || 'команда'}`;
+      b.onclick = () => runCommand(cmd.id);
+      list.appendChild(b);
+    }
+    if(!list.children.length) $('details').textContent = 'Команд пока нет.';
+  }
+  if(tab === 'log'){
+    for(const entry of (s.tool_log_tail || []).slice().reverse()){
+      const b = document.createElement('button'); b.className='item';
+      b.textContent = entry.title || 'лог';
+      b.onclick = () => $('details').textContent = (entry.title || '') + '\n\n' + (entry.content || '');
+      list.appendChild(b);
+    }
+    if(!list.children.length) $('details').textContent = 'Логов пока нет.';
+  }
+}
+async function submitTask(){
+  const message = $('task').value.trim();
+  if(!message){setStatus('введите задачу');return}
+  try{
+    const data = await relayPost('/api/clients/tasks',{...requestBase(),message,source:'iphone-pwa'});
+    $('task').value='';
+    setStatus('задача поставлена: ' + (data.id || 'queued'), true);
+    await loadState();
+  }catch(error){setStatus('ошибка задачи: ' + error.message, false)}
+}
+async function runCommand(id){
+  try{
+    const data = await relayPost('/api/clients/commands',{...requestBase(),id,source:'iphone-pwa'});
+    $('details').textContent = 'Команда поставлена: ' + (data.id || 'queued');
+    await loadState();
+  }catch(error){$('details').textContent = 'Ошибка команды: ' + error.message}
+}
+async function answer(path, approved){
+  try{
+    const data = await relayPost(path,{...requestBase(),approved});
+    setStatus('ответ отправлен: ' + (data.id || 'queued'), true);
+    await loadState();
+  }catch(error){setStatus('ошибка ответа: ' + error.message, false)}
+}
+loadConnection();
+if($('deviceToken').value.trim()) loadState();
+timer = setInterval(loadState, 2500);
+</script>
+</body>
+</html>"##
 }
 
 fn unix_timestamp() -> u64 {
@@ -614,5 +879,14 @@ mod tests {
     #[test]
     fn relay_bind_arg_defaults_to_default_url_host() {
         assert!(DEFAULT_RELAY_URL.contains("17990"));
+    }
+
+    #[test]
+    fn relay_mobile_pwa_exposes_client_endpoints() {
+        let html = relay_mobile_pwa_html();
+        assert!(html.contains("/api/clients/state"));
+        assert!(html.contains("/api/clients/tasks"));
+        assert!(html.contains("pairing_code"));
+        assert!(html.contains("apple-mobile-web-app-capable"));
     }
 }
