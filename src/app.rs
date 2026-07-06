@@ -9957,6 +9957,23 @@ impl LeetcodeApp {
             status_line(ui, "PWA link", &pwa_link_label);
 
             ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("Экспорт диагностики")
+                    .on_hover_text(
+                        "Сохранить JSON-пакет с состоянием Remote/Relay, устройствами, командами, журналом и историей запусков. API-ключи и токены будут вырезаны.",
+                    )
+                    .clicked()
+                {
+                    self.export_remote_debug_bundle();
+                }
+                ui.label(
+                    RichText::new("без API-ключей, access token, host token и device token")
+                        .weak()
+                        .small(),
+                );
+            });
+            ui.add_space(8.0);
             ui.label(RichText::new("Что проверить").strong());
             for (level, title, detail) in self.remote_connection_diagnostic_rows() {
                 ui.horizontal_wrapped(|ui| {
@@ -10153,6 +10170,246 @@ impl LeetcodeApp {
         }
 
         rows
+    }
+
+    fn export_remote_debug_bundle(&mut self) {
+        match self.write_remote_debug_bundle() {
+            Ok(path) => {
+                self.remote_status =
+                    format!("Remote debug bundle сохранён: {}", path.to_string_lossy());
+                self.tool_log.push(ToolLogLine {
+                    title: "remote debug bundle".to_string(),
+                    content: path.to_string_lossy().to_string(),
+                });
+                append_journal(format!(
+                    "remote_debug_bundle\texported\t{}",
+                    path.to_string_lossy()
+                ));
+                self.refresh_journal();
+            }
+            Err(err) => {
+                self.remote_status =
+                    format!("Не удалось экспортировать remote debug bundle: {err}");
+                append_journal(format!(
+                    "remote_debug_bundle\terror\t{}",
+                    compact(&err, 500)
+                ));
+                self.refresh_journal();
+            }
+        }
+    }
+
+    fn write_remote_debug_bundle(&self) -> Result<PathBuf, String> {
+        let timestamp = current_unix_timestamp();
+        let dir = remote_debug_bundle_dir()?;
+        fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        let path = dir.join(format!("remote-debug-{timestamp}.json"));
+
+        let diagnostics = self
+            .remote_connection_diagnostic_rows()
+            .into_iter()
+            .map(|(level, title, detail)| {
+                serde_json::json!({
+                    "level": level,
+                    "title": title,
+                    "detail": detail,
+                })
+            })
+            .collect::<Vec<_>>();
+        let remote_devices = self
+            .config
+            .remote_devices
+            .iter()
+            .map(|device| {
+                serde_json::json!({
+                    "id": device.id,
+                    "name": device.name,
+                    "roles": {
+                        "view": device.role_view,
+                        "chat": device.role_chat,
+                        "approve": device.role_approve,
+                        "files": device.role_files,
+                    },
+                    "created_at": device.created_at,
+                    "last_seen_at": device.last_seen_at,
+                    "revoked": device.revoked,
+                })
+            })
+            .collect::<Vec<_>>();
+        let pending_pairings = self
+            .relay_pending_pairings
+            .iter()
+            .map(|request| {
+                serde_json::json!({
+                    "request_id": request.request_id,
+                    "device_name": request.device_name,
+                    "roles": {
+                        "view": request.role_view,
+                        "chat": request.role_chat,
+                        "approve": request.role_approve,
+                        "files": request.role_files,
+                    },
+                    "created_at": request.created_at,
+                    "expires_at": request.expires_at,
+                    "status": request.status,
+                })
+            })
+            .collect::<Vec<_>>();
+        let commands = self
+            .remote_command_palette_items()
+            .into_iter()
+            .map(|item| self.remote_command_summary_for_item(item))
+            .collect::<Vec<_>>();
+        let tool_log_tail = self
+            .tool_log
+            .iter()
+            .rev()
+            .take(80)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|entry| {
+                serde_json::json!({
+                    "title": compact(&entry.title, 180),
+                    "content": compact(&entry.content, 2_000),
+                })
+            })
+            .collect::<Vec<_>>();
+        let agent_history_tail = self
+            .agent_history
+            .iter()
+            .rev()
+            .take(30)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|record| {
+                serde_json::json!({
+                    "id": record.id,
+                    "status": record.status,
+                    "started_at": record.started_at,
+                    "duration_ms": record.duration_ms,
+                    "provider": record.provider,
+                    "model": record.model,
+                    "route": record.route,
+                    "policy_profile": record.policy_profile,
+                    "workspace_name": record.workspace_name,
+                    "user_request": compact(&record.user_request, 700),
+                    "final_response": record.final_response.as_ref().map(|text| compact(text, 1_000)),
+                    "changed_files": record.changed_files.iter().take(40).cloned().collect::<Vec<_>>(),
+                    "errors": record.errors.iter().take(12).cloned().collect::<Vec<_>>(),
+                    "tool_count": record.tool_calls.len(),
+                    "approval_count": record.approvals.len(),
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let workspace = self.workspace.as_ref().map(|workspace| {
+            serde_json::json!({
+                "name": workspace.display_name(),
+                "root": workspace.root().to_string_lossy(),
+                "files_indexed": self.file_rows.len(),
+                "git_changed_files": self.git_changed_files.len(),
+            })
+        });
+        let relay_sync_age_secs = if self.relay_last_success_at > 0 {
+            Some(timestamp.saturating_sub(self.relay_last_success_at))
+        } else {
+            None
+        };
+        let pairing_active = !self.config.remote_pairing_code.trim().is_empty()
+            && self.config.remote_pairing_expires_at > timestamp;
+
+        let bundle = serde_json::json!({
+            "schema_version": 1,
+            "created_at": timestamp,
+            "app": {
+                "name": "Leetcode",
+                "version": env!("CARGO_PKG_VERSION"),
+                "agent_id": self.config.agent_id,
+                "provider": provider_name(self.config.provider_id()),
+                "model": self.config.model,
+                "route": self.config.task_route,
+                "policy_profile": self.config.policy_profile,
+            },
+            "workspace": workspace,
+            "remote": {
+                "enabled": self.config.remote_enabled,
+                "server_running": self.remote_server.is_some(),
+                "api_url": self.remote_control_url(),
+                "status": self.remote_status,
+                "last_action": self.remote_last_action,
+                "bind_host": self.config.remote_bind_host,
+                "port": self.config.remote_port,
+                "allowed_origins": self.config.remote_allowed_origins,
+                "rate_limit_per_minute": self.config.remote_rate_limit_per_minute,
+                "audit_enabled": self.config.remote_audit_enabled,
+                "roles": {
+                    "view": self.config.remote_role_view,
+                    "chat": self.config.remote_role_chat,
+                    "approve": self.config.remote_role_approve,
+                    "files": self.config.remote_role_files,
+                },
+                "queue_len": self.remote_task_queue.len(),
+                "pairing_active": pairing_active,
+                "pairing_expires_at": if pairing_active { self.config.remote_pairing_expires_at } else { 0 },
+                "devices": remote_devices,
+            },
+            "relay": {
+                "enabled": self.config.relay_enabled,
+                "url": self.relay_url(),
+                "status": self.relay_status,
+                "sync_in_flight": self.relay_sync_in_flight,
+                "last_success_at": self.relay_last_success_at,
+                "last_sync_age_secs": relay_sync_age_secs,
+                "last_latency_ms": self.relay_last_latency_ms,
+                "last_action_count": self.relay_last_action_count,
+                "pending_pairings": pending_pairings,
+            },
+            "runtime": {
+                "agent_running": self.is_running,
+                "project_running": self.project_is_running,
+                "asset_running": self.asset_is_running,
+                "terminal_running": self.terminal_running,
+                "pending_run_gate": self.pending_run_gate.is_some(),
+                "pending_approval": self.pending_approval.is_some(),
+                "chat_messages": self.chat.len(),
+                "tool_log_entries": self.tool_log.len(),
+            },
+            "diagnostics": diagnostics,
+            "remote_commands": commands,
+            "journal_tail": read_journal_tail(120),
+            "tool_log_tail": tool_log_tail,
+            "agent_history_tail": agent_history_tail,
+        });
+
+        let text = serde_json::to_string_pretty(&bundle).map_err(|err| err.to_string())?;
+        let text = redact_remote_debug_text(text, &self.remote_debug_secret_values());
+        fs::write(&path, text).map_err(|err| err.to_string())?;
+        Ok(path)
+    }
+
+    fn remote_debug_secret_values(&self) -> Vec<String> {
+        let mut secrets = vec![
+            self.api_key_input.clone(),
+            self.asset_api_key_input.clone(),
+            self.remote_token_input.clone(),
+            self.relay_host_token_input.clone(),
+            self.config.api_key.clone(),
+            self.config.remote_access_token.clone(),
+            self.config.relay_host_token.clone(),
+            self.config.proxy_password.clone(),
+        ];
+        for settings in self.config.providers.values() {
+            secrets.push(settings.api_key.clone());
+        }
+        for device in &self.config.remote_devices {
+            secrets.push(device.token.clone());
+        }
+        secrets.retain(|secret| secret.trim().chars().count() >= 6);
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.chars().count()));
+        secrets.dedup();
+        secrets
     }
 
     fn show_remote_control_panel(&mut self, ui: &mut egui::Ui) {
@@ -18652,6 +18909,23 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
     compacted
 }
 
+fn remote_debug_bundle_dir() -> Result<PathBuf, String> {
+    dirs::data_dir()
+        .map(|dir| dir.join("leetcode").join("remote-debug"))
+        .ok_or_else(|| "не удалось определить системную папку данных".to_string())
+}
+
+fn redact_remote_debug_text(mut text: String, secrets: &[String]) -> String {
+    for secret in secrets {
+        let secret = secret.trim();
+        if secret.chars().count() < 6 {
+            continue;
+        }
+        text = text.replace(secret, "[redacted]");
+    }
+    text
+}
+
 fn first_useful_response_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
@@ -19081,6 +19355,27 @@ fn post_relay_pairing_decision(
 #[cfg(test)]
 mod project_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn remote_debug_redacts_secrets() {
+        let text =
+            "remote token sk-secret-token relay-host-token device-token-123 tiny safe".to_string();
+        let redacted = redact_remote_debug_text(
+            text,
+            &[
+                "sk-secret-token".to_string(),
+                "relay-host-token".to_string(),
+                "device-token-123".to_string(),
+                "tiny".to_string(),
+            ],
+        );
+
+        assert!(!redacted.contains("sk-secret-token"));
+        assert!(!redacted.contains("relay-host-token"));
+        assert!(!redacted.contains("device-token-123"));
+        assert!(redacted.contains("[redacted]"));
+        assert!(redacted.contains("tiny"));
+    }
 
     #[test]
     fn parses_rust_compiler_location() {
