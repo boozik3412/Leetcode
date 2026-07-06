@@ -228,6 +228,7 @@ fn handle_host_poll(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayS
     host.state = request.state;
     host.pairing_code = request.pairing_code.trim().to_ascii_uppercase();
     host.pairing_expires_at = request.pairing_expires_at;
+    sync_trusted_devices(host, request.trusted_devices);
     host.updated_at = unix_timestamp();
     let actions = host.actions.drain(..).take(100).collect::<Vec<_>>();
     write_json_response(
@@ -464,6 +465,9 @@ fn handle_host_pairing_decision(
                     role_files: request.role_files,
                     created_at: now,
                     last_seen_at: now,
+                    expires_at: request.device_expires_at,
+                    token_rotated_at: now,
+                    revoked_at: 0,
                     revoked: false,
                 };
                 record.status = PairingRequestStatus::Approved;
@@ -747,9 +751,10 @@ fn authorized_host_mut<'a>(
     if token.is_empty() {
         return Err(());
     }
+    let now = unix_timestamp();
     let allowed = host.devices.values().any(|device| {
         device.token == token
-            && !device.revoked
+            && relay_device_is_active(device, now)
             && match role {
                 DeviceRole::View => device.role_view,
                 DeviceRole::Chat => device.role_chat,
@@ -787,7 +792,7 @@ fn relay_device_allows(host: &HostRecord, token: &str, role: DeviceRole) -> bool
     !token.is_empty()
         && host.devices.values().any(|device| {
             device.token == token
-                && !device.revoked
+                && relay_device_is_active(device, unix_timestamp())
                 && match role {
                     DeviceRole::View => device.role_view,
                     DeviceRole::Chat => device.role_chat,
@@ -801,7 +806,7 @@ fn queue_device_seen(host: &mut HostRecord, token: &str) {
     let Some(device) = host
         .devices
         .values_mut()
-        .find(|device| device.token == token && !device.revoked)
+        .find(|device| device.token == token && relay_device_is_active(device, now))
     else {
         return;
     };
@@ -815,6 +820,25 @@ fn queue_device_seen(host: &mut HostRecord, token: &str) {
         },
         now,
     ));
+}
+
+fn sync_trusted_devices(host: &mut HostRecord, devices: Vec<RelayDevice>) {
+    for mut device in devices {
+        if device.id.trim().is_empty() || device.token.trim().is_empty() {
+            continue;
+        }
+        device.id = device.id.trim().chars().take(120).collect();
+        device.name = empty_as(&device.name, "Устройство")
+            .chars()
+            .take(120)
+            .collect();
+        device.token = device.token.trim().to_string();
+        host.devices.insert(device.id.clone(), device);
+    }
+}
+
+fn relay_device_is_active(device: &RelayDevice, now: u64) -> bool {
+    !device.revoked && (device.expires_at == 0 || device.expires_at > now)
 }
 
 fn host_online(host: &HostRecord, now: u64) -> bool {

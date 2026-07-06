@@ -56,16 +56,17 @@ use crate::provider_health::{
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
 use crate::relay::{
-    generate_relay_host_token, RelayAction, RelayActionKind, RelayHostPairingDecisionRequest,
-    RelayHostPollReply, RelayHostPollRequest, RelayPairDecisionReply, RelayPairingRequest,
-    DEFAULT_RELAY_URL, RELAY_HOST_SESSION_TTL_SECS,
+    generate_relay_host_token, RelayAction, RelayActionKind, RelayDevice,
+    RelayHostPairingDecisionRequest, RelayHostPollReply, RelayHostPollRequest,
+    RelayPairDecisionReply, RelayPairingRequest, DEFAULT_RELAY_URL, RELAY_HOST_SESSION_TTL_SECS,
 };
 use crate::remote::{
-    generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
-    update_remote_shared_state, RemoteAccessPolicy, RemoteAuditEvent, RemoteCommandRequest,
-    RemoteCommandSummary, RemoteControlAction, RemoteControlServer, RemoteControlServerConfig,
-    RemoteControlSharedState, RemoteControlSnapshot, RemoteDeviceSummary, RemotePairedDevice,
-    RemoteRunSummary, RemoteSubmittedTask, RemoteToolLogEntry, RemoteTrustedDevice,
+    generate_remote_access_token, generate_remote_device_token, new_remote_shared_state,
+    start_remote_control_server, update_remote_shared_state, RemoteAccessPolicy, RemoteAuditEvent,
+    RemoteCommandRequest, RemoteCommandSummary, RemoteControlAction, RemoteControlServer,
+    RemoteControlServerConfig, RemoteControlSharedState, RemoteControlSnapshot,
+    RemoteDeviceSummary, RemotePairedDevice, RemoteRunSummary, RemoteSubmittedTask,
+    RemoteToolLogEntry, RemoteTrustedDevice,
 };
 use crate::remote_timeline::{
     append_remote_session_event, clear_remote_session_events, load_remote_session_events_tail,
@@ -222,6 +223,7 @@ pub struct LeetcodeApp {
     remote_last_action: String,
     remote_timeline: Vec<RemoteSessionEvent>,
     remote_timeline_status: String,
+    remote_device_name_edits: BTreeMap<String, String>,
     relay_url_input: String,
     relay_host_token_input: String,
     relay_status: String,
@@ -1366,6 +1368,7 @@ impl LeetcodeApp {
             remote_last_action: String::new(),
             remote_timeline,
             remote_timeline_status: String::new(),
+            remote_device_name_edits: BTreeMap::new(),
             relay_url_input,
             relay_host_token_input,
             relay_status: "Relay выключен".to_string(),
@@ -10128,13 +10131,21 @@ impl LeetcodeApp {
             .config
             .remote_devices
             .iter()
-            .filter(|device| !device.revoked)
+            .filter(|device| !device.revoked && !remote_device_is_expired(device, now))
+            .count();
+        let expired_devices = self
+            .config
+            .remote_devices
+            .iter()
+            .filter(|device| remote_device_is_expired(device, now))
             .count();
         let approve_devices = self
             .config
             .remote_devices
             .iter()
-            .filter(|device| !device.revoked && device.role_approve)
+            .filter(|device| {
+                !device.revoked && !remote_device_is_expired(device, now) && device.role_approve
+            })
             .count();
         if active_devices == 0 {
             rows.push((
@@ -10148,6 +10159,15 @@ impl LeetcodeApp {
                 "Есть доверенные устройства".to_string(),
                 format!(
                     "Активных устройств: {active_devices}, с ролью approve: {approve_devices}."
+                ),
+            ));
+        }
+        if expired_devices > 0 {
+            rows.push((
+                "Внимание",
+                "Есть истёкшие device-token".to_string(),
+                format!(
+                    "Истёкших устройств: {expired_devices}. Продлите срок, ротируйте token или отзовите доступ."
                 ),
             ));
         }
@@ -10241,6 +10261,9 @@ impl LeetcodeApp {
                     },
                     "created_at": device.created_at,
                     "last_seen_at": device.last_seen_at,
+                    "expires_at": device.expires_at,
+                    "token_rotated_at": device.token_rotated_at,
+                    "revoked_at": device.revoked_at,
                     "revoked": device.revoked,
                 })
             })
@@ -10470,6 +10493,21 @@ impl LeetcodeApp {
         }
     }
 
+    fn remote_device_expires_at_for_ttl(&self, created_at: u64, ttl_days: u32) -> u64 {
+        if ttl_days == 0 {
+            0
+        } else {
+            created_at.saturating_add(ttl_days as u64 * 86_400)
+        }
+    }
+
+    fn default_remote_device_expires_at(&self, created_at: u64) -> u64 {
+        self.remote_device_expires_at_for_ttl(
+            created_at,
+            self.config.remote_default_device_ttl_days,
+        )
+    }
+
     fn show_remote_session_timeline(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.horizontal_wrapped(|ui| {
@@ -10669,6 +10707,32 @@ impl LeetcodeApp {
                     .on_hover_text("Разрешает read-only просмотр списка файлов и содержимого файлов проекта.");
                 ui.checkbox(&mut self.config.remote_audit_enabled, "Аудит")
                     .on_hover_text("Пишет удалённые действия в журнал приложения: задачи, approvals, чтение файлов, security-deny.");
+            });
+
+            ui.add_space(4.0);
+            ui.label(RichText::new("Роли новых устройств").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.config.remote_default_role_view, "Обзор")
+                    .on_hover_text("Роль, которая будет включена по умолчанию при новом pairing, если глобально разрешён обзор.");
+                ui.checkbox(&mut self.config.remote_default_role_chat, "Задачи")
+                    .on_hover_text("Роль, которая будет включена по умолчанию при новом pairing, если глобально разрешены задачи.");
+                ui.checkbox(
+                    &mut self.config.remote_default_role_approve,
+                    "Подтверждения",
+                )
+                .on_hover_text("Роль, которая будет включена по умолчанию при новом pairing, если глобально разрешены подтверждения.");
+                ui.checkbox(&mut self.config.remote_default_role_files, "Файлы")
+                    .on_hover_text("Файлы по умолчанию лучше держать выключенными для мобильных устройств.");
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Срок token новых устройств").weak());
+                ui.add(
+                    egui::DragValue::new(&mut self.config.remote_default_device_ttl_days)
+                        .range(0..=365)
+                        .speed(1.0),
+                )
+                .on_hover_text("0 = бессрочно. Рекомендуемо: 30 дней, затем продлить или переподключить устройство.");
+                ui.label(RichText::new("дней").weak());
             });
 
             ui.label(RichText::new("Allowed Origins").weak());
@@ -10882,18 +10946,44 @@ impl LeetcodeApp {
             } else {
                 let devices = self.config.remote_devices.clone();
                 for device in devices {
+                    let now = unix_timestamp();
+                    self.remote_device_name_edits
+                        .entry(device.id.clone())
+                        .or_insert_with(|| device.name.clone());
                     let mut role_view = device.role_view;
                     let mut role_chat = device.role_chat;
                     let mut role_approve = device.role_approve;
                     let mut role_files = device.role_files;
                     let mut roles_changed = false;
+                    let mut name_update: Option<String> = None;
 
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new(&device.name).strong());
+                        let device_name_input = self
+                            .remote_device_name_edits
+                            .entry(device.id.clone())
+                            .or_insert_with(|| device.name.clone());
+                        ui.add_enabled(
+                            !device.revoked,
+                            TextEdit::singleline(device_name_input).desired_width(180.0),
+                        )
+                        .on_hover_text("Имя устройства можно менять прямо здесь, затем нажать «Сохранить имя».");
+                        if ui
+                            .add_enabled(
+                                !device.revoked
+                                    && normalize_remote_device_display_name(device_name_input)
+                                        != device.name,
+                                egui::Button::new("Сохранить имя"),
+                            )
+                            .clicked()
+                        {
+                            name_update = Some(device_name_input.clone());
+                        }
                         chip(
                             ui,
                             if device.revoked {
                                 "отозвано"
+                            } else if remote_device_is_expired(&device, now) {
+                                "истёк"
                             } else if device.last_seen_at > 0 {
                                 "активно"
                             } else {
@@ -10901,6 +10991,11 @@ impl LeetcodeApp {
                             },
                         );
                         ui.label(RichText::new(remote_device_roles_label(&device)).weak());
+                        ui.label(
+                            RichText::new(remote_device_expiry_label(&device, now))
+                                .weak()
+                                .small(),
+                        );
                         if device.last_seen_at > 0 {
                             ui.label(
                                 RichText::new(format!("последний раз {}", age_label(device.last_seen_at)))
@@ -10908,10 +11003,12 @@ impl LeetcodeApp {
                                     .small(),
                             );
                         }
-                        if !device.revoked && ui.button("Отозвать").clicked() {
-                            self.revoke_remote_device(&device.id);
-                        }
                     });
+                    if let Some(name) = name_update {
+                        self.update_remote_device_name(&device.id, &name);
+                        self.remote_device_name_edits
+                            .insert(device.id.clone(), normalize_remote_device_display_name(&name));
+                    }
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("Роли").weak());
                         roles_changed |= ui
@@ -10942,6 +11039,54 @@ impl LeetcodeApp {
                             )
                             .on_hover_text("Устройство может читать список и содержимое файлов проекта.")
                             .changed();
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Token").weak());
+                        if device.token_rotated_at > 0 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "ротирован {} назад",
+                                    age_label(device.token_rotated_at)
+                                ))
+                                .weak()
+                                .small(),
+                            );
+                        }
+                        if ui
+                            .add_enabled(!device.revoked, egui::Button::new("Продлить 30д"))
+                            .on_hover_text("Продлить срок действия token на 30 дней от текущего момента.")
+                            .clicked()
+                        {
+                            self.update_remote_device_expiry(&device.id, 30);
+                        }
+                        if ui
+                            .add_enabled(!device.revoked, egui::Button::new("Продлить 90д"))
+                            .on_hover_text("Продлить срок действия token на 90 дней от текущего момента.")
+                            .clicked()
+                        {
+                            self.update_remote_device_expiry(&device.id, 90);
+                        }
+                        if ui
+                            .add_enabled(!device.revoked, egui::Button::new("Бессрочно"))
+                            .on_hover_text("Снять срок действия. Используйте только для полностью доверенных локальных устройств.")
+                            .clicked()
+                        {
+                            self.update_remote_device_expiry(&device.id, 0);
+                        }
+                        if ui
+                            .add_enabled(!device.revoked, egui::Button::new("Ротировать"))
+                            .on_hover_text("Сгенерировать новый token и сразу сделать старый недействительным. Клиент нужно подключить заново.")
+                            .clicked()
+                        {
+                            self.rotate_remote_device_token(&device.id);
+                        }
+                        if ui
+                            .add_enabled(!device.revoked, egui::Button::new("Отозвать"))
+                            .on_hover_text("Немедленно отключить устройство. Старый token перестанет работать после синхронизации с host/relay.")
+                            .clicked()
+                        {
+                            self.revoke_remote_device(&device.id);
+                        }
                     });
                     if roles_changed {
                         self.update_remote_device_roles(
@@ -11121,6 +11266,8 @@ impl LeetcodeApp {
             rate_limit.clamp(10, 5_000)
         };
         self.remote_rate_limit_input = self.config.remote_rate_limit_per_minute.to_string();
+        self.config.remote_default_device_ttl_days =
+            self.config.remote_default_device_ttl_days.min(365);
 
         if let Err(err) = self.config.save() {
             self.remote_status = format!("Не удалось сохранить настройки remote: {err}");
@@ -11381,6 +11528,12 @@ impl LeetcodeApp {
             pairing_code: self.config.remote_pairing_code.clone(),
             pairing_expires_at: self.config.remote_pairing_expires_at,
             state: serde_json::to_value(snapshot).unwrap_or_else(|_| serde_json::json!({})),
+            trusted_devices: self
+                .config
+                .remote_devices
+                .iter()
+                .map(relay_device_from_config)
+                .collect(),
         };
         let relay_url = self.relay_url();
         let (tx, rx) = mpsc::channel();
@@ -11626,7 +11779,8 @@ impl LeetcodeApp {
                     .with_metadata("view", device.role_view.to_string())
                     .with_metadata("chat", device.role_chat.to_string())
                     .with_metadata("approve", device.role_approve.to_string())
-                    .with_metadata("files", device.role_files.to_string()),
+                    .with_metadata("files", device.role_files.to_string())
+                    .with_metadata("expires_at", device.expires_at.to_string()),
                 );
                 self.add_remote_paired_device(RemotePairedDevice {
                     id: device.id,
@@ -11637,6 +11791,7 @@ impl LeetcodeApp {
                     role_approve: device.role_approve,
                     role_files: device.role_files,
                     created_at: device.created_at,
+                    expires_at: device.expires_at,
                 });
             }
             RelayActionKind::PairingRequest { request } => {
@@ -11811,13 +11966,18 @@ impl LeetcodeApp {
         let device_name = request.device_name.clone();
         let created_at = request.created_at;
         let expires_at = request.expires_at;
-        let role_view = request.role_view;
-        let role_chat = request.role_chat;
-        let role_approve = request.role_approve;
-        let role_files = request.role_files;
+        let role_view = request.role_view && self.config.remote_default_role_view;
+        let role_chat = request.role_chat && self.config.remote_default_role_chat;
+        let role_approve = request.role_approve && self.config.remote_default_role_approve;
+        let role_files = request.role_files && self.config.remote_default_role_files;
+        let mut pending: PendingRelayPairing = request.into();
+        pending.role_view = role_view;
+        pending.role_chat = role_chat;
+        pending.role_approve = role_approve;
+        pending.role_files = role_files;
         self.relay_pending_pairings
             .retain(|existing| existing.request_id != request_id);
-        self.relay_pending_pairings.push(request.into());
+        self.relay_pending_pairings.push(pending);
         self.remote_last_action = "Relay: новое устройство ждёт подтверждения".to_string();
         self.record_remote_timeline_event(
             RemoteSessionEvent::new(
@@ -11867,6 +12027,7 @@ impl LeetcodeApp {
             role_chat: request.role_chat,
             role_approve: request.role_approve,
             role_files: request.role_files,
+            device_expires_at: self.default_remote_device_expires_at(unix_timestamp()),
         };
         let (tx, rx) = mpsc::channel();
         self.relay_pairing_decision_rx = Some(rx);
@@ -11919,6 +12080,7 @@ impl LeetcodeApp {
                         role_approve: device.role_approve,
                         role_files: device.role_files,
                         created_at: device.created_at,
+                        expires_at: device.expires_at,
                     });
                     self.remote_status = format!("Устройство {device_name} подтверждено.");
                     self.record_remote_timeline_event(RemoteSessionEvent::new(
@@ -11984,6 +12146,9 @@ impl LeetcodeApp {
             role_files: device.role_files,
             created_at: device.created_at,
             last_seen_at: device.created_at,
+            expires_at: device.expires_at,
+            token_rotated_at: device.created_at,
+            revoked_at: 0,
             revoked: false,
         };
         self.config
@@ -12003,6 +12168,7 @@ impl LeetcodeApp {
             )
             .with_created_at(device.created_at)
             .with_related_id(device.id.clone())
+            .with_metadata("expires_at", device.expires_at.to_string())
             .with_metadata("view", device.role_view.to_string())
             .with_metadata("chat", device.role_chat.to_string())
             .with_metadata("approve", device.role_approve.to_string())
@@ -12061,7 +12227,7 @@ impl LeetcodeApp {
                 return;
             };
             device.revoked = true;
-            device.token.clear();
+            device.revoked_at = unix_timestamp();
             device.name.clone()
         };
         self.remote_last_action = format!("Remote: доступ устройства {} отозван", device_name);
@@ -12082,6 +12248,134 @@ impl LeetcodeApp {
         ));
         if let Err(err) = self.config.save() {
             self.remote_status = format!("Не удалось сохранить отзыв устройства: {err}");
+            return;
+        }
+        self.restart_remote_control_server();
+        self.refresh_journal();
+    }
+
+    fn update_remote_device_name(&mut self, device_id: &str, name: &str) {
+        let normalized_name = normalize_remote_device_display_name(name);
+        let device_name = {
+            let Some(device) = self
+                .config
+                .remote_devices
+                .iter_mut()
+                .find(|device| device.id == device_id)
+            else {
+                return;
+            };
+            device.name = normalized_name.clone();
+            device.name.clone()
+        };
+        self.remote_last_action = format!("Remote: устройство переименовано в {}", device_name);
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "host",
+                device_name.clone(),
+                "device_renamed",
+                "updated",
+                self.remote_last_action.clone(),
+            )
+            .with_related_id(device_id.to_string()),
+        );
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Не удалось сохранить имя устройства: {err}");
+            return;
+        }
+        self.restart_remote_control_server();
+    }
+
+    fn update_remote_device_expiry(&mut self, device_id: &str, ttl_days: u32) {
+        let ttl_days = ttl_days.min(365);
+        let now = unix_timestamp();
+        let expires_at = self.remote_device_expires_at_for_ttl(now, ttl_days);
+        let device_name = {
+            let Some(device) = self
+                .config
+                .remote_devices
+                .iter_mut()
+                .find(|device| device.id == device_id)
+            else {
+                return;
+            };
+            if device.revoked {
+                return;
+            }
+            device.expires_at = expires_at;
+            device.name.clone()
+        };
+        self.remote_last_action = if expires_at == 0 {
+            format!("Remote: срок token устройства {} снят", device_name)
+        } else {
+            format!(
+                "Remote: token устройства {} продлён на {}",
+                device_name,
+                format_duration(Duration::from_secs(expires_at.saturating_sub(now)))
+            )
+        };
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "host",
+                device_name.clone(),
+                "device_expiry_updated",
+                "updated",
+                self.remote_last_action.clone(),
+            )
+            .with_related_id(device_id.to_string())
+            .with_metadata("expires_at", expires_at.to_string())
+            .with_metadata("ttl_days", ttl_days.to_string()),
+        );
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Не удалось сохранить срок token: {err}");
+            return;
+        }
+        self.restart_remote_control_server();
+    }
+
+    fn rotate_remote_device_token(&mut self, device_id: &str) {
+        let now = unix_timestamp();
+        let expires_at = self.default_remote_device_expires_at(now);
+        let device_name = {
+            let Some(device) = self
+                .config
+                .remote_devices
+                .iter_mut()
+                .find(|device| device.id == device_id)
+            else {
+                return;
+            };
+            if device.revoked {
+                return;
+            }
+            device.token = generate_remote_device_token();
+            device.token_rotated_at = now;
+            device.expires_at = expires_at;
+            device.name.clone()
+        };
+        self.remote_last_action = format!(
+            "Remote: token устройства {} ротирован; клиент нужно подключить заново",
+            device_name
+        );
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "host",
+                device_name.clone(),
+                "device_token_rotated",
+                "rotated",
+                self.remote_last_action.clone(),
+            )
+            .with_created_at(now)
+            .with_related_id(device_id.to_string())
+            .with_metadata("expires_at", expires_at.to_string()),
+        );
+        append_journal(format!(
+            "remote_device\trotated\t{}\t{}",
+            now,
+            compact(&device_name, 160)
+        ));
+        if let Err(err) = self.config.save() {
+            self.remote_status = format!("Не удалось сохранить новый token устройства: {err}");
             return;
         }
         self.restart_remote_control_server();
@@ -17875,6 +18169,11 @@ fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
         agent_id: config.agent_id.clone(),
         pairing_code: config.remote_pairing_code.clone(),
         pairing_expires_at: config.remote_pairing_expires_at,
+        default_role_view: config.remote_default_role_view,
+        default_role_chat: config.remote_default_role_chat,
+        default_role_approve: config.remote_default_role_approve,
+        default_role_files: config.remote_default_role_files,
+        default_device_ttl_days: config.remote_default_device_ttl_days,
         devices: config
             .remote_devices
             .iter()
@@ -17897,6 +18196,9 @@ fn remote_trusted_device_from_config(device: &RemoteDeviceConfig) -> RemoteTrust
         role_files: device.role_files,
         created_at: device.created_at,
         last_seen_at: device.last_seen_at,
+        expires_at: device.expires_at,
+        token_rotated_at: device.token_rotated_at,
+        revoked_at: device.revoked_at,
         revoked: device.revoked,
     }
 }
@@ -17911,7 +18213,60 @@ fn remote_device_summary_from_config(device: &RemoteDeviceConfig) -> RemoteDevic
         role_files: device.role_files,
         created_at: device.created_at,
         last_seen_at: device.last_seen_at,
+        expires_at: device.expires_at,
+        token_rotated_at: device.token_rotated_at,
+        revoked_at: device.revoked_at,
         revoked: device.revoked,
+    }
+}
+
+fn relay_device_from_config(device: &RemoteDeviceConfig) -> RelayDevice {
+    RelayDevice {
+        id: device.id.clone(),
+        name: device.name.clone(),
+        token: device.token.clone(),
+        role_view: device.role_view,
+        role_chat: device.role_chat,
+        role_approve: device.role_approve,
+        role_files: device.role_files,
+        created_at: device.created_at,
+        last_seen_at: device.last_seen_at,
+        expires_at: device.expires_at,
+        token_rotated_at: device.token_rotated_at,
+        revoked_at: device.revoked_at,
+        revoked: device.revoked,
+    }
+}
+
+fn normalize_remote_device_display_name(name: &str) -> String {
+    let name = name.trim().chars().take(80).collect::<String>();
+    if name.is_empty() {
+        "Устройство".to_string()
+    } else {
+        name
+    }
+}
+
+fn remote_device_is_expired(device: &RemoteDeviceConfig, now: u64) -> bool {
+    !device.revoked && device.expires_at > 0 && device.expires_at <= now
+}
+
+fn remote_device_expiry_label(device: &RemoteDeviceConfig, now: u64) -> String {
+    if device.revoked {
+        if device.revoked_at > 0 {
+            format!("отозван {} назад", age_label(device.revoked_at))
+        } else {
+            "отозван".to_string()
+        }
+    } else if device.expires_at == 0 {
+        "token без срока".to_string()
+    } else if device.expires_at <= now {
+        format!("token истёк {} назад", age_label(device.expires_at))
+    } else {
+        format!(
+            "token истекает через {}",
+            format_duration(Duration::from_secs(device.expires_at.saturating_sub(now)))
+        )
     }
 }
 

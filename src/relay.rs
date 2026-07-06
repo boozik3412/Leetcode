@@ -28,6 +28,8 @@ pub struct RelayHostPollRequest {
     pub pairing_expires_at: u64,
     #[serde(default)]
     pub state: Value,
+    #[serde(default)]
+    pub trusted_devices: Vec<RelayDevice>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -100,6 +102,8 @@ pub struct RelayHostPairingDecisionRequest {
     pub role_approve: bool,
     #[serde(default)]
     pub role_files: bool,
+    #[serde(default)]
+    pub device_expires_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,6 +214,12 @@ pub struct RelayDevice {
     pub created_at: u64,
     #[serde(default)]
     pub last_seen_at: u64,
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub token_rotated_at: u64,
+    #[serde(default)]
+    pub revoked_at: u64,
     #[serde(default)]
     pub revoked: bool,
 }

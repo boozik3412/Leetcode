@@ -228,7 +228,7 @@ cd dist\leetcode-client-portable
 powershell -ExecutionPolicy Bypass -File .\install-leetcode-client.ps1
 ```
 
-Direct thin-client flow: enable Remote API in the main Leetcode app, create a short-lived pairing code in `Подключение устройств`, then click `Копировать паспорт`. In Leetcode Client click `Вставить паспорт`, then `Подключить по коду`. Direct local pairing still returns a device token immediately because the request goes straight to the trusted host API. The host app shows trusted devices with roles, last seen, revoke, and per-device role editing.
+Direct thin-client flow: enable Remote API in the main Leetcode app, create a short-lived pairing code in `Подключение устройств`, then click `Копировать паспорт`. In Leetcode Client click `Вставить паспорт`, then `Подключить по коду`. Direct local pairing still returns a device token immediately because the request goes straight to the trusted host API. The host app shows trusted devices with editable names, roles, last seen, token expiry, revoke, extend, never-expire, and rotate controls.
 
 Relay MVP flow: run `leetcode-relay.exe --bind 0.0.0.0:17990` on a reachable machine. In the main Leetcode app open `Контроль -> Удалённый доступ`, enable `Relay`, set the Relay URL, and save. Create a short-lived pairing code and copy the passport. In Leetcode Client enable `Relay по Agent ID`, paste the passport, and connect by code. Relay pairing now creates a pending device request: approve or deny it in the host app, then click `Проверить подтверждение` in Leetcode Client. Only after host approval does the relay issue a per-device token.
 

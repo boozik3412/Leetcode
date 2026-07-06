@@ -50,6 +50,11 @@ pub struct AppConfig {
     pub remote_role_chat: bool,
     pub remote_role_approve: bool,
     pub remote_role_files: bool,
+    pub remote_default_role_view: bool,
+    pub remote_default_role_chat: bool,
+    pub remote_default_role_approve: bool,
+    pub remote_default_role_files: bool,
+    pub remote_default_device_ttl_days: u32,
     pub remote_allowed_origins: String,
     pub remote_rate_limit_per_minute: u32,
     pub remote_audit_enabled: bool,
@@ -127,6 +132,12 @@ pub struct RemoteDeviceConfig {
     #[serde(default)]
     pub last_seen_at: u64,
     #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub token_rotated_at: u64,
+    #[serde(default)]
+    pub revoked_at: u64,
+    #[serde(default)]
     pub revoked: bool,
 }
 
@@ -197,6 +208,16 @@ struct PersistedConfig {
     remote_role_approve: bool,
     #[serde(default = "default_true")]
     remote_role_files: bool,
+    #[serde(default = "default_true")]
+    remote_default_role_view: bool,
+    #[serde(default = "default_true")]
+    remote_default_role_chat: bool,
+    #[serde(default = "default_true")]
+    remote_default_role_approve: bool,
+    #[serde(default)]
+    remote_default_role_files: bool,
+    #[serde(default = "default_remote_device_ttl_days")]
+    remote_default_device_ttl_days: u32,
     #[serde(default)]
     remote_allowed_origins: String,
     #[serde(default = "default_remote_rate_limit_per_minute")]
@@ -273,6 +294,11 @@ impl Default for PersistedConfig {
             remote_role_chat: true,
             remote_role_approve: true,
             remote_role_files: true,
+            remote_default_role_view: true,
+            remote_default_role_chat: true,
+            remote_default_role_approve: true,
+            remote_default_role_files: false,
+            remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
@@ -384,6 +410,13 @@ impl AppConfig {
             remote_role_chat: persisted.remote_role_chat,
             remote_role_approve: persisted.remote_role_approve,
             remote_role_files: persisted.remote_role_files,
+            remote_default_role_view: persisted.remote_default_role_view,
+            remote_default_role_chat: persisted.remote_default_role_chat,
+            remote_default_role_approve: persisted.remote_default_role_approve,
+            remote_default_role_files: persisted.remote_default_role_files,
+            remote_default_device_ttl_days: normalize_remote_device_ttl_days(
+                persisted.remote_default_device_ttl_days,
+            ),
             remote_allowed_origins: normalize_remote_allowed_origins(
                 &persisted.remote_allowed_origins,
             ),
@@ -483,6 +516,13 @@ impl AppConfig {
             remote_role_chat: self.remote_role_chat,
             remote_role_approve: self.remote_role_approve,
             remote_role_files: self.remote_role_files,
+            remote_default_role_view: self.remote_default_role_view,
+            remote_default_role_chat: self.remote_default_role_chat,
+            remote_default_role_approve: self.remote_default_role_approve,
+            remote_default_role_files: self.remote_default_role_files,
+            remote_default_device_ttl_days: normalize_remote_device_ttl_days(
+                self.remote_default_device_ttl_days,
+            ),
             remote_allowed_origins: normalize_remote_allowed_origins(&self.remote_allowed_origins),
             remote_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
                 self.remote_rate_limit_per_minute,
@@ -866,6 +906,10 @@ fn default_remote_rate_limit_per_minute() -> u32 {
     120
 }
 
+fn default_remote_device_ttl_days() -> u32 {
+    30
+}
+
 fn default_relay_url() -> String {
     DEFAULT_RELAY_URL.to_string()
 }
@@ -973,6 +1017,10 @@ fn normalize_remote_rate_limit_per_minute(value: u32) -> u32 {
     }
 }
 
+fn normalize_remote_device_ttl_days(value: u32) -> u32 {
+    value.min(365)
+}
+
 fn normalize_relay_url(value: &str) -> String {
     let value = value.trim().trim_end_matches('/');
     if value.is_empty() {
@@ -1018,6 +1066,12 @@ fn normalize_remote_devices(devices: Vec<RemoteDeviceConfig>) -> Vec<RemoteDevic
         }
         if device.name.is_empty() {
             device.name = "Устройство".to_string();
+        }
+        if device.token_rotated_at == 0 {
+            device.token_rotated_at = device.created_at;
+        }
+        if device.revoked && device.revoked_at == 0 {
+            device.revoked_at = current_unix_timestamp();
         }
         if normalized.iter().any(|existing: &RemoteDeviceConfig| {
             existing.id == device.id || existing.token == device.token
@@ -1456,6 +1510,11 @@ mod tests {
             remote_role_chat: true,
             remote_role_approve: true,
             remote_role_files: true,
+            remote_default_role_view: true,
+            remote_default_role_chat: true,
+            remote_default_role_approve: true,
+            remote_default_role_files: false,
+            remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
@@ -1526,6 +1585,11 @@ mod tests {
             remote_role_chat: true,
             remote_role_approve: true,
             remote_role_files: true,
+            remote_default_role_view: true,
+            remote_default_role_chat: true,
+            remote_default_role_approve: true,
+            remote_default_role_files: false,
+            remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
@@ -1649,6 +1713,9 @@ mod tests {
                 role_files: false,
                 created_at: 1,
                 last_seen_at: 1,
+                expires_at: 0,
+                token_rotated_at: 1,
+                revoked_at: 0,
                 revoked: false,
             }])
             .len(),
@@ -1759,6 +1826,11 @@ mod tests {
             remote_role_chat: true,
             remote_role_approve: true,
             remote_role_files: true,
+            remote_default_role_view: true,
+            remote_default_role_chat: true,
+            remote_default_role_approve: true,
+            remote_default_role_files: false,
+            remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
@@ -1822,6 +1894,11 @@ mod tests {
             remote_role_chat: true,
             remote_role_approve: true,
             remote_role_files: true,
+            remote_default_role_view: true,
+            remote_default_role_chat: true,
+            remote_default_role_approve: true,
+            remote_default_role_files: false,
+            remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,
@@ -1888,6 +1965,11 @@ mod tests {
             remote_role_chat: true,
             remote_role_approve: true,
             remote_role_files: true,
+            remote_default_role_view: true,
+            remote_default_role_chat: true,
+            remote_default_role_approve: true,
+            remote_default_role_files: false,
+            remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
             remote_audit_enabled: true,

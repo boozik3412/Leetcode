@@ -41,6 +41,11 @@ pub struct RemoteAccessPolicy {
     pub agent_id: String,
     pub pairing_code: String,
     pub pairing_expires_at: u64,
+    pub default_role_view: bool,
+    pub default_role_chat: bool,
+    pub default_role_approve: bool,
+    pub default_role_files: bool,
+    pub default_device_ttl_days: u32,
     pub devices: Vec<RemoteTrustedDevice>,
     pub allowed_origins: Vec<String>,
     pub rate_limit_per_minute: u32,
@@ -57,6 +62,11 @@ impl Default for RemoteAccessPolicy {
             agent_id: String::new(),
             pairing_code: String::new(),
             pairing_expires_at: 0,
+            default_role_view: true,
+            default_role_chat: true,
+            default_role_approve: true,
+            default_role_files: false,
+            default_device_ttl_days: 30,
             devices: Vec::new(),
             allowed_origins: Vec::new(),
             rate_limit_per_minute: 120,
@@ -76,6 +86,12 @@ pub struct RemoteTrustedDevice {
     pub role_files: bool,
     pub created_at: u64,
     pub last_seen_at: u64,
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub token_rotated_at: u64,
+    #[serde(default)]
+    pub revoked_at: u64,
     pub revoked: bool,
 }
 
@@ -89,6 +105,12 @@ pub struct RemoteDeviceSummary {
     pub role_files: bool,
     pub created_at: u64,
     pub last_seen_at: u64,
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub token_rotated_at: u64,
+    #[serde(default)]
+    pub revoked_at: u64,
     pub revoked: bool,
 }
 
@@ -102,6 +124,8 @@ pub struct RemotePairedDevice {
     pub role_approve: bool,
     pub role_files: bool,
     pub created_at: u64,
+    #[serde(default)]
+    pub expires_at: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -956,21 +980,32 @@ fn handle_pair_device(
     } else {
         name.chars().take(80).collect::<String>()
     };
+    let created_at = unix_timestamp();
     let device = RemotePairedDevice {
         id: format!("device-{}", uuid::Uuid::new_v4().simple()),
         name,
         token: generate_remote_device_token(),
-        role_view: payload_bool(&payload, "role_view", true) && policy.view,
-        role_chat: payload_bool(&payload, "role_chat", true) && policy.chat,
-        role_approve: payload_bool(&payload, "role_approve", false) && policy.approve,
-        role_files: payload_bool(&payload, "role_files", false) && policy.files,
-        created_at: unix_timestamp(),
+        role_view: payload_bool(&payload, "role_view", policy.default_role_view)
+            && policy.default_role_view
+            && policy.view,
+        role_chat: payload_bool(&payload, "role_chat", policy.default_role_chat)
+            && policy.default_role_chat
+            && policy.chat,
+        role_approve: payload_bool(&payload, "role_approve", policy.default_role_approve)
+            && policy.default_role_approve
+            && policy.approve,
+        role_files: payload_bool(&payload, "role_files", policy.default_role_files)
+            && policy.default_role_files
+            && policy.files,
+        created_at,
+        expires_at: remote_device_expires_at(created_at, policy.default_device_ttl_days),
     };
     let response = json!({
         "ok": true,
         "device_id": device.id,
         "device_name": device.name,
         "device_token": device.token,
+        "expires_at": device.expires_at,
         "roles": {
             "view": device.role_view,
             "chat": device.role_chat,
@@ -998,6 +1033,14 @@ fn payload_bool(payload: &Value, key: &str, fallback: bool) -> bool {
         .get(key)
         .and_then(Value::as_bool)
         .unwrap_or(fallback)
+}
+
+fn remote_device_expires_at(created_at: u64, ttl_days: u32) -> u64 {
+    if ttl_days == 0 {
+        0
+    } else {
+        created_at.saturating_add(ttl_days as u64 * 86_400)
+    }
 }
 
 fn handle_submit_task(
@@ -1487,8 +1530,12 @@ fn authorized_subject(
     policy
         .devices
         .iter()
-        .find(|device| !device.revoked && device.token == presented_token)
+        .find(|device| remote_trusted_device_is_active(device) && device.token == presented_token)
         .map(|device| AuthorizedRemoteSubject::from_device(device, policy))
+}
+
+fn remote_trusted_device_is_active(device: &RemoteTrustedDevice) -> bool {
+    !device.revoked && (device.expires_at == 0 || device.expires_at > unix_timestamp())
 }
 
 fn is_authorized(headers: &HashMap<String, String>, query: &str, token: &str) -> bool {
@@ -2277,6 +2324,9 @@ mod tests {
             role_files: false,
             created_at: 1,
             last_seen_at: 1,
+            expires_at: 0,
+            token_rotated_at: 1,
+            revoked_at: 0,
             revoked: false,
         });
         let mut server = start_remote_control_server(
@@ -2315,6 +2365,47 @@ mod tests {
         assert!(files.starts_with("HTTP/1.1 403 Forbidden"));
         assert!(files.contains("files"));
 
+        server.stop();
+    }
+
+    #[test]
+    fn remote_device_token_expires() {
+        let shared_state = new_remote_shared_state();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.devices.push(RemoteTrustedDevice {
+            id: "device-expired".to_string(),
+            name: "Old Laptop".to_string(),
+            token: "ldt-expired".to_string(),
+            role_view: true,
+            role_chat: true,
+            role_approve: true,
+            role_files: false,
+            created_at: 1,
+            last_seen_at: 1,
+            expires_at: unix_timestamp().saturating_sub(1),
+            token_rotated_at: 1,
+            revoked_at: 0,
+            revoked: false,
+        });
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-admin".to_string(),
+                policy,
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let state = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ldt-expired\r\n\r\n",
+        );
+
+        assert!(state.starts_with("HTTP/1.1 401 Unauthorized"));
         server.stop();
     }
 
