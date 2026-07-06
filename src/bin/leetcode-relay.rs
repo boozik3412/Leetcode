@@ -15,6 +15,7 @@ use relay::{
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
+use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -90,40 +91,183 @@ enum DeviceRole {
     Desktop,
 }
 
+#[derive(Clone, Debug)]
+struct RelayRuntimeConfig {
+    bind: String,
+    public_url: String,
+    tls_mode: RelayTlsMode,
+    host_session_ttl_secs: u64,
+    client_session_ttl_secs: u64,
+    client_poll_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelayTlsMode {
+    PlainHttp,
+    EdgeTls,
+}
+
+impl RelayTlsMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            RelayTlsMode::PlainHttp => "plain_http",
+            RelayTlsMode::EdgeTls => "edge_tls",
+        }
+    }
+}
+
+impl RelayRuntimeConfig {
+    fn from_args<I>(args: I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut bind = env::var("LEETCODE_RELAY_BIND").unwrap_or_else(|_| {
+            DEFAULT_RELAY_URL
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .to_string()
+        });
+        let mut public_url = env::var("LEETCODE_RELAY_PUBLIC_URL").unwrap_or_default();
+        let mut tls_mode = parse_tls_mode(&env::var("LEETCODE_RELAY_TLS_MODE").unwrap_or_default());
+        let mut host_session_ttl_secs =
+            env_u64("LEETCODE_RELAY_HOST_TTL_SECS", RELAY_HOST_SESSION_TTL_SECS);
+        let mut client_session_ttl_secs = env_u64(
+            "LEETCODE_RELAY_CLIENT_SESSION_TTL_SECS",
+            RELAY_CLIENT_SESSION_TTL_SECS,
+        );
+        let mut client_poll_ms = env_u64("LEETCODE_RELAY_CLIENT_POLL_MS", 2_000);
+
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--bind" => {
+                    if let Some(value) = args.next() {
+                        bind = value;
+                    }
+                }
+                "--public-url" => {
+                    if let Some(value) = args.next() {
+                        public_url = value;
+                    }
+                }
+                "--tls-mode" => {
+                    if let Some(value) = args.next() {
+                        tls_mode = parse_tls_mode(&value);
+                    }
+                }
+                "--host-session-ttl-secs" => {
+                    if let Some(value) = args.next() {
+                        host_session_ttl_secs = value.parse().unwrap_or(host_session_ttl_secs);
+                    }
+                }
+                "--client-session-ttl-secs" => {
+                    if let Some(value) = args.next() {
+                        client_session_ttl_secs = value.parse().unwrap_or(client_session_ttl_secs);
+                    }
+                }
+                "--client-poll-ms" => {
+                    if let Some(value) = args.next() {
+                        client_poll_ms = value.parse().unwrap_or(client_poll_ms);
+                    }
+                }
+                _ => {
+                    if let Some(value) = arg.strip_prefix("--bind=") {
+                        bind = value.to_string();
+                    } else if let Some(value) = arg.strip_prefix("--public-url=") {
+                        public_url = value.to_string();
+                    } else if let Some(value) = arg.strip_prefix("--tls-mode=") {
+                        tls_mode = parse_tls_mode(value);
+                    } else if let Some(value) = arg.strip_prefix("--host-session-ttl-secs=") {
+                        host_session_ttl_secs = value.parse().unwrap_or(host_session_ttl_secs);
+                    } else if let Some(value) = arg.strip_prefix("--client-session-ttl-secs=") {
+                        client_session_ttl_secs = value.parse().unwrap_or(client_session_ttl_secs);
+                    } else if let Some(value) = arg.strip_prefix("--client-poll-ms=") {
+                        client_poll_ms = value.parse().unwrap_or(client_poll_ms);
+                    }
+                }
+            }
+        }
+
+        host_session_ttl_secs = host_session_ttl_secs.clamp(5, 300);
+        client_session_ttl_secs = client_session_ttl_secs.clamp(60, 86_400);
+        client_poll_ms = client_poll_ms.clamp(500, 60_000);
+
+        if public_url.trim().is_empty() {
+            public_url = format!("http://{bind}");
+        }
+        public_url = public_url.trim().trim_end_matches('/').to_string();
+        if matches!(tls_mode, RelayTlsMode::PlainHttp)
+            && (public_url.starts_with("https://") || public_url.starts_with("wss://"))
+        {
+            tls_mode = RelayTlsMode::EdgeTls;
+        }
+
+        Self {
+            bind,
+            public_url,
+            tls_mode,
+            host_session_ttl_secs,
+            client_session_ttl_secs,
+            client_poll_ms,
+        }
+    }
+
+    fn supports_wss(&self) -> bool {
+        matches!(self.tls_mode, RelayTlsMode::EdgeTls)
+            || self.public_url.starts_with("https://")
+            || self.public_url.starts_with("wss://")
+    }
+
+    fn transport_label(&self) -> &'static str {
+        if self.supports_wss() {
+            "https_edge"
+        } else {
+            "http"
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
-    let bind = bind_addr_from_args();
+    let config = Arc::new(RelayRuntimeConfig::from_args(env::args().skip(1)));
+    let bind = config.bind.clone();
     let listener = TcpListener::bind(&bind)?;
     let state = Arc::new(Mutex::new(RelayState::default()));
-    println!("Leetcode Relay listening on http://{bind}");
+    println!(
+        "Leetcode Relay listening on http://{bind} (public: {}, tls_mode: {})",
+        config.public_url,
+        config.tls_mode.as_str()
+    );
 
     for stream in listener.incoming() {
         let Ok(stream) = stream else {
             continue;
         };
         let state = Arc::clone(&state);
-        thread::spawn(move || handle_connection(stream, state));
+        let config = Arc::clone(&config);
+        thread::spawn(move || handle_connection(stream, state, config));
     }
     Ok(())
 }
 
-fn bind_addr_from_args() -> String {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--bind" {
-            if let Some(value) = args.next() {
-                return value;
-            }
-        } else if let Some(value) = arg.strip_prefix("--bind=") {
-            return value.to_string();
-        }
-    }
-    DEFAULT_RELAY_URL
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .to_string()
+fn env_u64(name: &str, fallback: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(fallback)
 }
 
-fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
+fn parse_tls_mode(value: &str) -> RelayTlsMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "edge" | "edge_tls" | "reverse_proxy" | "proxy" | "https" | "wss" => RelayTlsMode::EdgeTls,
+        _ => RelayTlsMode::PlainHttp,
+    }
+}
+
+fn handle_connection(
+    mut stream: TcpStream,
+    state: Arc<Mutex<RelayState>>,
+    config: Arc<RelayRuntimeConfig>,
+) {
     let Ok(request) = read_http_request(&mut stream) else {
         write_json_response(
             &mut stream,
@@ -152,28 +296,34 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
                 "theme_color": "#1f9fc4"
             }),
         ),
-        ("GET", "/health") => handle_health(&mut stream, state),
-        ("POST", "/api/hosts/poll") => handle_host_poll(&mut stream, &request.body, state),
+        ("GET", "/health") => handle_health(&mut stream, state, &config),
+        ("POST", "/api/hosts/poll") => handle_host_poll(&mut stream, &request.body, state, &config),
         ("POST", "/api/hosts/pairing/decision") => {
             handle_host_pairing_decision(&mut stream, &request.body, state)
         }
-        ("POST", "/api/clients/pair") => handle_client_pair(&mut stream, &request.body, state),
+        ("POST", "/api/clients/pair") => {
+            handle_client_pair(&mut stream, &request.body, state, &config)
+        }
         ("POST", "/api/clients/pair/status") => {
-            handle_client_pair_status(&mut stream, &request.body, state)
+            handle_client_pair_status(&mut stream, &request.body, state, &config)
         }
         ("POST", "/api/clients/sessions") => {
-            handle_client_session(&mut stream, &request.body, state)
+            handle_client_session(&mut stream, &request.body, state, &config)
         }
-        ("POST", "/api/clients/state") => handle_client_state(&mut stream, &request.body, state),
-        ("POST", "/api/clients/tasks") => handle_client_task(&mut stream, &request.body, state),
+        ("POST", "/api/clients/state") => {
+            handle_client_state(&mut stream, &request.body, state, &config)
+        }
+        ("POST", "/api/clients/tasks") => {
+            handle_client_task(&mut stream, &request.body, state, &config)
+        }
         ("POST", "/api/clients/commands") => {
-            handle_client_command(&mut stream, &request.body, state)
+            handle_client_command(&mut stream, &request.body, state, &config)
         }
         ("POST", "/api/clients/run-gate") => {
-            handle_client_approval(&mut stream, &request.body, state, true)
+            handle_client_approval(&mut stream, &request.body, state, &config, true)
         }
         ("POST", "/api/clients/approval") => {
-            handle_client_approval(&mut stream, &request.body, state, false)
+            handle_client_approval(&mut stream, &request.body, state, &config, false)
         }
         _ => write_json_response(
             &mut stream,
@@ -183,14 +333,18 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
     }
 }
 
-fn handle_health(stream: &mut TcpStream, state: Arc<Mutex<RelayState>>) {
+fn handle_health(
+    stream: &mut TcpStream,
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let now = unix_timestamp();
     let state = state.lock().expect("relay state poisoned");
     let host_count = state.hosts.len();
     let online_hosts = state
         .hosts
         .values()
-        .filter(|host| host_online(host, now))
+        .filter(|host| host_online(host, now, config.host_session_ttl_secs))
         .count();
     let queued_actions: usize = state.hosts.values().map(|host| host.actions.len()).sum();
     write_json_response(
@@ -202,13 +356,24 @@ fn handle_health(stream: &mut TcpStream, state: Arc<Mutex<RelayState>>) {
             "host_count": host_count,
             "online_hosts": online_hosts,
             "queued_actions": queued_actions,
-            "host_session_ttl_secs": RELAY_HOST_SESSION_TTL_SECS,
+            "host_session_ttl_secs": config.host_session_ttl_secs,
+            "client_session_ttl_secs": config.client_session_ttl_secs,
+            "recommended_client_poll_ms": config.client_poll_ms,
+            "public_url": config.public_url,
+            "tls_mode": config.tls_mode.as_str(),
+            "transport": config.transport_label(),
+            "supports_wss": config.supports_wss(),
             "updated_at": now
         }),
     );
 }
 
-fn handle_host_poll(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+fn handle_host_poll(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let Ok(request) = serde_json::from_slice::<RelayHostPollRequest>(body) else {
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
@@ -250,13 +415,18 @@ fn handle_host_poll(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayS
             ok: true,
             actions,
             server_time: unix_timestamp(),
-            next_poll_after_ms: 2_000,
+            next_poll_after_ms: config.client_poll_ms,
             error: None,
         },
     );
 }
 
-fn handle_client_pair(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+fn handle_client_pair(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let Ok(request) = serde_json::from_slice::<RelayPairRequest>(body) else {
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
@@ -273,7 +443,7 @@ fn handle_client_pair(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         );
         return;
     };
-    if !host_online(host, now) {
+    if !host_online(host, now, config.host_session_ttl_secs) {
         write_json_response(
             stream,
             503,
@@ -343,13 +513,18 @@ fn handle_client_pair(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
             device_token: String::new(),
             status: "pending".to_string(),
             request_id: pairing_request.request_id,
-            poll_after_ms: 2_000,
+            poll_after_ms: config.client_poll_ms,
             error: None,
         },
     );
 }
 
-fn handle_client_pair_status(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+fn handle_client_pair_status(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let Ok(request) = serde_json::from_slice::<RelayPairStatusRequest>(body) else {
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
@@ -377,7 +552,7 @@ fn handle_client_pair_status(stream: &mut TcpStream, body: &[u8], state: Arc<Mut
                 device_token: String::new(),
                 status: "unknown".to_string(),
                 request_id: request.request_id,
-                poll_after_ms: 2_000,
+                poll_after_ms: config.client_poll_ms,
                 error: Some("pairing request not found".to_string()),
             },
         );
@@ -407,13 +582,18 @@ fn handle_client_pair_status(stream: &mut TcpStream, body: &[u8], state: Arc<Mut
                 .unwrap_or_default(),
             status: record.status.as_str().to_string(),
             request_id: record.request.request_id.clone(),
-            poll_after_ms: 2_000,
+            poll_after_ms: config.client_poll_ms,
             error: record.error.clone(),
         },
     );
 }
 
-fn handle_client_session(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+fn handle_client_session(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let Ok(request) = serde_json::from_slice::<RelayClientSessionRequest>(body) else {
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
@@ -443,7 +623,9 @@ fn handle_client_session(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
-    let Some(session_token) = issue_relay_session_token(&agent_id, host, device, now) else {
+    let Some(session_token) =
+        issue_relay_session_token(&agent_id, host, device, now, config.client_session_ttl_secs)
+    else {
         write_json_response(
             stream,
             503,
@@ -457,8 +639,8 @@ fn handle_client_session(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         &RelayClientSessionReply {
             ok: true,
             session_token,
-            expires_at: now.saturating_add(RELAY_CLIENT_SESSION_TTL_SECS),
-            ttl_secs: RELAY_CLIENT_SESSION_TTL_SECS,
+            expires_at: now.saturating_add(config.client_session_ttl_secs),
+            ttl_secs: config.client_session_ttl_secs,
             error: None,
         },
     );
@@ -559,7 +741,12 @@ fn handle_host_pairing_decision(
     write_json_response(stream, 200, &reply);
 }
 
-fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+fn handle_client_state(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let Ok(request) = serde_json::from_slice::<RelayClientRequest>(body) else {
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
@@ -572,7 +759,7 @@ fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rel
         return;
     };
     let now = unix_timestamp();
-    let online = host_online(host, now);
+    let online = host_online(host, now, config.host_session_ttl_secs);
     if !online {
         write_json_response(
             stream,
@@ -584,6 +771,12 @@ fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rel
                 host_updated_at: host.updated_at,
                 host_age_secs: now.saturating_sub(host.updated_at),
                 queued_actions: host.actions.len(),
+                recommended_client_poll_ms: config.client_poll_ms,
+                host_session_ttl_secs: config.host_session_ttl_secs,
+                client_session_ttl_secs: config.client_session_ttl_secs,
+                public_url: config.public_url.clone(),
+                transport: config.transport_label().to_string(),
+                supports_wss: config.supports_wss(),
                 error: Some("agent is offline on relay".to_string()),
             },
         );
@@ -600,12 +793,23 @@ fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rel
             host_updated_at: host.updated_at,
             host_age_secs: now.saturating_sub(host.updated_at),
             queued_actions: host.actions.len(),
+            recommended_client_poll_ms: config.client_poll_ms,
+            host_session_ttl_secs: config.host_session_ttl_secs,
+            client_session_ttl_secs: config.client_session_ttl_secs,
+            public_url: config.public_url.clone(),
+            transport: config.transport_label().to_string(),
+            supports_wss: config.supports_wss(),
             error: None,
         },
     );
 }
 
-fn handle_client_task(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+fn handle_client_task(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let Ok(request) = serde_json::from_slice::<RelayClientTaskRequest>(body) else {
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
@@ -625,7 +829,7 @@ fn handle_client_task(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
-    if !host_online(host, unix_timestamp()) {
+    if !host_online(host, unix_timestamp(), config.host_session_ttl_secs) {
         write_json_response(
             stream,
             503,
@@ -655,7 +859,12 @@ fn handle_client_task(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
     );
 }
 
-fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+fn handle_client_command(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
+) {
     let Ok(request) = serde_json::from_slice::<RelayClientCommandRequest>(body) else {
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
@@ -667,7 +876,7 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
-    if !host_online(host, unix_timestamp()) {
+    if !host_online(host, unix_timestamp(), config.host_session_ttl_secs) {
         write_json_response(
             stream,
             503,
@@ -769,6 +978,7 @@ fn handle_client_approval(
     stream: &mut TcpStream,
     body: &[u8],
     state: Arc<Mutex<RelayState>>,
+    config: &RelayRuntimeConfig,
     run_gate: bool,
 ) {
     let Ok(request) = serde_json::from_slice::<RelayClientApprovalRequest>(body) else {
@@ -786,7 +996,7 @@ fn handle_client_approval(
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
-    if !host_online(host, unix_timestamp()) {
+    if !host_online(host, unix_timestamp(), config.host_session_ttl_secs) {
         write_json_response(
             stream,
             503,
@@ -933,8 +1143,9 @@ fn issue_relay_session_token(
     host: &HostRecord,
     device: &RelayDevice,
     now: u64,
+    ttl_secs: u64,
 ) -> Option<String> {
-    let expires_at = now.saturating_add(RELAY_CLIENT_SESSION_TTL_SECS);
+    let expires_at = now.saturating_add(ttl_secs);
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let payload = format!(
         "{}.{}.{}.{}.{}.{}",
@@ -1019,8 +1230,8 @@ fn relay_device_is_active(device: &RelayDevice, now: u64) -> bool {
     !device.revoked && (device.expires_at == 0 || device.expires_at > now)
 }
 
-fn host_online(host: &HostRecord, now: u64) -> bool {
-    now.saturating_sub(host.updated_at) <= RELAY_HOST_SESSION_TTL_SECS
+fn host_online(host: &HostRecord, now: u64, ttl_secs: u64) -> bool {
+    now.saturating_sub(host.updated_at) <= ttl_secs
 }
 
 struct HttpRequest {
@@ -1217,6 +1428,8 @@ let lastState = null;
 let activeTab = 'runs';
 let timer = null;
 let relaySession = {token:'', expiresAt:0};
+let pollDelayMs = 2500;
+let lastPollAt = 0;
 function params(){return new URLSearchParams(location.search)}
 function loadConnection(){
   $('agentId').value = params().get('agent_id') || localStorage.getItem('leetcode_relay_agent_id') || '';
@@ -1328,8 +1541,12 @@ async function loadState(){
   try{
     const data = await relayPost('/api/clients/state', await authedRequestBase(), true);
     lastState = data;
+    pollDelayMs = Math.max(1500, data.recommended_client_poll_ms || 2500);
     render(data);
-  }catch(error){setStatus('ошибка: ' + error.message, false)}
+  }catch(error){
+    pollDelayMs = Math.min(30000, Math.max(2500, Math.floor(pollDelayMs * 1.7)));
+    setStatus('ошибка: ' + error.message + ' · повтор через ' + Math.round(pollDelayMs/1000) + ' с', false)
+  }
 }
 function remoteDiagnosticsText(data, s){
   const lines = [];
@@ -1455,9 +1672,12 @@ loadConnection();
 if($('deviceToken').value.trim()) loadState();
 else if(currentPending()) checkPairStatus();
 timer = setInterval(() => {
+  const now = Date.now();
+  if(now - lastPollAt < pollDelayMs) return;
+  lastPollAt = now;
   if($('deviceToken').value.trim()) loadState();
   else if(currentPending()) checkPairStatus();
-}, 2500);
+}, 500);
 </script>
 </body>
 </html>"##
@@ -1477,6 +1697,26 @@ mod tests {
     #[test]
     fn relay_bind_arg_defaults_to_default_url_host() {
         assert!(DEFAULT_RELAY_URL.contains("17990"));
+    }
+
+    #[test]
+    fn relay_runtime_config_parses_public_edge_mode() {
+        let config = RelayRuntimeConfig::from_args([
+            "--bind=0.0.0.0:17990".to_string(),
+            "--public-url=https://relay.example.com".to_string(),
+            "--tls-mode=edge".to_string(),
+            "--host-session-ttl-secs=45".to_string(),
+            "--client-session-ttl-secs=1200".to_string(),
+            "--client-poll-ms=3500".to_string(),
+        ]);
+
+        assert_eq!(config.bind, "0.0.0.0:17990");
+        assert_eq!(config.public_url, "https://relay.example.com");
+        assert_eq!(config.tls_mode, RelayTlsMode::EdgeTls);
+        assert!(config.supports_wss());
+        assert_eq!(config.host_session_ttl_secs, 45);
+        assert_eq!(config.client_session_ttl_secs, 1200);
+        assert_eq!(config.client_poll_ms, 3500);
     }
 
     #[test]
@@ -1515,8 +1755,14 @@ mod tests {
         };
         host.devices.insert(device.id.clone(), device.clone());
 
-        let session =
-            issue_relay_session_token("LC-TEST", &host, &device, now).expect("session token");
+        let session = issue_relay_session_token(
+            "LC-TEST",
+            &host,
+            &device,
+            now,
+            RELAY_CLIENT_SESSION_TTL_SECS,
+        )
+        .expect("session token");
         assert_eq!(
             relay_authorized_device_id(&host, "LC-TEST", &session, DeviceRole::View).as_deref(),
             Some("device-1")

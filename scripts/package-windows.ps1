@@ -108,6 +108,15 @@ if (-not $SkipArchive) {
         installer = "install-leetcode.ps1"
         uninstaller = "uninstall-leetcode.ps1"
         published_at = (Get-Date).ToUniversalTime().ToString("o")
+        signature_algorithm = if ($Sign) { "windows-authenticode+sha256" } else { "sha256" }
+        signature = if ($Sign) { "authenticode-signed-binaries" } else { "" }
+        rollout_percent = 100
+        rollout_seed = $version
+        rollback_version = ""
+        rollback_package = ""
+        rollback_sha256 = ""
+        minimum_supported_version = "0.1.0"
+        notes = "Stable Leetcode desktop update."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -Path $manifestPath
 }

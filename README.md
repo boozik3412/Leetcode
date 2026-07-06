@@ -236,6 +236,24 @@ Relay health is intentionally visible: `GET /health` on the relay reports host c
 
 The relay also serves an iPhone-friendly PWA at its root URL, for example `http://relay-host:17990/`. In the host app create a pairing code and click `Ссылка iPhone`, or scan the QR code shown in the same panel. The copied/scanned link opens the Relay PWA with Agent ID and the temporary code prefilled. Tap `Подключить по коду`, approve the pending device in the host app, then tap `Проверить подтверждение` in the PWA if it has not refreshed automatically. After approval, the PWA stores its device token locally and can show agent status, submit tasks, approve or deny pending plans/actions, browse recent runs/logs, and run remote commands. Relay clients now exchange the stored device token for a short-lived HMAC session token through `/api/clients/sessions`; the session token lives in memory and expires after 15 minutes. Remote commands include type, risk, preview steps, confirmation rules, and required roles: medium/high-risk commands require an explicit confirmed request, high-risk commands require a device with the approve role, and project commands/Git commit/macros require a device with the run role. The default mobile roles are view, chat, and approve; file, run, and desktop access stay off unless you explicitly enable them for that device in the host app.
 
+### Public Relay Profile
+
+`leetcode-relay.exe` now has a production foundation profile for public deployments. The relay process still listens with a small local HTTP server, while public TLS/WSS should be terminated by Cloudflare Tunnel, Caddy, Nginx, Tailscale Funnel, or another edge proxy:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-relay-public.ps1 `
+  -Bind 0.0.0.0:17990 `
+  -PublicUrl https://relay.example.com `
+  -TlsMode edge `
+  -HostSessionTtlSecs 30 `
+  -ClientSessionTtlSecs 900 `
+  -ClientPollMs 2000
+```
+
+The relay `/health` response exposes `public_url`, `transport`, `supports_wss`, `host_session_ttl_secs`, `client_session_ttl_secs`, and `recommended_client_poll_ms`. Leetcode Client and the iPhone PWA use adaptive polling/backoff, so short outages do not hammer the relay.
+
+The update manifest also supports staged rollout metadata: `rollout_percent`, `rollout_seed`, `signature_algorithm`, `signature`, `rollback_version`, `rollback_package`, `rollback_sha256`, and `minimum_supported_version`. Installed builds still verify SHA256 before replacing files; staged rollout prevents a machine from installing a newer version until its deterministic Agent ID bucket is included.
+
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 
 Inside the app, open `Проект -> Релиз` to use the Release Cockpit. It shows the current version, release readiness, preflight checklist, recent check/test/build/package runs, local artifacts, and environment diagnostics. Its action buttons reuse project commands, so release runs are recorded in the same command history as normal development checks. Use `В Roadmap` to record the current release candidate, readiness checklist, artifacts, Git context, and release command history as a roadmap milestone.

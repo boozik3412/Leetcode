@@ -288,6 +288,18 @@ pub struct RelayStateReply {
     #[serde(default)]
     pub queued_actions: usize,
     #[serde(default)]
+    pub recommended_client_poll_ms: u64,
+    #[serde(default)]
+    pub host_session_ttl_secs: u64,
+    #[serde(default)]
+    pub client_session_ttl_secs: u64,
+    #[serde(default)]
+    pub public_url: String,
+    #[serde(default)]
+    pub transport: String,
+    #[serde(default)]
+    pub supports_wss: bool,
+    #[serde(default)]
     pub error: Option<String>,
 }
 

@@ -86,6 +86,13 @@ foreach ($file in @("install-leetcode-client.ps1", "uninstall-leetcode-client.ps
     }
 }
 
+foreach ($file in @("run-relay-public.ps1")) {
+    $source = Join-Path $PSScriptRoot $file
+    if (Test-Path $source) {
+        Copy-Item -Force $source (Join-Path $packageRoot $file)
+    }
+}
+
 $packageInfo = [ordered]@{
     schema_version = 1
     app = "Leetcode Client"
@@ -118,6 +125,15 @@ if (-not $SkipArchive) {
         installer = "install-leetcode-client.ps1"
         uninstaller = "uninstall-leetcode-client.ps1"
         published_at = (Get-Date).ToUniversalTime().ToString("o")
+        signature_algorithm = if ($Sign) { "windows-authenticode+sha256" } else { "sha256" }
+        signature = if ($Sign) { "authenticode-signed-binaries" } else { "" }
+        rollout_percent = 100
+        rollout_seed = $version
+        rollback_version = ""
+        rollback_package = ""
+        rollback_sha256 = ""
+        minimum_supported_version = "0.1.0"
+        notes = "Stable Leetcode thin client update."
     }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 -Path $manifestPath
 }

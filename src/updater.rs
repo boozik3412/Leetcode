@@ -16,6 +16,11 @@ pub enum UpdateEvent {
         current_version: String,
         latest_version: String,
     },
+    DeferredByRollout {
+        current_version: String,
+        latest_version: String,
+        rollout_percent: u8,
+    },
     AlreadyCurrent {
         current_version: String,
         latest_version: String,
@@ -33,6 +38,11 @@ pub enum UpdateCheck {
     Available {
         current_version: String,
         latest_version: String,
+    },
+    DeferredByRollout {
+        current_version: String,
+        latest_version: String,
+        rollout_percent: u8,
     },
     AlreadyCurrent {
         current_version: String,
@@ -64,6 +74,24 @@ pub struct UpdateManifest {
     pub uninstaller: Option<String>,
     #[serde(default)]
     pub published_at: Option<String>,
+    #[serde(default)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    pub signature_algorithm: Option<String>,
+    #[serde(default)]
+    pub rollback_version: Option<String>,
+    #[serde(default)]
+    pub rollback_package: Option<String>,
+    #[serde(default)]
+    pub rollback_sha256: Option<String>,
+    #[serde(default)]
+    pub rollout_percent: Option<u8>,
+    #[serde(default)]
+    pub rollout_seed: Option<String>,
+    #[serde(default)]
+    pub minimum_supported_version: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +113,13 @@ pub async fn check_for_update(
     validate_manifest(&manifest)?;
 
     if version_is_newer(&manifest.version, &current_version) {
+        if !manifest_rollout_allows(&manifest, &rollout_key_from_config(&config)) {
+            return Ok(UpdateCheck::DeferredByRollout {
+                current_version,
+                latest_version: manifest.version,
+                rollout_percent: manifest.rollout_percent.unwrap_or(100).min(100),
+            });
+        }
         Ok(UpdateCheck::Available {
             current_version,
             latest_version: manifest.version,
@@ -119,6 +154,14 @@ pub async fn update_and_restart(
             latest_version: manifest.version,
         });
         return Ok(());
+    }
+    if !manifest_rollout_allows(&manifest, &rollout_key_from_config(&config)) {
+        let percent = manifest.rollout_percent.unwrap_or(100).min(100);
+        bail!(
+            "обновление {} найдено, но эта установка пока не входит в staged rollout {}%",
+            manifest.version,
+            percent
+        );
     }
 
     let install_dir = validate_install_dir(&current_exe)?;
@@ -220,8 +263,52 @@ fn validate_manifest(manifest: &UpdateManifest) -> anyhow::Result<()> {
     if manifest.package.trim().is_empty() {
         bail!("manifest не содержит package");
     }
+    if manifest.rollout_percent.unwrap_or(100) > 100 {
+        bail!("manifest contains invalid rollout_percent");
+    }
+    if let Some(hash) = &manifest.rollback_sha256 {
+        if !hash.trim().is_empty() {
+            normalize_sha256(hash)?;
+        }
+    }
     normalize_sha256(&manifest.sha256)?;
     Ok(())
+}
+
+fn rollout_key_from_config(config: &AppConfig) -> String {
+    if !config.agent_id.trim().is_empty() {
+        return config.agent_id.trim().to_string();
+    }
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "anonymous-install".to_string())
+}
+
+pub fn manifest_rollout_allows(manifest: &UpdateManifest, install_key: &str) -> bool {
+    let percent = manifest.rollout_percent.unwrap_or(100).min(100);
+    if percent >= 100 {
+        return true;
+    }
+    if percent == 0 {
+        return false;
+    }
+    rollout_bucket(manifest, install_key) < percent
+}
+
+fn rollout_bucket(manifest: &UpdateManifest, install_key: &str) -> u8 {
+    let seed = manifest
+        .rollout_seed
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&manifest.version);
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_bytes());
+    hasher.update(b":");
+    hasher.update(install_key.trim().as_bytes());
+    let digest = hasher.finalize();
+    let value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    (value % 100) as u8
 }
 
 fn normalize_sha256(value: &str) -> anyhow::Result<String> {
@@ -504,6 +591,15 @@ mod tests {
             installer: None,
             uninstaller: None,
             published_at: None,
+            signature: None,
+            signature_algorithm: None,
+            rollback_version: None,
+            rollback_package: None,
+            rollback_sha256: None,
+            rollout_percent: None,
+            rollout_seed: None,
+            minimum_supported_version: None,
+            notes: None,
         };
         fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -524,7 +620,43 @@ mod tests {
                 assert_eq!(current_version, "0.1.0");
                 assert_eq!(latest_version, "0.1.1");
             }
+            UpdateCheck::DeferredByRollout { .. } => panic!("expected available update"),
             UpdateCheck::AlreadyCurrent { .. } => panic!("expected available update"),
         }
+    }
+
+    #[test]
+    fn rollout_percent_gates_updates_deterministically() {
+        let mut manifest = UpdateManifest {
+            schema_version: 1,
+            app: "Leetcode".to_string(),
+            version: "0.2.0".to_string(),
+            channel: "test".to_string(),
+            platform: "windows-x64".to_string(),
+            package: "leetcode-portable.zip".to_string(),
+            sha256: "a".repeat(64),
+            size_bytes: None,
+            installer: None,
+            uninstaller: None,
+            published_at: None,
+            signature: None,
+            signature_algorithm: None,
+            rollback_version: None,
+            rollback_package: None,
+            rollback_sha256: None,
+            rollout_percent: Some(0),
+            rollout_seed: Some("seed".to_string()),
+            minimum_supported_version: None,
+            notes: None,
+        };
+
+        assert!(!manifest_rollout_allows(&manifest, "LC-TEST"));
+        manifest.rollout_percent = Some(100);
+        assert!(manifest_rollout_allows(&manifest, "LC-TEST"));
+        manifest.rollout_percent = Some(50);
+        assert_eq!(
+            manifest_rollout_allows(&manifest, "LC-TEST"),
+            manifest_rollout_allows(&manifest, "LC-TEST")
+        );
     }
 }

@@ -229,6 +229,17 @@ struct ClientSnapshot {
     relay_host_online: bool,
     relay_host_age_secs: u64,
     relay_queued_actions: usize,
+    relay_recommended_client_poll_ms: u64,
+}
+
+impl ClientSnapshot {
+    fn recommended_client_poll_ms(&self) -> u64 {
+        if self.relay_recommended_client_poll_ms == 0 {
+            2_000
+        } else {
+            self.relay_recommended_client_poll_ms.clamp(500, 60_000)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -287,6 +298,8 @@ struct ThinClientApp {
     events_rx: Option<Receiver<ClientEvent>>,
     poll_in_flight: bool,
     last_poll: Option<Instant>,
+    poll_failures: u32,
+    poll_delay: Duration,
     connected: bool,
     pending_pair_request_id: String,
 }
@@ -312,6 +325,8 @@ impl ThinClientApp {
             events_rx: None,
             poll_in_flight: false,
             last_poll: None,
+            poll_failures: 0,
+            poll_delay: relay_backoff_delay(0),
             connected: false,
             pending_pair_request_id: String::new(),
         };
@@ -325,6 +340,8 @@ impl ThinClientApp {
         self.sync_config_from_inputs();
         self.save_config();
         self.connected = true;
+        self.poll_failures = 0;
+        self.poll_delay = relay_backoff_delay(0);
         self.status = "Подключаюсь...".to_string();
         self.poll_now();
     }
@@ -373,6 +390,8 @@ impl ThinClientApp {
                 ClientEvent::State(Ok(snapshot)) => {
                     self.poll_in_flight = false;
                     self.last_poll = Some(Instant::now());
+                    self.poll_failures = 0;
+                    self.poll_delay = Duration::from_millis(snapshot.recommended_client_poll_ms());
                     self.connected = true;
                     let transport_label = if snapshot.via_relay {
                         if snapshot.relay_host_online {
@@ -394,6 +413,9 @@ impl ThinClientApp {
                 }
                 ClientEvent::State(Err(err)) => {
                     self.poll_in_flight = false;
+                    self.last_poll = Some(Instant::now());
+                    self.poll_failures = self.poll_failures.saturating_add(1);
+                    self.poll_delay = relay_backoff_delay(self.poll_failures);
                     self.status = format!("Нет подключения: {err}");
                 }
                 ClientEvent::Action(Ok(message)) => {
@@ -456,7 +478,7 @@ impl ThinClientApp {
         }
         let due = self
             .last_poll
-            .map(|time| time.elapsed() >= Duration::from_secs(2))
+            .map(|time| time.elapsed() >= self.poll_delay)
             .unwrap_or(true);
         if due {
             self.poll_now();
@@ -1294,6 +1316,7 @@ fn get_state(remote_url: &str, token: &str) -> Result<ClientSnapshot, String> {
         relay_host_online: true,
         relay_host_age_secs: 0,
         relay_queued_actions: 0,
+        relay_recommended_client_poll_ms: 2_000,
     })
 }
 
@@ -1389,6 +1412,7 @@ fn get_relay_state(
             relay_host_online: reply.host_online,
             relay_host_age_secs: reply.host_age_secs,
             relay_queued_actions: reply.queued_actions,
+            relay_recommended_client_poll_ms: reply.recommended_client_poll_ms,
         })
     } else {
         Err(reply
@@ -1855,6 +1879,19 @@ fn default_true() -> bool {
     true
 }
 
+fn relay_backoff_delay(failures: u32) -> Duration {
+    let seconds = match failures {
+        0 => 2,
+        1 => 3,
+        2 => 5,
+        3 => 8,
+        4 => 13,
+        5 => 21,
+        _ => 30,
+    };
+    Duration::from_secs(seconds)
+}
+
 fn empty_as(value: &str, fallback: &str) -> String {
     if value.trim().is_empty() {
         fallback.to_string()
@@ -1920,5 +1957,12 @@ mod tests {
         );
         assert_eq!(passport.agent_id.as_deref(), Some("LC-XYZ"));
         assert_eq!(passport.pairing_code.as_deref(), Some("QWE-777"));
+    }
+
+    #[test]
+    fn relay_poll_backoff_is_bounded() {
+        assert_eq!(relay_backoff_delay(0), Duration::from_secs(2));
+        assert_eq!(relay_backoff_delay(3), Duration::from_secs(8));
+        assert_eq!(relay_backoff_delay(99), Duration::from_secs(30));
     }
 }

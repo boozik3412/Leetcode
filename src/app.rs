@@ -6184,6 +6184,21 @@ impl LeetcodeApp {
                         content: self.update_status.clone(),
                     });
                 }
+                UpdateEvent::DeferredByRollout {
+                    current_version,
+                    latest_version,
+                    rollout_percent,
+                } => {
+                    self.update_is_running = false;
+                    self.update_events_rx = None;
+                    self.update_status = format!(
+                        "Обновление {current_version} -> {latest_version} уже опубликовано, но staged rollout сейчас открыт только для {rollout_percent}% установок."
+                    );
+                    self.tool_log.push(ToolLogLine {
+                        title: "updater rollout".to_string(),
+                        content: self.update_status.clone(),
+                    });
+                }
                 UpdateEvent::CheckFailed(err) => {
                     self.update_is_running = false;
                     self.update_events_rx = None;
@@ -13306,6 +13321,17 @@ impl LeetcodeApp {
                     let _ = tx.send(UpdateEvent::Available {
                         current_version,
                         latest_version,
+                    });
+                }
+                Ok(UpdateCheck::DeferredByRollout {
+                    current_version,
+                    latest_version,
+                    rollout_percent,
+                }) => {
+                    let _ = tx.send(UpdateEvent::DeferredByRollout {
+                        current_version,
+                        latest_version,
+                        rollout_percent,
                     });
                 }
                 Ok(UpdateCheck::AlreadyCurrent {
