@@ -116,7 +116,7 @@ Stage 28B добавляет слой диагностики поверх Relay 
 - `/api/clients/state` возвращает `host_online`, `host_updated_at`, `host_age_secs` и `queued_actions`; если host устарел, клиент получает понятный offline-ответ вместо старого snapshot.
 - Leetcode Client показывает, работает ли он через direct или relay, online/offline статус host, возраст snapshot и очередь relay-действий.
 - Основное приложение показывает последнюю успешную relay-синхронизацию и число полученных действий в панели удалённого доступа.
-- Stage 32 добавляет расширенную диагностику: host UI показывает Direct/Relay/PWA состояние, URL, bind, origins, rate limit, latency, last sync, stale/offline причины, pairing status и роли устройств; Leetcode Client и iPhone PWA получают эти поля через snapshot.
+- Stage 32 добавляет расширенную диагностику: host UI показывает Direct/Relay/PWA состояние, URL, bind, origins, rate limit, latency, last sync, stale/offline причины, pairing status, роли устройств и structured remote session timeline; Leetcode Client и iPhone PWA получают диагностические поля через snapshot.
 
 Локальная smoke-проверка Relay MVP:
 

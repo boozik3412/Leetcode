@@ -376,7 +376,7 @@ Leetcode развивается из минимального локальног
 
 - Done: Добавить панель диагностики relay/direct/PWA: URL, latency, last sync, stale/offline reasons, device roles и подсказки по исправлению.
 - Done: Добавить экспорт remote debug bundle без секретов.
-- Todo: Добавить structured event timeline для remote sessions.
+- Done: Добавить structured event timeline для remote sessions.
 
 ## Постоянная планка качества
 

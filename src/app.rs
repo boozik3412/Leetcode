@@ -67,6 +67,10 @@ use crate::remote::{
     RemoteControlSharedState, RemoteControlSnapshot, RemoteDeviceSummary, RemotePairedDevice,
     RemoteRunSummary, RemoteSubmittedTask, RemoteToolLogEntry, RemoteTrustedDevice,
 };
+use crate::remote_timeline::{
+    append_remote_session_event, clear_remote_session_events, load_remote_session_events_tail,
+    RemoteSessionEvent,
+};
 use crate::roadmap::{
     load_roadmap, record_milestone, roadmap_markdown_export, RecordMilestoneArgs, RoadmapItem,
     RoadmapStatus, UpdateRoadmapItemArgs,
@@ -216,6 +220,8 @@ pub struct LeetcodeApp {
     remote_events_rx: Receiver<RemoteControlAction>,
     remote_task_queue: VecDeque<RemoteSubmittedTask>,
     remote_last_action: String,
+    remote_timeline: Vec<RemoteSessionEvent>,
+    remote_timeline_status: String,
     relay_url_input: String,
     relay_host_token_input: String,
     relay_status: String,
@@ -1237,6 +1243,7 @@ impl LeetcodeApp {
         } else {
             (None, "Remote API выключен".to_string())
         };
+        let remote_timeline = load_remote_session_events_tail(160);
 
         let mut app = Self {
             config,
@@ -1357,6 +1364,8 @@ impl LeetcodeApp {
             remote_events_rx,
             remote_task_queue: VecDeque::new(),
             remote_last_action: String::new(),
+            remote_timeline,
+            remote_timeline_status: String::new(),
             relay_url_input,
             relay_host_token_input,
             relay_status: "Relay выключен".to_string(),
@@ -10303,6 +10312,16 @@ impl LeetcodeApp {
                 })
             })
             .collect::<Vec<_>>();
+        let remote_timeline_tail = self
+            .remote_timeline
+            .iter()
+            .rev()
+            .take(80)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .filter_map(|event| serde_json::to_value(event).ok())
+            .collect::<Vec<_>>();
 
         let workspace = self.workspace.as_ref().map(|workspace| {
             serde_json::json!({
@@ -10381,6 +10400,7 @@ impl LeetcodeApp {
             "journal_tail": read_journal_tail(120),
             "tool_log_tail": tool_log_tail,
             "agent_history_tail": agent_history_tail,
+            "remote_timeline_tail": remote_timeline_tail,
         });
 
         let text = serde_json::to_string_pretty(&bundle).map_err(|err| err.to_string())?;
@@ -10410,6 +10430,117 @@ impl LeetcodeApp {
         secrets.sort_by_key(|secret| std::cmp::Reverse(secret.chars().count()));
         secrets.dedup();
         secrets
+    }
+
+    fn record_remote_timeline_event(&mut self, event: RemoteSessionEvent) {
+        let status = match append_remote_session_event(&event) {
+            Ok(()) => format!("событие сохранено: {}", event.summary),
+            Err(err) => format!("не удалось сохранить remote timeline: {err}"),
+        };
+        self.remote_timeline.push(event);
+        if self.remote_timeline.len() > 160 {
+            let overflow = self.remote_timeline.len().saturating_sub(160);
+            self.remote_timeline.drain(0..overflow);
+        }
+        self.remote_timeline_status = status;
+    }
+
+    fn refresh_remote_timeline(&mut self) {
+        self.remote_timeline = load_remote_session_events_tail(160);
+        self.remote_timeline_status = format!("загружено событий: {}", self.remote_timeline.len());
+    }
+
+    fn clear_remote_timeline_from_ui(&mut self) {
+        match clear_remote_session_events() {
+            Ok(()) => {
+                self.remote_timeline.clear();
+                self.remote_timeline_status = "remote timeline очищен".to_string();
+            }
+            Err(err) => {
+                self.remote_timeline_status = format!("не удалось очистить remote timeline: {err}");
+            }
+        }
+    }
+
+    fn remote_source_channel(source: &str) -> &'static str {
+        if source.to_ascii_lowercase().contains("relay") {
+            "relay"
+        } else {
+            "direct"
+        }
+    }
+
+    fn show_remote_session_timeline(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Remote timeline").strong());
+            if ui
+                .button("Обновить")
+                .on_hover_text("Перечитать последние remote/relay события из JSONL-журнала.")
+                .clicked()
+            {
+                self.refresh_remote_timeline();
+            }
+            if ui
+                .button("Очистить")
+                .on_hover_text(
+                    "Очистить локальную ленту remote-событий. На работу устройств это не влияет.",
+                )
+                .clicked()
+            {
+                self.clear_remote_timeline_from_ui();
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Структурная история удалённых задач, approvals, pairing, команд и ошибок подключения.",
+            )
+            .weak()
+            .small(),
+        );
+        if !self.remote_timeline_status.trim().is_empty() {
+            ui.label(RichText::new(&self.remote_timeline_status).weak().small());
+        }
+        if self.remote_timeline.is_empty() {
+            ui.label(RichText::new("Событий пока нет.").weak());
+            return;
+        }
+        for event in self.remote_timeline.iter().rev().take(18) {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                chip(ui, &event.channel);
+                chip(ui, &event.status);
+                ui.label(RichText::new(&event.event).weak().small());
+                if event.created_at > 0 {
+                    ui.label(
+                        RichText::new(format!("{} назад", age_label(event.created_at)))
+                            .weak()
+                            .small(),
+                    );
+                }
+                if !event.actor.trim().is_empty() {
+                    ui.label(
+                        RichText::new(compact_inline(&event.actor, 48))
+                            .weak()
+                            .small(),
+                    );
+                }
+            });
+            ui.label(RichText::new(&event.summary).strong());
+            if !event.detail.trim().is_empty() {
+                ui.add(egui::Label::new(RichText::new(&event.detail).weak().small()).wrap());
+            }
+            if !event.metadata.is_empty() {
+                let metadata = event
+                    .metadata
+                    .iter()
+                    .take(4)
+                    .map(|(key, value)| format!("{key}: {}", compact_inline(value, 80)))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                ui.label(RichText::new(metadata).monospace().weak().small());
+            }
+        }
     }
 
     fn show_remote_control_panel(&mut self, ui: &mut egui::Ui) {
@@ -10825,6 +10956,8 @@ impl LeetcodeApp {
                 }
             }
 
+            self.show_remote_session_timeline(ui);
+
             ui.separator();
             status_line(ui, "Статус", &self.remote_status);
             status_line(
@@ -11118,6 +11251,18 @@ impl LeetcodeApp {
             match action {
                 RemoteControlAction::SubmitTask(task) => {
                     self.remote_last_action = format!("Задача {} получена удалённо", task.id);
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            Self::remote_source_channel(&task.source),
+                            task.source.clone(),
+                            "task_received",
+                            "queued",
+                            format!("Задача {} получена удалённо", task.id),
+                        )
+                        .with_created_at(task.created_at)
+                        .with_related_id(task.id.clone())
+                        .with_detail(compact(&task.message, 700)),
+                    );
                     self.remote_task_queue.push_back(task);
                     append_journal(format!(
                         "remote_task\tqueued\t{}",
@@ -11135,6 +11280,16 @@ impl LeetcodeApp {
                         } else {
                             "Remote: план отклонён".to_string()
                         };
+                        self.record_remote_timeline_event(
+                            RemoteSessionEvent::new(
+                                "direct",
+                                "remote-api",
+                                "run_gate_answer",
+                                if approved { "approved" } else { "denied" },
+                                self.remote_last_action.clone(),
+                            )
+                            .with_metadata("approved", approved.to_string()),
+                        );
                         self.answer_run_gate_with_action(if approved {
                             ApprovalQuickAction::Approve
                         } else {
@@ -11143,6 +11298,13 @@ impl LeetcodeApp {
                     } else {
                         self.remote_last_action =
                             "Remote: нет плана, ожидающего подтверждения".to_string();
+                        self.record_remote_timeline_event(RemoteSessionEvent::new(
+                            "direct",
+                            "remote-api",
+                            "run_gate_answer",
+                            "no_pending_gate",
+                            self.remote_last_action.clone(),
+                        ));
                     }
                 }
                 RemoteControlAction::AnswerApproval { approved } => {
@@ -11152,6 +11314,16 @@ impl LeetcodeApp {
                         } else {
                             "Remote: действие инструмента запрещено".to_string()
                         };
+                        self.record_remote_timeline_event(
+                            RemoteSessionEvent::new(
+                                "direct",
+                                "remote-api",
+                                "tool_approval_answer",
+                                if approved { "approved" } else { "denied" },
+                                self.remote_last_action.clone(),
+                            )
+                            .with_metadata("approved", approved.to_string()),
+                        );
                         self.answer_approval_with_action(if approved {
                             ApprovalQuickAction::Approve
                         } else {
@@ -11160,6 +11332,13 @@ impl LeetcodeApp {
                     } else {
                         self.remote_last_action =
                             "Remote: нет действия, ожидающего разрешения".to_string();
+                        self.record_remote_timeline_event(RemoteSessionEvent::new(
+                            "direct",
+                            "remote-api",
+                            "tool_approval_answer",
+                            "no_pending_approval",
+                            self.remote_last_action.clone(),
+                        ));
                     }
                 }
                 RemoteControlAction::PairDevice(device) => {
@@ -11236,25 +11415,65 @@ impl LeetcodeApp {
                 } else {
                     format!("Relay синхронизирован: {} действий", action_count)
                 };
+                if action_count > 0 {
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "host-poll",
+                            "relay_sync",
+                            "actions_received",
+                            format!("Relay передал действий: {action_count}"),
+                        )
+                        .with_metadata("latency_ms", self.relay_last_latency_ms.to_string())
+                        .with_metadata("action_count", action_count.to_string()),
+                    );
+                }
             }
             Ok(Err(err)) => {
+                let previous_status = self.relay_status.clone();
                 self.relay_last_latency_ms = self
                     .relay_last_sync
                     .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
                     .unwrap_or_default();
                 self.relay_sync_in_flight = false;
                 self.relay_status = format!("Relay недоступен: {err}");
+                if previous_status != self.relay_status {
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "host-poll",
+                            "relay_sync",
+                            "error",
+                            "Relay недоступен",
+                        )
+                        .with_detail(err)
+                        .with_metadata("latency_ms", self.relay_last_latency_ms.to_string()),
+                    );
+                }
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 self.relay_sync_rx = Some(rx);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                let previous_status = self.relay_status.clone();
                 self.relay_last_latency_ms = self
                     .relay_last_sync
                     .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
                     .unwrap_or_default();
                 self.relay_sync_in_flight = false;
                 self.relay_status = "Relay sync прерван".to_string();
+                if previous_status != self.relay_status {
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "host-poll",
+                            "relay_sync",
+                            "disconnected",
+                            "Relay sync прерван",
+                        )
+                        .with_metadata("latency_ms", self.relay_last_latency_ms.to_string()),
+                    );
+                }
             }
         }
     }
@@ -11267,10 +11486,23 @@ impl LeetcodeApp {
                 source,
             } => {
                 self.remote_last_action = format!("Relay: задача {task_id} получена");
+                let actor = format!("relay:{source}");
+                self.record_remote_timeline_event(
+                    RemoteSessionEvent::new(
+                        "relay",
+                        actor.clone(),
+                        "task_received",
+                        "queued",
+                        self.remote_last_action.clone(),
+                    )
+                    .with_created_at(action.created_at)
+                    .with_related_id(task_id.clone())
+                    .with_detail(compact(&message, 700)),
+                );
                 self.remote_task_queue.push_back(RemoteSubmittedTask {
                     id: task_id,
                     message,
-                    source,
+                    source: actor,
                     created_at: action.created_at,
                 });
                 append_journal(format!(
@@ -11284,9 +11516,26 @@ impl LeetcodeApp {
                 source,
                 confirmed,
             } => {
+                let actor = format!("relay:{source}");
+                self.record_remote_timeline_event(
+                    RemoteSessionEvent::new(
+                        "relay",
+                        actor.clone(),
+                        "command_received",
+                        if confirmed {
+                            "confirmed"
+                        } else {
+                            "preview_required"
+                        },
+                        format!("Relay запросил команду {id}"),
+                    )
+                    .with_created_at(action.created_at)
+                    .with_related_id(id.clone())
+                    .with_metadata("confirmed", confirmed.to_string()),
+                );
                 self.run_remote_command(RemoteCommandRequest {
                     id,
-                    source,
+                    source: actor,
                     created_at: action.created_at,
                     confirmed,
                 });
@@ -11298,11 +11547,33 @@ impl LeetcodeApp {
                     } else {
                         "Relay: план отклонён".to_string()
                     };
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "relay-device",
+                            "run_gate_answer",
+                            if approved { "approved" } else { "denied" },
+                            self.remote_last_action.clone(),
+                        )
+                        .with_created_at(action.created_at)
+                        .with_metadata("approved", approved.to_string()),
+                    );
                     self.answer_run_gate_with_action(if approved {
                         ApprovalQuickAction::Approve
                     } else {
                         ApprovalQuickAction::Deny
                     });
+                } else {
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "relay-device",
+                            "run_gate_answer",
+                            "no_pending_gate",
+                            "Relay прислал ответ, но плана на подтверждение уже нет",
+                        )
+                        .with_created_at(action.created_at),
+                    );
                 }
             }
             RelayActionKind::AnswerApproval { approved } => {
@@ -11312,14 +11583,51 @@ impl LeetcodeApp {
                     } else {
                         "Relay: действие отклонено".to_string()
                     };
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "relay-device",
+                            "tool_approval_answer",
+                            if approved { "approved" } else { "denied" },
+                            self.remote_last_action.clone(),
+                        )
+                        .with_created_at(action.created_at)
+                        .with_metadata("approved", approved.to_string()),
+                    );
                     self.answer_approval_with_action(if approved {
                         ApprovalQuickAction::Approve
                     } else {
                         ApprovalQuickAction::Deny
                     });
+                } else {
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "relay-device",
+                            "tool_approval_answer",
+                            "no_pending_approval",
+                            "Relay прислал approval, но действия на подтверждение уже нет",
+                        )
+                        .with_created_at(action.created_at),
+                    );
                 }
             }
             RelayActionKind::PairDevice { device } => {
+                self.record_remote_timeline_event(
+                    RemoteSessionEvent::new(
+                        "relay",
+                        device.name.clone(),
+                        "device_pair_approved",
+                        "approved",
+                        format!("Relay подключил устройство {}", device.name),
+                    )
+                    .with_created_at(action.created_at)
+                    .with_related_id(device.id.clone())
+                    .with_metadata("view", device.role_view.to_string())
+                    .with_metadata("chat", device.role_chat.to_string())
+                    .with_metadata("approve", device.role_approve.to_string())
+                    .with_metadata("files", device.role_files.to_string()),
+                );
                 self.add_remote_paired_device(RemotePairedDevice {
                     id: device.id,
                     name: device.name,
@@ -11335,6 +11643,17 @@ impl LeetcodeApp {
                 self.add_pending_relay_pairing(request);
             }
             RelayActionKind::DeviceSeen { device_id } => {
+                self.record_remote_timeline_event(
+                    RemoteSessionEvent::new(
+                        "relay",
+                        device_id.clone(),
+                        "device_seen",
+                        "seen",
+                        "Relay сообщил активность устройства",
+                    )
+                    .with_created_at(action.created_at)
+                    .with_related_id(device_id.clone()),
+                );
                 self.mark_remote_device_seen(&device_id, action.created_at);
             }
         }
@@ -11348,6 +11667,17 @@ impl LeetcodeApp {
             .find(|item| item.id == command_id)
         else {
             self.remote_last_action = format!("Remote: команда недоступна: {command_id}");
+            self.record_remote_timeline_event(
+                RemoteSessionEvent::new(
+                    Self::remote_source_channel(&command.source),
+                    command.source.clone(),
+                    "command_result",
+                    "denied",
+                    self.remote_last_action.clone(),
+                )
+                .with_created_at(command.created_at)
+                .with_related_id(command_id.clone()),
+            );
             append_journal(format!(
                 "remote_command\tdenied\t{}\t{}",
                 compact(&command.source, 120),
@@ -11359,6 +11689,18 @@ impl LeetcodeApp {
 
         if !item.enabled {
             self.remote_last_action = format!("Remote: команда сейчас выключена: {}", item.title);
+            self.record_remote_timeline_event(
+                RemoteSessionEvent::new(
+                    Self::remote_source_channel(&command.source),
+                    command.source.clone(),
+                    "command_result",
+                    "disabled",
+                    self.remote_last_action.clone(),
+                )
+                .with_created_at(command.created_at)
+                .with_related_id(item.id.clone())
+                .with_metadata("category", item.category),
+            );
             append_journal(format!(
                 "remote_command\tdisabled\t{}\t{}",
                 compact(&command.source, 120),
@@ -11373,6 +11715,20 @@ impl LeetcodeApp {
             self.remote_last_action = format!(
                 "Remote: команда требует предпросмотр и подтверждение: {}",
                 item.title
+            );
+            self.record_remote_timeline_event(
+                RemoteSessionEvent::new(
+                    Self::remote_source_channel(&command.source),
+                    command.source.clone(),
+                    "command_result",
+                    "needs_confirmation",
+                    self.remote_last_action.clone(),
+                )
+                .with_created_at(command.created_at)
+                .with_related_id(item.id.clone())
+                .with_detail(summary.steps.join("\n"))
+                .with_metadata("risk", summary.risk.clone())
+                .with_metadata("category", summary.category.clone()),
             );
             append_journal(format!(
                 "remote_command\tneeds_confirmation\t{}\t{}\t{}",
@@ -11395,6 +11751,18 @@ impl LeetcodeApp {
         let id = item.id.clone();
         self.execute_command_palette_item(item);
         self.remote_last_action = format!("Remote: выполнена команда {title}");
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                Self::remote_source_channel(&command.source),
+                command.source.clone(),
+                "command_result",
+                "executed",
+                self.remote_last_action.clone(),
+            )
+            .with_created_at(command.created_at)
+            .with_related_id(id.clone())
+            .with_metadata("title", title.clone()),
+        );
         append_journal(format!(
             "remote_command\texecuted\t{}\t{}\t{}",
             command.created_at,
@@ -11414,6 +11782,17 @@ impl LeetcodeApp {
             event.event,
             compact(&event.detail, 160)
         );
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "direct",
+                "remote-api",
+                "audit",
+                &event.event,
+                self.remote_last_action.clone(),
+            )
+            .with_created_at(event.created_at)
+            .with_detail(event.detail.clone()),
+        );
         append_journal(format!(
             "remote_audit\t{}\t{}\t{}",
             event.created_at,
@@ -11429,10 +11808,33 @@ impl LeetcodeApp {
 
     fn add_pending_relay_pairing(&mut self, request: RelayPairingRequest) {
         let request_id = request.request_id.clone();
+        let device_name = request.device_name.clone();
+        let created_at = request.created_at;
+        let expires_at = request.expires_at;
+        let role_view = request.role_view;
+        let role_chat = request.role_chat;
+        let role_approve = request.role_approve;
+        let role_files = request.role_files;
         self.relay_pending_pairings
             .retain(|existing| existing.request_id != request_id);
         self.relay_pending_pairings.push(request.into());
         self.remote_last_action = "Relay: новое устройство ждёт подтверждения".to_string();
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "relay",
+                device_name.clone(),
+                "device_pair_requested",
+                "pending",
+                self.remote_last_action.clone(),
+            )
+            .with_created_at(created_at)
+            .with_related_id(request_id.clone())
+            .with_metadata("expires_at", expires_at.to_string())
+            .with_metadata("view", role_view.to_string())
+            .with_metadata("chat", role_chat.to_string())
+            .with_metadata("approve", role_approve.to_string())
+            .with_metadata("files", role_files.to_string()),
+        );
         append_journal(format!(
             "relay_device\tpending\t{}\t{}",
             unix_timestamp(),
@@ -11474,6 +11876,20 @@ impl LeetcodeApp {
         } else {
             format!("Отклоняю устройство {}...", request.device_name)
         };
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "relay",
+                request.device_name.clone(),
+                "device_pair_decision_sent",
+                if approved { "approved" } else { "denied" },
+                self.remote_status.clone(),
+            )
+            .with_related_id(request.request_id.clone())
+            .with_metadata("view", request.role_view.to_string())
+            .with_metadata("chat", request.role_chat.to_string())
+            .with_metadata("approve", request.role_approve.to_string())
+            .with_metadata("files", request.role_files.to_string()),
+        );
         thread::spawn(move || {
             let result = post_relay_pairing_decision(&relay_url, &decision);
             let _ = tx.send(result);
@@ -11505,13 +11921,40 @@ impl LeetcodeApp {
                         created_at: device.created_at,
                     });
                     self.remote_status = format!("Устройство {device_name} подтверждено.");
+                    self.record_remote_timeline_event(RemoteSessionEvent::new(
+                        "relay",
+                        device_name,
+                        "device_pair_decision_result",
+                        "approved",
+                        self.remote_status.clone(),
+                    ));
                 } else {
                     self.remote_status = format!("Запрос устройства: {}", reply.status);
+                    self.record_remote_timeline_event(
+                        RemoteSessionEvent::new(
+                            "relay",
+                            "pairing-request",
+                            "device_pair_decision_result",
+                            reply.status.clone(),
+                            self.remote_status.clone(),
+                        )
+                        .with_related_id(request_id),
+                    );
                 }
             }
             Ok(Err(err)) => {
                 self.relay_pairing_decision_in_flight = None;
                 self.remote_status = format!("Не удалось отправить решение: {err}");
+                self.record_remote_timeline_event(
+                    RemoteSessionEvent::new(
+                        "relay",
+                        "pairing-request",
+                        "device_pair_decision_result",
+                        "error",
+                        "Не удалось отправить решение по устройству",
+                    )
+                    .with_detail(err),
+                );
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 self.relay_pairing_decision_rx = Some(rx);
@@ -11519,6 +11962,13 @@ impl LeetcodeApp {
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.relay_pairing_decision_in_flight = None;
                 self.remote_status = "Решение по устройству прервано".to_string();
+                self.record_remote_timeline_event(RemoteSessionEvent::new(
+                    "relay",
+                    "pairing-request",
+                    "device_pair_decision_result",
+                    "disconnected",
+                    self.remote_status.clone(),
+                ));
             }
         }
     }
@@ -11543,6 +11993,21 @@ impl LeetcodeApp {
         self.config.remote_pairing_code.clear();
         self.config.remote_pairing_expires_at = 0;
         self.remote_last_action = format!("Remote: подключено устройство {}", device.name);
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "host",
+                device.name.clone(),
+                "device_registered",
+                "active",
+                self.remote_last_action.clone(),
+            )
+            .with_created_at(device.created_at)
+            .with_related_id(device.id.clone())
+            .with_metadata("view", device.role_view.to_string())
+            .with_metadata("chat", device.role_chat.to_string())
+            .with_metadata("approve", device.role_approve.to_string())
+            .with_metadata("files", device.role_files.to_string()),
+        );
         append_journal(format!(
             "remote_device\tpaired\t{}\t{}",
             device.created_at,
@@ -11556,37 +12021,64 @@ impl LeetcodeApp {
     }
 
     fn mark_remote_device_seen(&mut self, device_id: &str, seen_at: u64) {
-        let Some(device) = self
-            .config
-            .remote_devices
-            .iter_mut()
-            .find(|device| device.id == device_id)
-        else {
-            return;
+        let device_name = {
+            let Some(device) = self
+                .config
+                .remote_devices
+                .iter_mut()
+                .find(|device| device.id == device_id)
+            else {
+                return;
+            };
+            if seen_at.saturating_sub(device.last_seen_at) < 60 {
+                return;
+            }
+            device.last_seen_at = seen_at;
+            device.name.clone()
         };
-        if seen_at.saturating_sub(device.last_seen_at) < 60 {
-            return;
-        }
-        device.last_seen_at = seen_at;
         let _ = self.config.save();
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "host",
+                device_name,
+                "device_seen",
+                "seen",
+                "Удалённое устройство активно",
+            )
+            .with_created_at(seen_at)
+            .with_related_id(device_id.to_string()),
+        );
     }
 
     fn revoke_remote_device(&mut self, device_id: &str) {
-        let Some(device) = self
-            .config
-            .remote_devices
-            .iter_mut()
-            .find(|device| device.id == device_id)
-        else {
-            return;
+        let device_name = {
+            let Some(device) = self
+                .config
+                .remote_devices
+                .iter_mut()
+                .find(|device| device.id == device_id)
+            else {
+                return;
+            };
+            device.revoked = true;
+            device.token.clear();
+            device.name.clone()
         };
-        device.revoked = true;
-        device.token.clear();
-        self.remote_last_action = format!("Remote: доступ устройства {} отозван", device.name);
+        self.remote_last_action = format!("Remote: доступ устройства {} отозван", device_name);
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "host",
+                device_name.clone(),
+                "device_revoked",
+                "revoked",
+                self.remote_last_action.clone(),
+            )
+            .with_related_id(device_id.to_string()),
+        );
         append_journal(format!(
             "remote_device\trevoked\t{}\t{}",
             unix_timestamp(),
-            compact(&device.name, 160)
+            compact(&device_name, 160)
         ));
         if let Err(err) = self.config.save() {
             self.remote_status = format!("Не удалось сохранить отзыв устройства: {err}");
@@ -11604,26 +12096,43 @@ impl LeetcodeApp {
         role_approve: bool,
         role_files: bool,
     ) {
-        let Some(device) = self
-            .config
-            .remote_devices
-            .iter_mut()
-            .find(|device| device.id == device_id)
-        else {
-            return;
+        let device_name = {
+            let Some(device) = self
+                .config
+                .remote_devices
+                .iter_mut()
+                .find(|device| device.id == device_id)
+            else {
+                return;
+            };
+            if device.revoked {
+                return;
+            }
+            device.role_view = role_view;
+            device.role_chat = role_chat;
+            device.role_approve = role_approve;
+            device.role_files = role_files;
+            device.name.clone()
         };
-        if device.revoked {
-            return;
-        }
-        device.role_view = role_view;
-        device.role_chat = role_chat;
-        device.role_approve = role_approve;
-        device.role_files = role_files;
-        self.remote_last_action = format!("Remote: роли устройства {} обновлены", device.name);
+        self.remote_last_action = format!("Remote: роли устройства {} обновлены", device_name);
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                "host",
+                device_name.clone(),
+                "device_roles_updated",
+                "updated",
+                self.remote_last_action.clone(),
+            )
+            .with_related_id(device_id.to_string())
+            .with_metadata("view", role_view.to_string())
+            .with_metadata("chat", role_chat.to_string())
+            .with_metadata("approve", role_approve.to_string())
+            .with_metadata("files", role_files.to_string()),
+        );
         append_journal(format!(
             "remote_device\troles\t{}\t{}\tview={}\tchat={}\tapprove={}\tfiles={}",
             unix_timestamp(),
-            compact(&device.name, 120),
+            compact(&device_name, 120),
             role_view,
             role_chat,
             role_approve,
@@ -11656,6 +12165,17 @@ impl LeetcodeApp {
                 "Удалённая задача `{}` отклонена: сначала выберите проект.",
                 task.id
             )));
+            self.record_remote_timeline_event(
+                RemoteSessionEvent::new(
+                    Self::remote_source_channel(&task.source),
+                    task.source.clone(),
+                    "task_rejected",
+                    "no_workspace",
+                    self.remote_last_action.clone(),
+                )
+                .with_related_id(task.id.clone())
+                .with_detail(compact(&task.message, 800)),
+            );
             self.persist_current_conversation();
             return;
         }
@@ -11663,6 +12183,16 @@ impl LeetcodeApp {
         let message = task.message.trim().to_string();
         if message.is_empty() {
             self.remote_last_action = "Remote: пустая задача пропущена".to_string();
+            self.record_remote_timeline_event(
+                RemoteSessionEvent::new(
+                    Self::remote_source_channel(&task.source),
+                    task.source.clone(),
+                    "task_rejected",
+                    "empty",
+                    self.remote_last_action.clone(),
+                )
+                .with_related_id(task.id.clone()),
+            );
             return;
         }
 
@@ -11689,8 +12219,20 @@ impl LeetcodeApp {
             timeline.set_plan_detail(gate.detail.clone());
             timeline.pre_run_gate_requested(gate.summary.clone(), gate.detail.clone());
         }
+        let gate_summary = gate.summary.clone();
         self.pending_run_gate = Some(gate);
         self.remote_last_action = format!("Remote: задача {} ждёт подтверждения", task.id);
+        self.record_remote_timeline_event(
+            RemoteSessionEvent::new(
+                Self::remote_source_channel(&task.source),
+                task.source.clone(),
+                "task_gate_requested",
+                "pending_gate",
+                self.remote_last_action.clone(),
+            )
+            .with_related_id(task.id.clone())
+            .with_detail(gate_summary),
+        );
         append_journal(format!(
             "remote_task\tpending_gate\t{}\t{}",
             task.id,
