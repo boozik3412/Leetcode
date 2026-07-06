@@ -73,8 +73,9 @@
   - Done local-first: per-device/per-IP rate limits для Remote API;
   - Done local-first: audit log remote actions;
   - Done local-first: roles: view/chat/approve/files;
+  - Done local-first: separate run/desktop roles for direct API, relay, PWA, and thin client command execution;
   - Done local-first: device token expiry, revoke и rotation;
-  - later product: TLS/WSS and run/desktop roles.
+  - later product: TLS/WSS, relay-issued short-lived sessions, and public relay deployment.
 
 Критерии готовности:
 
@@ -96,7 +97,7 @@ Direct-режим остаётся полезным для локальной с
 6. В Leetcode Client нажать `Вставить паспорт`, затем `Подключить по коду`.
 7. Клиент получит отдельный device token и сохранит его локально.
 
-Паспорт подключения содержит только Remote URL, Agent ID и короткоживущий pairing code. После подключения host app показывает доверенное устройство, last seen, срок действия token, revoke/rotation и роли устройства: обзор, задачи, подтверждения, файлы. Через клиент можно отправить задачу, выполнить safe remote command и подтвердить или отклонить ожидающий план/действие инструмента.
+Паспорт подключения содержит только Remote URL, Agent ID и короткоживущий pairing code. После подключения host app показывает доверенное устройство, last seen, срок действия token, revoke/rotation и роли устройства: обзор, задачи, подтверждения, файлы, запуски и рабочий стол. Через клиент можно отправить задачу, выполнить safe remote command и подтвердить или отклонить ожидающий план/действие инструмента. Project commands, Git commit и macros требуют отдельную роль `run`; будущие desktop-control команды зарезервированы под роль `desktop`.
 
 ## Relay MVP
 

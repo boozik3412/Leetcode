@@ -107,6 +107,10 @@ struct RemoteCommandSummary {
     #[serde(default)]
     requires_approval: bool,
     #[serde(default)]
+    requires_run: bool,
+    #[serde(default)]
+    requires_desktop: bool,
+    #[serde(default)]
     steps: Vec<String>,
 }
 
@@ -549,7 +553,9 @@ impl ThinClientApp {
                         "role_view": true,
                         "role_chat": true,
                         "role_approve": true,
-                        "role_files": false
+                        "role_files": false,
+                        "role_run": false,
+                        "role_desktop": false
                     }),
                 )
             };
@@ -1081,7 +1087,13 @@ impl ThinClientApp {
                         .add_enabled(command.enabled, egui::Button::new("Запустить"))
                         .clicked()
                     {
-                        self.run_command(command.id.clone(), command.requires_confirmation);
+                        self.run_command(
+                            command.id.clone(),
+                            command.requires_confirmation
+                                || command.requires_approval
+                                || command.requires_run
+                                || command.requires_desktop,
+                        );
                     }
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&command.title).strong());
@@ -1190,6 +1202,22 @@ fn command_preview_text(command: &RemoteCommandSummary) -> String {
         format!(
             "Роль approve: {}",
             if command.requires_approval {
+                "нужна"
+            } else {
+                "не нужна"
+            }
+        ),
+        format!(
+            "Роль run: {}",
+            if command.requires_run {
+                "нужна"
+            } else {
+                "не нужна"
+            }
+        ),
+        format!(
+            "Роль desktop: {}",
+            if command.requires_desktop {
                 "нужна"
             } else {
                 "не нужна"
@@ -1389,6 +1417,8 @@ fn post_relay_pair(
             role_chat: true,
             role_approve: true,
             role_files: false,
+            role_run: false,
+            role_desktop: false,
         })
         .send()
         .map_err(|err| err.to_string())?;

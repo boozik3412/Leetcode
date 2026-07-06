@@ -45,6 +45,8 @@ pub struct RemoteAccessPolicy {
     pub chat: bool,
     pub approve: bool,
     pub files: bool,
+    pub run: bool,
+    pub desktop: bool,
     pub agent_id: String,
     pub pairing_code: String,
     pub pairing_expires_at: u64,
@@ -52,6 +54,8 @@ pub struct RemoteAccessPolicy {
     pub default_role_chat: bool,
     pub default_role_approve: bool,
     pub default_role_files: bool,
+    pub default_role_run: bool,
+    pub default_role_desktop: bool,
     pub default_device_ttl_days: u32,
     pub devices: Vec<RemoteTrustedDevice>,
     pub allowed_origins: Vec<String>,
@@ -69,6 +73,8 @@ impl Default for RemoteAccessPolicy {
             chat: true,
             approve: true,
             files: true,
+            run: true,
+            desktop: true,
             agent_id: String::new(),
             pairing_code: String::new(),
             pairing_expires_at: 0,
@@ -76,6 +82,8 @@ impl Default for RemoteAccessPolicy {
             default_role_chat: true,
             default_role_approve: true,
             default_role_files: false,
+            default_role_run: false,
+            default_role_desktop: false,
             default_device_ttl_days: 30,
             devices: Vec::new(),
             allowed_origins: Vec::new(),
@@ -97,6 +105,10 @@ pub struct RemoteTrustedDevice {
     pub role_chat: bool,
     pub role_approve: bool,
     pub role_files: bool,
+    #[serde(default)]
+    pub role_run: bool,
+    #[serde(default)]
+    pub role_desktop: bool,
     pub created_at: u64,
     pub last_seen_at: u64,
     #[serde(default)]
@@ -116,6 +128,10 @@ pub struct RemoteDeviceSummary {
     pub role_chat: bool,
     pub role_approve: bool,
     pub role_files: bool,
+    #[serde(default)]
+    pub role_run: bool,
+    #[serde(default)]
+    pub role_desktop: bool,
     pub created_at: u64,
     pub last_seen_at: u64,
     #[serde(default)]
@@ -136,6 +152,10 @@ pub struct RemotePairedDevice {
     pub role_chat: bool,
     pub role_approve: bool,
     pub role_files: bool,
+    #[serde(default)]
+    pub role_run: bool,
+    #[serde(default)]
+    pub role_desktop: bool,
     pub created_at: u64,
     #[serde(default)]
     pub expires_at: u64,
@@ -147,6 +167,8 @@ enum RemoteAccessRole {
     Chat,
     Approve,
     Files,
+    Run,
+    Desktop,
 }
 
 impl RemoteAccessRole {
@@ -156,6 +178,8 @@ impl RemoteAccessRole {
             RemoteAccessRole::Chat => "chat",
             RemoteAccessRole::Approve => "approve",
             RemoteAccessRole::Files => "files",
+            RemoteAccessRole::Run => "run",
+            RemoteAccessRole::Desktop => "desktop",
         }
     }
 }
@@ -199,6 +223,10 @@ pub struct RemoteCommandSummary {
     pub requires_confirmation: bool,
     #[serde(default)]
     pub requires_approval: bool,
+    #[serde(default)]
+    pub requires_run: bool,
+    #[serde(default)]
+    pub requires_desktop: bool,
     #[serde(default)]
     pub steps: Vec<String>,
 }
@@ -1046,6 +1074,12 @@ fn handle_pair_device(
         role_files: payload_bool(&payload, "role_files", policy.default_role_files)
             && policy.default_role_files
             && policy.files,
+        role_run: payload_bool(&payload, "role_run", policy.default_role_run)
+            && policy.default_role_run
+            && policy.run,
+        role_desktop: payload_bool(&payload, "role_desktop", policy.default_role_desktop)
+            && policy.default_role_desktop
+            && policy.desktop,
         created_at,
         expires_at: remote_device_expires_at(created_at, policy.default_device_ttl_days),
     };
@@ -1059,7 +1093,9 @@ fn handle_pair_device(
             "view": device.role_view,
             "chat": device.role_chat,
             "approve": device.role_approve,
-            "files": device.role_files
+            "files": device.role_files,
+            "run": device.role_run,
+            "desktop": device.role_desktop
         },
         "status": "paired"
     });
@@ -1175,7 +1211,9 @@ fn handle_create_session(
                 "view": subject.view,
                 "chat": subject.chat,
                 "approve": subject.approve,
-                "files": subject.files
+                "files": subject.files,
+                "run": subject.run,
+                "desktop": subject.desktop
             }
         }),
     );
@@ -1345,8 +1383,55 @@ fn handle_run_command(
         );
         return;
     }
-    if summary.requires_approval {
+    let subject = if summary.requires_run || summary.requires_desktop || summary.requires_approval {
         let Some(subject) = authorized_subject(headers, query, token, policy) else {
+            write_unauthorized(stream);
+            return;
+        };
+        Some(subject)
+    } else {
+        None
+    };
+    if summary.requires_run
+        && !subject
+            .as_ref()
+            .map(|subject| subject.allows(RemoteAccessRole::Run))
+            .unwrap_or(false)
+    {
+        send_remote_audit(
+            Some(actions),
+            audit_enabled,
+            "remote_command_denied",
+            &format!("{command_id} requires run role"),
+        );
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "forbidden: command requires run role"}),
+        );
+        return;
+    }
+    if summary.requires_desktop
+        && !subject
+            .as_ref()
+            .map(|subject| subject.allows(RemoteAccessRole::Desktop))
+            .unwrap_or(false)
+    {
+        send_remote_audit(
+            Some(actions),
+            audit_enabled,
+            "remote_command_denied",
+            &format!("{command_id} requires desktop role"),
+        );
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "forbidden: command requires desktop role"}),
+        );
+        return;
+    }
+    if summary.requires_approval {
+        let Some(subject) = subject.as_ref() else {
             write_unauthorized(stream);
             return;
         };
@@ -1495,6 +1580,8 @@ struct AuthorizedRemoteSubject {
     chat: bool,
     approve: bool,
     files: bool,
+    run: bool,
+    desktop: bool,
 }
 
 impl AuthorizedRemoteSubject {
@@ -1505,6 +1592,8 @@ impl AuthorizedRemoteSubject {
             chat: policy.chat,
             approve: policy.approve,
             files: policy.files,
+            run: policy.run,
+            desktop: policy.desktop,
         }
     }
 
@@ -1515,6 +1604,8 @@ impl AuthorizedRemoteSubject {
             chat: policy.chat && device.role_chat,
             approve: policy.approve && device.role_approve,
             files: policy.files && device.role_files,
+            run: policy.run && device.role_run,
+            desktop: policy.desktop && device.role_desktop,
         }
     }
 
@@ -1524,6 +1615,8 @@ impl AuthorizedRemoteSubject {
             RemoteAccessRole::Chat => self.chat,
             RemoteAccessRole::Approve => self.approve,
             RemoteAccessRole::Files => self.files,
+            RemoteAccessRole::Run => self.run,
+            RemoteAccessRole::Desktop => self.desktop,
         }
     }
 
@@ -2505,6 +2598,8 @@ mod tests {
                     risk: "low".to_string(),
                     requires_confirmation: false,
                     requires_approval: false,
+                    requires_run: false,
+                    requires_desktop: false,
                     steps: Vec::new(),
                 }],
                 ..RemoteControlSnapshot::default()
@@ -2569,6 +2664,8 @@ mod tests {
                     risk: "high".to_string(),
                     requires_confirmation: true,
                     requires_approval: false,
+                    requires_run: true,
+                    requires_desktop: false,
                     steps: vec![
                         "cargo test".to_string(),
                         "cargo build --release".to_string(),
@@ -2666,6 +2763,8 @@ mod tests {
             role_chat: false,
             role_approve: false,
             role_files: false,
+            role_run: false,
+            role_desktop: false,
             created_at: 1,
             last_seen_at: 1,
             expires_at: 0,
@@ -2724,6 +2823,8 @@ mod tests {
             role_chat: true,
             role_approve: true,
             role_files: false,
+            role_run: false,
+            role_desktop: false,
             created_at: 1,
             last_seen_at: 1,
             expires_at: unix_timestamp().saturating_sub(1),
@@ -2820,6 +2921,78 @@ mod tests {
     }
 
     #[test]
+    fn remote_security_denies_run_command_without_run_role() {
+        let shared_state = new_remote_shared_state();
+        update_remote_shared_state(
+            &shared_state,
+            RemoteControlSnapshot {
+                remote_commands: vec![RemoteCommandSummary {
+                    id: "project:check".to_string(),
+                    title: "Project check".to_string(),
+                    category: "Project".to_string(),
+                    description: "Run project check".to_string(),
+                    enabled: true,
+                    kind: "project_command".to_string(),
+                    risk: "medium".to_string(),
+                    requires_confirmation: true,
+                    requires_approval: false,
+                    requires_run: true,
+                    requires_desktop: false,
+                    steps: vec!["cargo check".to_string()],
+                }],
+                ..RemoteControlSnapshot::default()
+            },
+        );
+        let mut policy = RemoteAccessPolicy::default();
+        policy.devices.push(RemoteTrustedDevice {
+            id: "device-run-denied".to_string(),
+            name: "Thin Client".to_string(),
+            token: "device-run-token".to_string(),
+            role_view: true,
+            role_chat: true,
+            role_approve: false,
+            role_files: false,
+            role_run: false,
+            role_desktop: false,
+            created_at: unix_timestamp(),
+            last_seen_at: 0,
+            expires_at: 0,
+            token_rotated_at: 0,
+            revoked_at: 0,
+            revoked: false,
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-admin".to_string(),
+                policy,
+                actions: Some(tx),
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+        let body = r#"{"id":"project:check","confirmed":true}"#;
+        let http_request = format!(
+            "POST /api/commands HTTP/1.1\r\nHost: localhost\r\nX-Leetcode-Device-Token: device-run-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+
+        let denied = request(&addr, &http_request);
+        assert!(denied.starts_with("HTTP/1.1 403 Forbidden"));
+        assert!(denied.contains("run role"));
+        let actions = rx.try_iter().collect::<Vec<_>>();
+        assert!(!actions
+            .iter()
+            .any(|action| matches!(action, RemoteControlAction::RunCommand(_))));
+
+        server.stop();
+    }
+
+    #[test]
     fn remote_security_rate_limits_api_requests() {
         let shared_state = new_remote_shared_state();
         let mut policy = RemoteAccessPolicy::default();
@@ -2902,6 +3075,8 @@ mod tests {
             role_chat: true,
             role_approve: true,
             role_files: false,
+            role_run: false,
+            role_desktop: false,
             created_at: unix_timestamp(),
             last_seen_at: 0,
             expires_at: 0,

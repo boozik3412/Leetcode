@@ -79,6 +79,8 @@ enum DeviceRole {
     View,
     Chat,
     Approve,
+    Run,
+    Desktop,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -298,6 +300,8 @@ fn handle_client_pair(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         role_chat: request.role_chat,
         role_approve: request.role_approve,
         role_files: request.role_files,
+        role_run: request.role_run,
+        role_desktop: request.role_desktop,
         created_at: now,
         expires_at: now + 10 * 60,
     };
@@ -463,6 +467,8 @@ fn handle_host_pairing_decision(
                     role_chat: request.role_chat,
                     role_approve: request.role_approve,
                     role_files: request.role_files,
+                    role_run: request.role_run,
+                    role_desktop: request.role_desktop,
                     created_at: now,
                     last_seen_at: now,
                     expires_at: request.device_expires_at,
@@ -655,6 +661,26 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         );
         return;
     }
+    if relay_command_bool(&command_summary, "requires_run")
+        && !relay_device_allows(host, &request.device_token, DeviceRole::Run)
+    {
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "command requires run role"}),
+        );
+        return;
+    }
+    if relay_command_bool(&command_summary, "requires_desktop")
+        && !relay_device_allows(host, &request.device_token, DeviceRole::Desktop)
+    {
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "command requires desktop role"}),
+        );
+        return;
+    }
     if relay_command_bool(&command_summary, "requires_approval")
         && !relay_device_allows(host, &request.device_token, DeviceRole::Approve)
     {
@@ -759,6 +785,8 @@ fn authorized_host_mut<'a>(
                 DeviceRole::View => device.role_view,
                 DeviceRole::Chat => device.role_chat,
                 DeviceRole::Approve => device.role_approve,
+                DeviceRole::Run => device.role_run,
+                DeviceRole::Desktop => device.role_desktop,
             }
     });
     if allowed {
@@ -797,6 +825,8 @@ fn relay_device_allows(host: &HostRecord, token: &str, role: DeviceRole) -> bool
                     DeviceRole::View => device.role_view,
                     DeviceRole::Chat => device.role_chat,
                     DeviceRole::Approve => device.role_approve,
+                    DeviceRole::Run => device.role_run,
+                    DeviceRole::Desktop => device.role_desktop,
                 }
         })
 }
@@ -1082,7 +1112,7 @@ async function pairDevice(){
       agent_id:$('agentId').value.trim().toUpperCase(),
       pairing_code:$('pairingCode').value.trim().toUpperCase(),
       device_name:$('deviceName').value.trim() || 'iPhone',
-      role_view:true, role_chat:true, role_approve:true, role_files:false
+      role_view:true, role_chat:true, role_approve:true, role_files:false, role_run:false, role_desktop:false
     };
     const data = await relayPost('/api/clients/pair', body);
     $('pairingCode').value = '';
@@ -1230,6 +1260,8 @@ function commandPreviewText(cmd){
     `Риск: ${cmd.risk || 'low'}`,
     `Подтверждение: ${cmd.requires_confirmation ? 'нужно' : 'не нужно'}`,
     `Роль approve: ${cmd.requires_approval ? 'нужна' : 'не нужна'}`,
+    `Роль run: ${cmd.requires_run ? 'нужна' : 'не нужна'}`,
+    `Роль desktop: ${cmd.requires_desktop ? 'нужна' : 'не нужна'}`,
     cmd.description ? `Описание: ${cmd.description}` : '',
     steps ? `Шаги:\n${steps}` : ''
   ].filter(Boolean).join('\n');
@@ -1237,8 +1269,8 @@ function commandPreviewText(cmd){
 async function previewAndRunCommand(cmd){
   const preview = commandPreviewText(cmd);
   $('details').textContent = preview;
-  if((cmd.requires_confirmation || cmd.requires_approval) && !confirm(preview + '\n\nЗапустить команду?')) return;
-  await runCommand(cmd.id, cmd.requires_confirmation || cmd.requires_approval);
+  if((cmd.requires_confirmation || cmd.requires_approval || cmd.requires_run || cmd.requires_desktop) && !confirm(preview + '\n\nЗапустить команду?')) return;
+  await runCommand(cmd.id, cmd.requires_confirmation || cmd.requires_approval || cmd.requires_run || cmd.requires_desktop);
 }
 async function runCommand(id, confirmed){
   try{

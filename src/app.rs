@@ -847,6 +847,8 @@ struct PendingRelayPairing {
     role_chat: bool,
     role_approve: bool,
     role_files: bool,
+    role_run: bool,
+    role_desktop: bool,
     created_at: u64,
     expires_at: u64,
     status: String,
@@ -861,6 +863,8 @@ impl From<RelayPairingRequest> for PendingRelayPairing {
             role_chat: request.role_chat,
             role_approve: request.role_approve,
             role_files: request.role_files,
+            role_run: request.role_run,
+            role_desktop: request.role_desktop,
             created_at: request.created_at,
             expires_at: request.expires_at,
             status: "ожидает".to_string(),
@@ -2041,8 +2045,15 @@ impl LeetcodeApp {
     }
 
     fn remote_command_summary_for_item(&self, item: CommandPaletteItem) -> RemoteCommandSummary {
-        let (kind, risk, requires_confirmation, requires_approval, steps) =
-            self.remote_command_metadata(&item);
+        let (
+            kind,
+            risk,
+            requires_confirmation,
+            requires_approval,
+            requires_run,
+            requires_desktop,
+            steps,
+        ) = self.remote_command_metadata(&item);
         RemoteCommandSummary {
             id: item.id,
             title: item.title,
@@ -2053,6 +2064,8 @@ impl LeetcodeApp {
             risk,
             requires_confirmation,
             requires_approval,
+            requires_run,
+            requires_desktop,
             steps,
         }
     }
@@ -2060,10 +2073,12 @@ impl LeetcodeApp {
     fn remote_command_metadata(
         &self,
         item: &CommandPaletteItem,
-    ) -> (String, String, bool, bool, Vec<String>) {
+    ) -> (String, String, bool, bool, bool, bool, Vec<String>) {
         match &item.action {
             CommandPaletteAction::RunMacro(macro_id) => {
                 let mut risk = "medium".to_string();
+                let mut requires_run = false;
+                let mut requires_desktop = false;
                 let mut steps = Vec::new();
                 if let Some(command_macro) = self
                     .config
@@ -2074,6 +2089,8 @@ impl LeetcodeApp {
                     for command_id in &command_macro.command_ids {
                         if let Some(step_item) = self.find_command_palette_item_by_id(command_id) {
                             let step_risk = remote_command_risk_for_action(&step_item.action);
+                            requires_run |= remote_command_requires_run(&step_item.action);
+                            requires_desktop |= remote_command_requires_desktop(&step_item.action);
                             if remote_risk_rank(step_risk) > remote_risk_rank(&risk) {
                                 risk = step_risk.to_string();
                             }
@@ -2094,6 +2111,8 @@ impl LeetcodeApp {
                     risk.clone(),
                     true,
                     risk == "high",
+                    requires_run,
+                    requires_desktop,
                     steps,
                 )
             }
@@ -2104,6 +2123,8 @@ impl LeetcodeApp {
                     risk.to_string(),
                     true,
                     risk == "high",
+                    true,
+                    false,
                     vec![
                         format!("Команда: {}", command.command),
                         format!("Рабочая папка: {}", command.cwd),
@@ -2119,6 +2140,8 @@ impl LeetcodeApp {
                     risk.to_string(),
                     requires_confirmation,
                     risk == "high",
+                    remote_command_requires_run(action),
+                    remote_command_requires_desktop(action),
                     vec![item.description.clone()],
                 )
             }
@@ -10158,6 +10181,22 @@ impl LeetcodeApp {
                 !device.revoked && !remote_device_is_expired(device, now) && device.role_approve
             })
             .count();
+        let run_devices = self
+            .config
+            .remote_devices
+            .iter()
+            .filter(|device| {
+                !device.revoked && !remote_device_is_expired(device, now) && device.role_run
+            })
+            .count();
+        let desktop_devices = self
+            .config
+            .remote_devices
+            .iter()
+            .filter(|device| {
+                !device.revoked && !remote_device_is_expired(device, now) && device.role_desktop
+            })
+            .count();
         if active_devices == 0 {
             rows.push((
                 "Внимание",
@@ -10169,7 +10208,7 @@ impl LeetcodeApp {
                 "OK",
                 "Есть доверенные устройства".to_string(),
                 format!(
-                    "Активных устройств: {active_devices}, с ролью approve: {approve_devices}."
+                    "Активных устройств: {active_devices}, approve: {approve_devices}, run: {run_devices}, desktop: {desktop_devices}."
                 ),
             ));
         }
@@ -10199,12 +10238,42 @@ impl LeetcodeApp {
             .map(|item| self.remote_command_summary_for_item(item))
             .filter(|summary| summary.requires_approval)
             .count();
+        let run_commands = self
+            .remote_command_palette_items()
+            .into_iter()
+            .map(|item| self.remote_command_summary_for_item(item))
+            .filter(|summary| summary.requires_run)
+            .count();
+        let desktop_commands = self
+            .remote_command_palette_items()
+            .into_iter()
+            .map(|item| self.remote_command_summary_for_item(item))
+            .filter(|summary| summary.requires_desktop)
+            .count();
         if high_risk_commands > 0 && approve_devices == 0 {
             rows.push((
                 "Внимание",
                 "Некому запускать high-risk команды удалённо".to_string(),
                 format!(
                     "Опубликовано high-risk команд: {high_risk_commands}. Дайте хотя бы одному доверенному устройству роль approve."
+                ),
+            ));
+        }
+        if run_commands > 0 && run_devices == 0 {
+            rows.push((
+                "Внимание",
+                "Нет устройств с ролью run".to_string(),
+                format!(
+                    "Опубликовано команд, требующих запусков: {run_commands}. Выдайте роль run только доверенному thin client."
+                ),
+            ));
+        }
+        if desktop_commands > 0 && desktop_devices == 0 {
+            rows.push((
+                "Внимание",
+                "Нет устройств с ролью desktop".to_string(),
+                format!(
+                    "Опубликовано desktop-команд: {desktop_commands}. Выдавайте desktop только полностью доверенному устройству."
                 ),
             ));
         }
@@ -10269,6 +10338,8 @@ impl LeetcodeApp {
                         "chat": device.role_chat,
                         "approve": device.role_approve,
                         "files": device.role_files,
+                        "run": device.role_run,
+                        "desktop": device.role_desktop,
                     },
                     "created_at": device.created_at,
                     "last_seen_at": device.last_seen_at,
@@ -10291,6 +10362,8 @@ impl LeetcodeApp {
                         "chat": request.role_chat,
                         "approve": request.role_approve,
                         "files": request.role_files,
+                        "run": request.role_run,
+                        "desktop": request.role_desktop,
                     },
                     "created_at": request.created_at,
                     "expires_at": request.expires_at,
@@ -10404,6 +10477,8 @@ impl LeetcodeApp {
                     "chat": self.config.remote_role_chat,
                     "approve": self.config.remote_role_approve,
                     "files": self.config.remote_role_files,
+                    "run": self.config.remote_role_run,
+                    "desktop": self.config.remote_role_desktop,
                 },
                 "queue_len": self.remote_task_queue.len(),
                 "pairing_active": pairing_active,
@@ -10718,6 +10793,10 @@ impl LeetcodeApp {
                     .on_hover_text("Разрешает удалённо подтверждать план запуска и запросы инструментов.");
                 ui.checkbox(&mut self.config.remote_role_files, "Файлы")
                     .on_hover_text("Разрешает read-only просмотр списка файлов и содержимого файлов проекта.");
+                ui.checkbox(&mut self.config.remote_role_run, "Запуски")
+                    .on_hover_text("Разрешает запускать проектные команды, Git commit и макросы, которые могут менять состояние проекта.");
+                ui.checkbox(&mut self.config.remote_role_desktop, "Рабочий стол")
+                    .on_hover_text("Резерв под будущие команды управления рабочим столом. Держите выключенным, пока не нужен remote desktop-control.");
                 ui.checkbox(&mut self.config.remote_audit_enabled, "Аудит")
                     .on_hover_text("Пишет удалённые действия в журнал приложения: задачи, approvals, чтение файлов, security-deny.");
             });
@@ -10736,6 +10815,10 @@ impl LeetcodeApp {
                 .on_hover_text("Роль, которая будет включена по умолчанию при новом pairing, если глобально разрешены подтверждения.");
                 ui.checkbox(&mut self.config.remote_default_role_files, "Файлы")
                     .on_hover_text("Файлы по умолчанию лучше держать выключенными для мобильных устройств.");
+                ui.checkbox(&mut self.config.remote_default_role_run, "Запуски")
+                    .on_hover_text("По умолчанию не выдавайте новым устройствам право запускать команды. Включайте точечно для доверенного компьютера.");
+                ui.checkbox(&mut self.config.remote_default_role_desktop, "Рабочий стол")
+                    .on_hover_text("По умолчанию не выдавайте новым устройствам право управления рабочим столом.");
             });
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Срок token новых устройств").weak());
@@ -10936,6 +11019,10 @@ impl LeetcodeApp {
                             .on_hover_text("Устройство сможет подтверждать планы и действия.");
                         ui.checkbox(&mut request.role_files, "Файлы")
                             .on_hover_text("Устройство сможет читать файлы проекта.");
+                        ui.checkbox(&mut request.role_run, "Запуски")
+                            .on_hover_text("Устройство сможет запускать проектные команды и макросы после подтверждения.");
+                        ui.checkbox(&mut request.role_desktop, "Рабочий стол")
+                            .on_hover_text("Устройство сможет использовать будущие desktop-control команды.");
                     });
                     ui.horizontal_wrapped(|ui| {
                         let busy = in_flight_request_id
@@ -10979,6 +11066,8 @@ impl LeetcodeApp {
                     let mut role_chat = device.role_chat;
                     let mut role_approve = device.role_approve;
                     let mut role_files = device.role_files;
+                    let mut role_run = device.role_run;
+                    let mut role_desktop = device.role_desktop;
                     let mut roles_changed = false;
                     let mut name_update: Option<String> = None;
 
@@ -11064,6 +11153,20 @@ impl LeetcodeApp {
                             )
                             .on_hover_text("Устройство может читать список и содержимое файлов проекта.")
                             .changed();
+                        roles_changed |= ui
+                            .add_enabled(
+                                !device.revoked,
+                                egui::Checkbox::new(&mut role_run, "Запуски"),
+                            )
+                            .on_hover_text("Устройство может запускать project commands, Git commit и макросы, помеченные как run.")
+                            .changed();
+                        roles_changed |= ui
+                            .add_enabled(
+                                !device.revoked,
+                                egui::Checkbox::new(&mut role_desktop, "Рабочий стол"),
+                            )
+                            .on_hover_text("Устройство может выполнять будущие команды управления рабочим столом.")
+                            .changed();
                     });
                     ui.horizontal_wrapped(|ui| {
                         ui.label(RichText::new("Token").weak());
@@ -11120,6 +11223,8 @@ impl LeetcodeApp {
                             role_chat,
                             role_approve,
                             role_files,
+                            role_run,
+                            role_desktop,
                         );
                     }
                     ui.separator();
@@ -11828,6 +11933,8 @@ impl LeetcodeApp {
                     .with_metadata("chat", device.role_chat.to_string())
                     .with_metadata("approve", device.role_approve.to_string())
                     .with_metadata("files", device.role_files.to_string())
+                    .with_metadata("run", device.role_run.to_string())
+                    .with_metadata("desktop", device.role_desktop.to_string())
                     .with_metadata("expires_at", device.expires_at.to_string()),
                 );
                 self.add_remote_paired_device(RemotePairedDevice {
@@ -11838,6 +11945,8 @@ impl LeetcodeApp {
                     role_chat: device.role_chat,
                     role_approve: device.role_approve,
                     role_files: device.role_files,
+                    role_run: device.role_run,
+                    role_desktop: device.role_desktop,
                     created_at: device.created_at,
                     expires_at: device.expires_at,
                 });
@@ -12018,11 +12127,15 @@ impl LeetcodeApp {
         let role_chat = request.role_chat && self.config.remote_default_role_chat;
         let role_approve = request.role_approve && self.config.remote_default_role_approve;
         let role_files = request.role_files && self.config.remote_default_role_files;
+        let role_run = request.role_run && self.config.remote_default_role_run;
+        let role_desktop = request.role_desktop && self.config.remote_default_role_desktop;
         let mut pending: PendingRelayPairing = request.into();
         pending.role_view = role_view;
         pending.role_chat = role_chat;
         pending.role_approve = role_approve;
         pending.role_files = role_files;
+        pending.role_run = role_run;
+        pending.role_desktop = role_desktop;
         self.relay_pending_pairings
             .retain(|existing| existing.request_id != request_id);
         self.relay_pending_pairings.push(pending);
@@ -12041,7 +12154,9 @@ impl LeetcodeApp {
             .with_metadata("view", role_view.to_string())
             .with_metadata("chat", role_chat.to_string())
             .with_metadata("approve", role_approve.to_string())
-            .with_metadata("files", role_files.to_string()),
+            .with_metadata("files", role_files.to_string())
+            .with_metadata("run", role_run.to_string())
+            .with_metadata("desktop", role_desktop.to_string()),
         );
         append_journal(format!(
             "relay_device\tpending\t{}\t{}",
@@ -12075,6 +12190,8 @@ impl LeetcodeApp {
             role_chat: request.role_chat,
             role_approve: request.role_approve,
             role_files: request.role_files,
+            role_run: request.role_run,
+            role_desktop: request.role_desktop,
             device_expires_at: self.default_remote_device_expires_at(unix_timestamp()),
         };
         let (tx, rx) = mpsc::channel();
@@ -12097,7 +12214,9 @@ impl LeetcodeApp {
             .with_metadata("view", request.role_view.to_string())
             .with_metadata("chat", request.role_chat.to_string())
             .with_metadata("approve", request.role_approve.to_string())
-            .with_metadata("files", request.role_files.to_string()),
+            .with_metadata("files", request.role_files.to_string())
+            .with_metadata("run", request.role_run.to_string())
+            .with_metadata("desktop", request.role_desktop.to_string()),
         );
         thread::spawn(move || {
             let result = post_relay_pairing_decision(&relay_url, &decision);
@@ -12127,6 +12246,8 @@ impl LeetcodeApp {
                         role_chat: device.role_chat,
                         role_approve: device.role_approve,
                         role_files: device.role_files,
+                        role_run: device.role_run,
+                        role_desktop: device.role_desktop,
                         created_at: device.created_at,
                         expires_at: device.expires_at,
                     });
@@ -12192,6 +12313,8 @@ impl LeetcodeApp {
             role_chat: device.role_chat,
             role_approve: device.role_approve,
             role_files: device.role_files,
+            role_run: device.role_run,
+            role_desktop: device.role_desktop,
             created_at: device.created_at,
             last_seen_at: device.created_at,
             expires_at: device.expires_at,
@@ -12220,7 +12343,9 @@ impl LeetcodeApp {
             .with_metadata("view", device.role_view.to_string())
             .with_metadata("chat", device.role_chat.to_string())
             .with_metadata("approve", device.role_approve.to_string())
-            .with_metadata("files", device.role_files.to_string()),
+            .with_metadata("files", device.role_files.to_string())
+            .with_metadata("run", device.role_run.to_string())
+            .with_metadata("desktop", device.role_desktop.to_string()),
         );
         append_journal(format!(
             "remote_device\tpaired\t{}\t{}",
@@ -12437,6 +12562,8 @@ impl LeetcodeApp {
         role_chat: bool,
         role_approve: bool,
         role_files: bool,
+        role_run: bool,
+        role_desktop: bool,
     ) {
         let device_name = {
             let Some(device) = self
@@ -12454,6 +12581,8 @@ impl LeetcodeApp {
             device.role_chat = role_chat;
             device.role_approve = role_approve;
             device.role_files = role_files;
+            device.role_run = role_run;
+            device.role_desktop = role_desktop;
             device.name.clone()
         };
         self.remote_last_action = format!("Remote: роли устройства {} обновлены", device_name);
@@ -12469,16 +12598,20 @@ impl LeetcodeApp {
             .with_metadata("view", role_view.to_string())
             .with_metadata("chat", role_chat.to_string())
             .with_metadata("approve", role_approve.to_string())
-            .with_metadata("files", role_files.to_string()),
+            .with_metadata("files", role_files.to_string())
+            .with_metadata("run", role_run.to_string())
+            .with_metadata("desktop", role_desktop.to_string()),
         );
         append_journal(format!(
-            "remote_device\troles\t{}\t{}\tview={}\tchat={}\tapprove={}\tfiles={}",
+            "remote_device\troles\t{}\t{}\tview={}\tchat={}\tapprove={}\tfiles={}\trun={}\tdesktop={}",
             unix_timestamp(),
             compact(&device_name, 120),
             role_view,
             role_chat,
             role_approve,
-            role_files
+            role_files,
+            role_run,
+            role_desktop
         ));
         if let Err(err) = self.config.save() {
             self.remote_status = format!("Не удалось сохранить роли устройства: {err}");
@@ -18218,6 +18351,8 @@ fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
         chat: config.remote_role_chat,
         approve: config.remote_role_approve,
         files: config.remote_role_files,
+        run: config.remote_role_run,
+        desktop: config.remote_role_desktop,
         agent_id: config.agent_id.clone(),
         pairing_code: config.remote_pairing_code.clone(),
         pairing_expires_at: config.remote_pairing_expires_at,
@@ -18225,6 +18360,8 @@ fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
         default_role_chat: config.remote_default_role_chat,
         default_role_approve: config.remote_default_role_approve,
         default_role_files: config.remote_default_role_files,
+        default_role_run: config.remote_default_role_run,
+        default_role_desktop: config.remote_default_role_desktop,
         default_device_ttl_days: config.remote_default_device_ttl_days,
         devices: config
             .remote_devices
@@ -18249,6 +18386,8 @@ fn remote_trusted_device_from_config(device: &RemoteDeviceConfig) -> RemoteTrust
         role_chat: device.role_chat,
         role_approve: device.role_approve,
         role_files: device.role_files,
+        role_run: device.role_run,
+        role_desktop: device.role_desktop,
         created_at: device.created_at,
         last_seen_at: device.last_seen_at,
         expires_at: device.expires_at,
@@ -18266,6 +18405,8 @@ fn remote_device_summary_from_config(device: &RemoteDeviceConfig) -> RemoteDevic
         role_chat: device.role_chat,
         role_approve: device.role_approve,
         role_files: device.role_files,
+        role_run: device.role_run,
+        role_desktop: device.role_desktop,
         created_at: device.created_at,
         last_seen_at: device.last_seen_at,
         expires_at: device.expires_at,
@@ -18284,6 +18425,8 @@ fn relay_device_from_config(device: &RemoteDeviceConfig) -> RelayDevice {
         role_chat: device.role_chat,
         role_approve: device.role_approve,
         role_files: device.role_files,
+        role_run: device.role_run,
+        role_desktop: device.role_desktop,
         created_at: device.created_at,
         last_seen_at: device.last_seen_at,
         expires_at: device.expires_at,
@@ -18339,6 +18482,12 @@ fn remote_device_roles_label(device: &RemoteDeviceConfig) -> String {
     if device.role_files {
         roles.push("файлы");
     }
+    if device.role_run {
+        roles.push("запуски");
+    }
+    if device.role_desktop {
+        roles.push("рабочий стол");
+    }
     if roles.is_empty() {
         "без ролей".to_string()
     } else {
@@ -18363,6 +18512,20 @@ fn remote_command_action_allowed(action: &CommandPaletteAction) -> bool {
             | CommandPaletteAction::StopProjectCommand
             | CommandPaletteAction::RunMacro(_)
     )
+}
+
+fn remote_command_requires_run(action: &CommandPaletteAction) -> bool {
+    matches!(
+        action,
+        CommandPaletteAction::StartProjectCommand(_)
+            | CommandPaletteAction::StopProjectCommand
+            | CommandPaletteAction::GitCommit
+            | CommandPaletteAction::RunMacro(_)
+    )
+}
+
+fn remote_command_requires_desktop(_action: &CommandPaletteAction) -> bool {
+    false
 }
 
 fn remote_command_kind(action: &CommandPaletteAction) -> &'static str {

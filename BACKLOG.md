@@ -281,10 +281,11 @@ Leetcode развивается из минимального локальног
 - Done: Расширить observer до подробного run timeline через `GET /api/history/run?id=...` и PWA drill-down по выбранному запуску.
 - Done: Добавить security baseline для local Remote API: роли доступа, Origin allowlist, глобальный rate limit и audit-события удалённых действий.
 - Done: Добавить safe Remote Commands: `GET /api/commands`, `POST /api/commands`, PWA-кнопки и app-side allowlist для безопасных команд палитры.
-- Todo: Расширить Remote Commands до макросов/проектных команд с отдельными ролями, подтверждениями и риск-классами.
+- Done: Расширить Remote Commands до макросов/проектных команд с отдельными ролями run/desktop, подтверждениями и риск-классами.
 - Done: Усилить security baseline до управляемых trusted devices: token expiry, revoke, rotation, роли по устройствам и per-device/per-IP rate limiting.
 - Done: Добавить local-first signed short-lived sessions для Remote API: `POST /api/sessions`, HMAC-подпись, TTL 15 минут и совместимость со старым access/device token.
-- Todo: Довести transport security до product-grade: TLS/WSS и отдельные роли run/desktop для внешнего relay.
+- Done: Добавить отдельные remote-роли run/desktop для direct/relay commands, trusted devices, thin client и iPhone PWA preview.
+- Todo: Довести transport security до product-grade: TLS/WSS, публичный relay deployment и product-grade session hardening.
 - Done: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Done: Сделать лёгкий desktop thin client как отдельный `leetcode-client` binary поверх Remote API: состояние агента, отправка задач, safe commands, approvals.
 - Done: Добавить installer/portable package для тонкого клиента: `package-client-windows.ps1`, `install-leetcode-client.ps1`, `uninstall-leetcode-client.ps1`, `client-latest.json`.
@@ -371,6 +372,7 @@ Leetcode развивается из минимального локальног
 - Done: Расширить Remote Commands до макросов/проектных команд с risk-class, confirmation и approve-gate для high-risk действий.
 - Done: Добавить preview действия перед запуском команды через relay/PWA и thin client.
 - Done: Привязать remote macros к существующей permission system, журналу действий и tool log.
+- Done: Разделить удалённые права запуска: project commands, Git commit и macros требуют роль `run`; future desktop-control зарезервирован под роль `desktop`.
 
 ## Этап 32 - Observability и диагностика
 

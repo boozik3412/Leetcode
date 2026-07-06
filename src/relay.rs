@@ -60,6 +60,10 @@ pub struct RelayPairRequest {
     pub role_approve: bool,
     #[serde(default)]
     pub role_files: bool,
+    #[serde(default)]
+    pub role_run: bool,
+    #[serde(default)]
+    pub role_desktop: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,6 +107,10 @@ pub struct RelayHostPairingDecisionRequest {
     #[serde(default)]
     pub role_files: bool,
     #[serde(default)]
+    pub role_run: bool,
+    #[serde(default)]
+    pub role_desktop: bool,
+    #[serde(default)]
     pub device_expires_at: u64,
 }
 
@@ -114,6 +122,10 @@ pub struct RelayPairingRequest {
     pub role_chat: bool,
     pub role_approve: bool,
     pub role_files: bool,
+    #[serde(default)]
+    pub role_run: bool,
+    #[serde(default)]
+    pub role_desktop: bool,
     pub created_at: u64,
     pub expires_at: u64,
 }
@@ -211,6 +223,10 @@ pub struct RelayDevice {
     pub role_chat: bool,
     pub role_approve: bool,
     pub role_files: bool,
+    #[serde(default)]
+    pub role_run: bool,
+    #[serde(default)]
+    pub role_desktop: bool,
     pub created_at: u64,
     #[serde(default)]
     pub last_seen_at: u64,
