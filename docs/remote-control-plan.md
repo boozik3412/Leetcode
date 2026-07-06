@@ -65,7 +65,7 @@
   - Done foundation: запускать макросы/проектные команды с risk-классами, preview, confirmation и approve-gate для high-risk действий.
 - Security hardening:
   - Done local-first: signed short-lived sessions через `POST /api/sessions`;
-  - later product: relay-issued short-lived sessions;
+  - Done relay MVP: relay-issued short-lived client sessions через `/api/clients/sessions`;
   - passkeys/WebAuthn;
   - TLS/WSS;
   - Done local-first: Origin validation с allowlist в настройках;
@@ -75,7 +75,7 @@
   - Done local-first: roles: view/chat/approve/files;
   - Done local-first: separate run/desktop roles for direct API, relay, PWA, and thin client command execution;
   - Done local-first: device token expiry, revoke и rotation;
-  - later product: TLS/WSS, relay-issued short-lived sessions, and public relay deployment.
+  - later product: TLS/WSS, public relay deployment, and staged session policy hardening.
 
 Критерии готовности:
 

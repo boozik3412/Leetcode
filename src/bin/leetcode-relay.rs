@@ -1,21 +1,28 @@
 #[path = "../relay.rs"]
 mod relay;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use hmac::{Hmac, Mac};
 use relay::{
     generate_relay_device_token, new_action, normalize_agent_id, RelayAction, RelayActionKind,
     RelayClientApprovalRequest, RelayClientCommandRequest, RelayClientRequest,
-    RelayClientTaskRequest, RelayDevice, RelayHostPairingDecisionRequest, RelayHostPollReply,
-    RelayHostPollRequest, RelayPairDecisionReply, RelayPairReply, RelayPairRequest,
-    RelayPairStatusRequest, RelayPairingRequest, RelayQueuedReply, RelayStateReply,
-    DEFAULT_RELAY_URL, RELAY_HOST_SESSION_TTL_SECS,
+    RelayClientSessionReply, RelayClientSessionRequest, RelayClientTaskRequest, RelayDevice,
+    RelayHostPairingDecisionRequest, RelayHostPollReply, RelayHostPollRequest,
+    RelayPairDecisionReply, RelayPairReply, RelayPairRequest, RelayPairStatusRequest,
+    RelayPairingRequest, RelayQueuedReply, RelayStateReply, DEFAULT_RELAY_URL,
+    RELAY_CLIENT_SESSION_TTL_SECS, RELAY_HOST_SESSION_TTL_SECS,
 };
 use serde_json::{json, Value};
+use sha2::Sha256;
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+type HmacSha256 = Hmac<Sha256>;
+const RELAY_SESSION_TOKEN_VERSION: &str = "lrs1";
 
 #[derive(Default)]
 struct RelayState {
@@ -153,6 +160,9 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
         ("POST", "/api/clients/pair") => handle_client_pair(&mut stream, &request.body, state),
         ("POST", "/api/clients/pair/status") => {
             handle_client_pair_status(&mut stream, &request.body, state)
+        }
+        ("POST", "/api/clients/sessions") => {
+            handle_client_session(&mut stream, &request.body, state)
         }
         ("POST", "/api/clients/state") => handle_client_state(&mut stream, &request.body, state),
         ("POST", "/api/clients/tasks") => handle_client_task(&mut stream, &request.body, state),
@@ -403,6 +413,57 @@ fn handle_client_pair_status(stream: &mut TcpStream, body: &[u8], state: Arc<Mut
     );
 }
 
+fn handle_client_session(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+    let Ok(request) = serde_json::from_slice::<RelayClientSessionRequest>(body) else {
+        write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
+        return;
+    };
+    let agent_id = normalize_agent_id(&request.agent_id);
+    let device_token = request.device_token.trim();
+    if agent_id.is_empty() || device_token.is_empty() {
+        write_json_response(
+            stream,
+            400,
+            &json!({"ok": false, "error": "agent_id and device_token are required"}),
+        );
+        return;
+    }
+
+    let state = state.lock().expect("relay state poisoned");
+    let Some(host) = state.hosts.get(&agent_id) else {
+        write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
+        return;
+    };
+    let now = unix_timestamp();
+    let Some(device) = host
+        .devices
+        .values()
+        .find(|device| device.token == device_token && relay_device_is_active(device, now))
+    else {
+        write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
+        return;
+    };
+    let Some(session_token) = issue_relay_session_token(&agent_id, host, device, now) else {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "session token could not be signed"}),
+        );
+        return;
+    };
+    write_json_response(
+        stream,
+        201,
+        &RelayClientSessionReply {
+            ok: true,
+            session_token,
+            expires_at: now.saturating_add(RELAY_CLIENT_SESSION_TTL_SECS),
+            ttl_secs: RELAY_CLIENT_SESSION_TTL_SECS,
+            error: None,
+        },
+    );
+}
+
 fn handle_host_pairing_decision(
     stream: &mut TcpStream,
     body: &[u8],
@@ -503,13 +564,10 @@ fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rel
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
     };
+    let credential = relay_client_credential(&request.device_token, &request.session_token);
     let mut state = state.lock().expect("relay state poisoned");
-    let Ok(host) = authorized_host_mut(
-        &mut state,
-        &request.agent_id,
-        &request.device_token,
-        DeviceRole::View,
-    ) else {
+    let Ok(host) = authorized_host_mut(&mut state, &request.agent_id, credential, DeviceRole::View)
+    else {
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
@@ -531,7 +589,7 @@ fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rel
         );
         return;
     }
-    queue_device_seen(host, &request.device_token);
+    queue_device_seen(host, &request.agent_id, credential);
     write_json_response(
         stream,
         200,
@@ -552,6 +610,7 @@ fn handle_client_task(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
     };
+    let credential = relay_client_credential(&request.device_token, &request.session_token);
     if request.message.trim().is_empty() {
         write_json_response(
             stream,
@@ -561,12 +620,8 @@ fn handle_client_task(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         return;
     }
     let mut state = state.lock().expect("relay state poisoned");
-    let Ok(host) = authorized_host_mut(
-        &mut state,
-        &request.agent_id,
-        &request.device_token,
-        DeviceRole::Chat,
-    ) else {
+    let Ok(host) = authorized_host_mut(&mut state, &request.agent_id, credential, DeviceRole::Chat)
+    else {
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
@@ -578,7 +633,7 @@ fn handle_client_task(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         );
         return;
     }
-    queue_device_seen(host, &request.device_token);
+    queue_device_seen(host, &request.agent_id, credential);
     let task_id = format!("relay-task-{}", uuid::Uuid::new_v4().simple());
     host.actions.push_back(new_action(
         RelayActionKind::SubmitTask {
@@ -605,13 +660,10 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
     };
+    let credential = relay_client_credential(&request.device_token, &request.session_token);
     let mut state = state.lock().expect("relay state poisoned");
-    let Ok(host) = authorized_host_mut(
-        &mut state,
-        &request.agent_id,
-        &request.device_token,
-        DeviceRole::Chat,
-    ) else {
+    let Ok(host) = authorized_host_mut(&mut state, &request.agent_id, credential, DeviceRole::Chat)
+    else {
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
@@ -662,7 +714,7 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         return;
     }
     if relay_command_bool(&command_summary, "requires_run")
-        && !relay_device_allows(host, &request.device_token, DeviceRole::Run)
+        && !relay_device_allows(host, &request.agent_id, credential, DeviceRole::Run)
     {
         write_json_response(
             stream,
@@ -672,7 +724,7 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         return;
     }
     if relay_command_bool(&command_summary, "requires_desktop")
-        && !relay_device_allows(host, &request.device_token, DeviceRole::Desktop)
+        && !relay_device_allows(host, &request.agent_id, credential, DeviceRole::Desktop)
     {
         write_json_response(
             stream,
@@ -682,7 +734,7 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         return;
     }
     if relay_command_bool(&command_summary, "requires_approval")
-        && !relay_device_allows(host, &request.device_token, DeviceRole::Approve)
+        && !relay_device_allows(host, &request.agent_id, credential, DeviceRole::Approve)
     {
         write_json_response(
             stream,
@@ -691,7 +743,7 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         );
         return;
     }
-    queue_device_seen(host, &request.device_token);
+    queue_device_seen(host, &request.agent_id, credential);
     let action_id = format!("relay-command-{}", uuid::Uuid::new_v4().simple());
     host.actions.push_back(new_action(
         RelayActionKind::RunCommand {
@@ -723,11 +775,12 @@ fn handle_client_approval(
         write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
         return;
     };
+    let credential = relay_client_credential(&request.device_token, &request.session_token);
     let mut state = state.lock().expect("relay state poisoned");
     let Ok(host) = authorized_host_mut(
         &mut state,
         &request.agent_id,
-        &request.device_token,
+        credential,
         DeviceRole::Approve,
     ) else {
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
@@ -741,7 +794,7 @@ fn handle_client_approval(
         );
         return;
     }
-    queue_device_seen(host, &request.device_token);
+    queue_device_seen(host, &request.agent_id, credential);
     let action_id = format!("relay-approval-{}", uuid::Uuid::new_v4().simple());
     let kind = if run_gate {
         RelayActionKind::AnswerRunGate {
@@ -768,28 +821,15 @@ fn handle_client_approval(
 fn authorized_host_mut<'a>(
     state: &'a mut RelayState,
     agent_id: &str,
-    token: &str,
+    credential: &str,
     role: DeviceRole,
 ) -> Result<&'a mut HostRecord, ()> {
     let agent_id = normalize_agent_id(agent_id);
     let host = state.hosts.get_mut(&agent_id).ok_or(())?;
-    let token = token.trim();
-    if token.is_empty() {
+    if credential.trim().is_empty() {
         return Err(());
     }
-    let now = unix_timestamp();
-    let allowed = host.devices.values().any(|device| {
-        device.token == token
-            && relay_device_is_active(device, now)
-            && match role {
-                DeviceRole::View => device.role_view,
-                DeviceRole::Chat => device.role_chat,
-                DeviceRole::Approve => device.role_approve,
-                DeviceRole::Run => device.role_run,
-                DeviceRole::Desktop => device.role_desktop,
-            }
-    });
-    if allowed {
+    if relay_authorized_device_id(host, &agent_id, credential, role).is_some() {
         Ok(host)
     } else {
         Err(())
@@ -815,29 +855,22 @@ fn relay_command_bool(command: &Value, key: &str) -> bool {
     command.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
-fn relay_device_allows(host: &HostRecord, token: &str, role: DeviceRole) -> bool {
-    let token = token.trim();
-    !token.is_empty()
-        && host.devices.values().any(|device| {
-            device.token == token
-                && relay_device_is_active(device, unix_timestamp())
-                && match role {
-                    DeviceRole::View => device.role_view,
-                    DeviceRole::Chat => device.role_chat,
-                    DeviceRole::Approve => device.role_approve,
-                    DeviceRole::Run => device.role_run,
-                    DeviceRole::Desktop => device.role_desktop,
-                }
-        })
+fn relay_device_allows(
+    host: &HostRecord,
+    agent_id: &str,
+    credential: &str,
+    role: DeviceRole,
+) -> bool {
+    relay_authorized_device_id(host, agent_id, credential, role).is_some()
 }
 
-fn queue_device_seen(host: &mut HostRecord, token: &str) {
+fn queue_device_seen(host: &mut HostRecord, agent_id: &str, credential: &str) {
     let now = unix_timestamp();
-    let Some(device) = host
-        .devices
-        .values_mut()
-        .find(|device| device.token == token && relay_device_is_active(device, now))
+    let Some(device_id) = relay_authorized_device_id(host, agent_id, credential, DeviceRole::View)
     else {
+        return;
+    };
+    let Some(device) = host.devices.get_mut(&device_id) else {
         return;
     };
     if now.saturating_sub(device.last_seen_at) < 60 {
@@ -850,6 +883,121 @@ fn queue_device_seen(host: &mut HostRecord, token: &str) {
         },
         now,
     ));
+}
+
+fn relay_client_credential<'a>(device_token: &'a str, session_token: &'a str) -> &'a str {
+    if !session_token.trim().is_empty() {
+        session_token.trim()
+    } else {
+        device_token.trim()
+    }
+}
+
+fn relay_authorized_device_id(
+    host: &HostRecord,
+    agent_id: &str,
+    credential: &str,
+    role: DeviceRole,
+) -> Option<String> {
+    let credential = credential.trim();
+    if credential.is_empty() {
+        return None;
+    }
+    let now = unix_timestamp();
+    for device in host.devices.values() {
+        if device.token == credential
+            && relay_device_is_active(device, now)
+            && relay_device_has_role(device, role)
+        {
+            return Some(device.id.clone());
+        }
+    }
+    let device_id = relay_session_device_id(credential, agent_id, host, now)?;
+    let device = host.devices.get(&device_id)?;
+    (relay_device_is_active(device, now) && relay_device_has_role(device, role))
+        .then_some(device_id)
+}
+
+fn relay_device_has_role(device: &RelayDevice, role: DeviceRole) -> bool {
+    match role {
+        DeviceRole::View => device.role_view,
+        DeviceRole::Chat => device.role_chat,
+        DeviceRole::Approve => device.role_approve,
+        DeviceRole::Run => device.role_run,
+        DeviceRole::Desktop => device.role_desktop,
+    }
+}
+
+fn issue_relay_session_token(
+    agent_id: &str,
+    host: &HostRecord,
+    device: &RelayDevice,
+    now: u64,
+) -> Option<String> {
+    let expires_at = now.saturating_add(RELAY_CLIENT_SESSION_TTL_SECS);
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let payload = format!(
+        "{}.{}.{}.{}.{}.{}",
+        RELAY_SESSION_TOKEN_VERSION,
+        normalize_agent_id(agent_id),
+        device.id,
+        now,
+        expires_at,
+        nonce
+    );
+    let secret = relay_session_secret(&host.host_token, &device.token);
+    let signature = sign_relay_session_payload(&secret, &payload)?;
+    Some(format!("{payload}.{signature}"))
+}
+
+fn relay_session_device_id(
+    session_token: &str,
+    agent_id: &str,
+    host: &HostRecord,
+    now: u64,
+) -> Option<String> {
+    let parts = session_token.trim().split('.').collect::<Vec<_>>();
+    if parts.len() != 7 || parts.first().copied() != Some(RELAY_SESSION_TOKEN_VERSION) {
+        return None;
+    }
+    let token_agent_id = normalize_agent_id(parts[1]);
+    if token_agent_id != normalize_agent_id(agent_id) {
+        return None;
+    }
+    let device_id = parts[2];
+    let issued_at = parts[3].parse::<u64>().ok()?;
+    let expires_at = parts[4].parse::<u64>().ok()?;
+    if issued_at > now.saturating_add(60) || expires_at <= now || expires_at <= issued_at {
+        return None;
+    }
+    let device = host.devices.get(device_id)?;
+    if device.token_rotated_at > 0 && issued_at < device.token_rotated_at {
+        return None;
+    }
+    let payload = parts[..6].join(".");
+    let secret = relay_session_secret(&host.host_token, &device.token);
+    verify_relay_session_signature(&secret, &payload, parts[6]).then(|| device_id.to_string())
+}
+
+fn relay_session_secret(host_token: &str, device_token: &str) -> String {
+    format!("{}:{}", host_token.trim(), device_token.trim())
+}
+
+fn sign_relay_session_payload(secret: &str, payload: &str) -> Option<String> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(payload.as_bytes());
+    Some(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn verify_relay_session_signature(secret: &str, payload: &str, signature: &str) -> bool {
+    let Ok(signature) = URL_SAFE_NO_PAD.decode(signature.as_bytes()) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&signature).is_ok()
 }
 
 fn sync_trusted_devices(host: &mut HostRecord, devices: Vec<RelayDevice>) {
@@ -1068,6 +1216,7 @@ const $ = (id) => document.getElementById(id);
 let lastState = null;
 let activeTab = 'runs';
 let timer = null;
+let relaySession = {token:'', expiresAt:0};
 function params(){return new URLSearchParams(location.search)}
 function loadConnection(){
   $('agentId').value = params().get('agent_id') || localStorage.getItem('leetcode_relay_agent_id') || '';
@@ -1094,6 +1243,22 @@ function saveConnection(){
 }
 function requestBase(){
   return {agent_id:$('agentId').value.trim().toUpperCase(), device_token:$('deviceToken').value.trim()};
+}
+async function authedRequestBase(){
+  const base = requestBase();
+  if(!base.agent_id || !base.device_token) return base;
+  const now = Math.floor(Date.now()/1000);
+  if(relaySession.token && relaySession.expiresAt > now + 30){
+    return {...base, session_token: relaySession.token};
+  }
+  try{
+    const session = await relayPost('/api/clients/sessions', base);
+    if(session.session_token){
+      relaySession = {token: session.session_token, expiresAt: session.expires_at || (now + 600)};
+      return {...base, session_token: relaySession.token};
+    }
+  }catch(_error){}
+  return base;
 }
 async function relayPost(path, payload, allowOfflineState=false){
   const res = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -1161,7 +1326,7 @@ async function loadState(){
   const token = $('deviceToken').value.trim();
   if(!agent || !token){setStatus('нужен Agent ID и device token');return}
   try{
-    const data = await relayPost('/api/clients/state', requestBase(), true);
+    const data = await relayPost('/api/clients/state', await authedRequestBase(), true);
     lastState = data;
     render(data);
   }catch(error){setStatus('ошибка: ' + error.message, false)}
@@ -1244,7 +1409,7 @@ async function submitTask(){
   const message = $('task').value.trim();
   if(!message){setStatus('введите задачу');return}
   try{
-    const data = await relayPost('/api/clients/tasks',{...requestBase(),message,source:'iphone-pwa'});
+    const data = await relayPost('/api/clients/tasks',{...(await authedRequestBase()),message,source:'iphone-pwa'});
     $('task').value='';
     setStatus('задача поставлена: ' + (data.id || 'queued'), true);
     await loadState();
@@ -1274,14 +1439,14 @@ async function previewAndRunCommand(cmd){
 }
 async function runCommand(id, confirmed){
   try{
-    const data = await relayPost('/api/clients/commands',{...requestBase(),id,source:'iphone-pwa',confirmed:!!confirmed});
+    const data = await relayPost('/api/clients/commands',{...(await authedRequestBase()),id,source:'iphone-pwa',confirmed:!!confirmed});
     $('details').textContent = 'Команда поставлена: ' + (data.id || 'queued');
     await loadState();
   }catch(error){$('details').textContent = 'Ошибка команды: ' + error.message}
 }
 async function answer(path, approved){
   try{
-    const data = await relayPost(path,{...requestBase(),approved});
+    const data = await relayPost(path,{...(await authedRequestBase()),approved});
     setStatus('ответ отправлен: ' + (data.id || 'queued'), true);
     await loadState();
   }catch(error){setStatus('ошибка ответа: ' + error.message, false)}
@@ -1317,6 +1482,7 @@ mod tests {
     #[test]
     fn relay_mobile_pwa_exposes_client_endpoints() {
         let html = relay_mobile_pwa_html();
+        assert!(html.contains("/api/clients/sessions"));
         assert!(html.contains("/api/clients/state"));
         assert!(html.contains("/api/clients/tasks"));
         assert!(html.contains("/api/clients/pair/status"));
@@ -1324,5 +1490,52 @@ mod tests {
         assert!(html.contains("apple-mobile-web-app-capable"));
         assert!(html.contains("diagnostics"));
         assert!(html.contains("remoteDiagnosticsText"));
+    }
+
+    #[test]
+    fn relay_session_token_authorizes_device_roles() {
+        let now = unix_timestamp();
+        let mut host = HostRecord::new("host-token".to_string());
+        let device = RelayDevice {
+            id: "device-1".to_string(),
+            name: "Phone".to_string(),
+            token: "rd-test-token".to_string(),
+            role_view: true,
+            role_chat: true,
+            role_approve: false,
+            role_files: false,
+            role_run: false,
+            role_desktop: false,
+            created_at: now,
+            last_seen_at: 0,
+            expires_at: 0,
+            token_rotated_at: 0,
+            revoked_at: 0,
+            revoked: false,
+        };
+        host.devices.insert(device.id.clone(), device.clone());
+
+        let session =
+            issue_relay_session_token("LC-TEST", &host, &device, now).expect("session token");
+        assert_eq!(
+            relay_authorized_device_id(&host, "LC-TEST", &session, DeviceRole::View).as_deref(),
+            Some("device-1")
+        );
+        assert_eq!(
+            relay_authorized_device_id(&host, "LC-TEST", &session, DeviceRole::Chat).as_deref(),
+            Some("device-1")
+        );
+        assert!(
+            relay_authorized_device_id(&host, "LC-TEST", &session, DeviceRole::Approve).is_none()
+        );
+        assert!(
+            relay_authorized_device_id(&host, "LC-OTHER", &session, DeviceRole::View).is_none()
+        );
+
+        let mut tampered = session.clone();
+        tampered.push('x');
+        assert!(
+            relay_authorized_device_id(&host, "LC-TEST", &tampered, DeviceRole::View).is_none()
+        );
     }
 }

@@ -5,6 +5,7 @@ use serde_json::Value;
 
 pub const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:17990";
 pub const RELAY_HOST_SESSION_TTL_SECS: u64 = 15;
+pub const RELAY_CLIENT_SESSION_TTL_SECS: u64 = 15 * 60;
 
 pub fn generate_relay_host_token() -> String {
     format!("rh-{}", uuid::Uuid::new_v4().simple())
@@ -145,13 +146,39 @@ pub struct RelayPairDecisionReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayClientRequest {
     pub agent_id: String,
+    #[serde(default)]
     pub device_token: String,
+    #[serde(default)]
+    pub session_token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayClientSessionRequest {
+    pub agent_id: String,
+    pub device_token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayClientSessionReply {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub session_token: String,
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub ttl_secs: u64,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayClientTaskRequest {
     pub agent_id: String,
+    #[serde(default)]
     pub device_token: String,
+    #[serde(default)]
+    pub session_token: String,
     pub message: String,
     #[serde(default)]
     pub source: String,
@@ -160,7 +187,10 @@ pub struct RelayClientTaskRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayClientCommandRequest {
     pub agent_id: String,
+    #[serde(default)]
     pub device_token: String,
+    #[serde(default)]
+    pub session_token: String,
     pub id: String,
     #[serde(default)]
     pub source: String,
@@ -171,7 +201,10 @@ pub struct RelayClientCommandRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayClientApprovalRequest {
     pub agent_id: String,
+    #[serde(default)]
     pub device_token: String,
+    #[serde(default)]
+    pub session_token: String,
     pub approved: bool,
 }
 

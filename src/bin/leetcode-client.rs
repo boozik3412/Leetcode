@@ -12,8 +12,8 @@ mod relay;
 
 use relay::{
     RelayClientApprovalRequest, RelayClientCommandRequest, RelayClientRequest,
-    RelayClientTaskRequest, RelayPairReply, RelayPairRequest, RelayPairStatusRequest,
-    RelayQueuedReply, RelayStateReply, DEFAULT_RELAY_URL,
+    RelayClientSessionReply, RelayClientSessionRequest, RelayClientTaskRequest, RelayPairReply,
+    RelayPairRequest, RelayPairStatusRequest, RelayQueuedReply, RelayStateReply, DEFAULT_RELAY_URL,
 };
 
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/app-icon.png");
@@ -1362,11 +1362,13 @@ fn get_relay_state(
 ) -> Result<ClientSnapshot, String> {
     let client = http_client()?;
     let url = endpoint_url(relay_url, "/api/clients/state")?;
+    let session_token = relay_session_token(relay_url, agent_id, device_token);
     let response = client
         .post(url)
         .json(&RelayClientRequest {
             agent_id: agent_id.trim().to_string(),
             device_token: device_token.trim().to_string(),
+            session_token,
         })
         .send()
         .map_err(|err| err.to_string())?;
@@ -1507,12 +1509,14 @@ fn post_relay_task(
     device_token: &str,
     message: String,
 ) -> Result<ApiReply, String> {
+    let session_token = relay_session_token(relay_url, agent_id, device_token);
     post_relay_queued(
         relay_url,
         "/api/clients/tasks",
         &RelayClientTaskRequest {
             agent_id: agent_id.trim().to_string(),
             device_token: device_token.trim().to_string(),
+            session_token,
             message,
             source: "leetcode-client-relay".to_string(),
         },
@@ -1526,12 +1530,14 @@ fn post_relay_command(
     command_id: String,
     confirmed: bool,
 ) -> Result<ApiReply, String> {
+    let session_token = relay_session_token(relay_url, agent_id, device_token);
     post_relay_queued(
         relay_url,
         "/api/clients/commands",
         &RelayClientCommandRequest {
             agent_id: agent_id.trim().to_string(),
             device_token: device_token.trim().to_string(),
+            session_token,
             id: command_id,
             source: "leetcode-client-relay".to_string(),
             confirmed,
@@ -1546,15 +1552,48 @@ fn post_relay_approval(
     endpoint: &str,
     approved: bool,
 ) -> Result<ApiReply, String> {
+    let session_token = relay_session_token(relay_url, agent_id, device_token);
     post_relay_queued(
         relay_url,
         endpoint,
         &RelayClientApprovalRequest {
             agent_id: agent_id.trim().to_string(),
             device_token: device_token.trim().to_string(),
+            session_token,
             approved,
         },
     )
+}
+
+fn relay_session_token(relay_url: &str, agent_id: &str, device_token: &str) -> String {
+    if agent_id.trim().is_empty() || device_token.trim().is_empty() {
+        return String::new();
+    }
+    let Ok(client) = http_client() else {
+        return String::new();
+    };
+    let Ok(url) = endpoint_url(relay_url, "/api/clients/sessions") else {
+        return String::new();
+    };
+    let Ok(response) = client
+        .post(url)
+        .json(&RelayClientSessionRequest {
+            agent_id: agent_id.trim().to_string(),
+            device_token: device_token.trim().to_string(),
+        })
+        .send()
+    else {
+        return String::new();
+    };
+    if !response.status().is_success() {
+        return String::new();
+    }
+    response
+        .json::<RelayClientSessionReply>()
+        .ok()
+        .filter(|reply| reply.ok)
+        .map(|reply| reply.session_token)
+        .unwrap_or_default()
 }
 
 fn post_relay_queued<T: Serialize>(

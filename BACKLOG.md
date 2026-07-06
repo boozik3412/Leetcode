@@ -285,7 +285,8 @@ Leetcode развивается из минимального локальног
 - Done: Усилить security baseline до управляемых trusted devices: token expiry, revoke, rotation, роли по устройствам и per-device/per-IP rate limiting.
 - Done: Добавить local-first signed short-lived sessions для Remote API: `POST /api/sessions`, HMAC-подпись, TTL 15 минут и совместимость со старым access/device token.
 - Done: Добавить отдельные remote-роли run/desktop для direct/relay commands, trusted devices, thin client и iPhone PWA preview.
-- Todo: Довести transport security до product-grade: TLS/WSS, публичный relay deployment и product-grade session hardening.
+- Done: Добавить relay-issued short-lived sessions: `/api/clients/sessions`, HMAC-подпись, TTL 15 минут, thin client/PWA используют session token с fallback на device token.
+- Todo: Довести transport security до product-grade: TLS/WSS, публичный relay deployment и staged session policy hardening.
 - Done: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Done: Сделать лёгкий desktop thin client как отдельный `leetcode-client` binary поверх Remote API: состояние агента, отправка задач, safe commands, approvals.
 - Done: Добавить installer/portable package для тонкого клиента: `package-client-windows.ps1`, `install-leetcode-client.ps1`, `uninstall-leetcode-client.ps1`, `client-latest.json`.
@@ -332,6 +333,7 @@ Leetcode развивается из минимального локальног
 - Done: Добавить периодический outgoing relay poll из основного Leetcode и преобразование relay actions в обычные remote actions.
 - Done: Добавить relay mode в `leetcode-client`: Agent ID + device token, pairing через relay, state polling, задачи, команды и approvals.
 - Done: Включить `leetcode-relay.exe` в portable package тонкого клиента.
+- Done: Добавить relay-issued client sessions поверх device token: session token не сохраняется на диск, TTL 15 минут, старые device-token запросы совместимы.
 - Todo: Заменить HTTP long-poll на WSS/TLS relay с reconnect/backoff и server-side expiry.
 - Done: Добавить host-side approval dialog для новых relay devices вместо автопары по коду.
 - Todo: Добавить публичный relay deployment/update channel или настройку своего relay URL через installer.
