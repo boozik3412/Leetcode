@@ -217,6 +217,8 @@ pub struct LeetcodeApp {
     remote_token_input: String,
     remote_allowed_origins_input: String,
     remote_rate_limit_input: String,
+    remote_device_rate_limit_input: String,
+    remote_ip_rate_limit_input: String,
     remote_events_tx: mpsc::Sender<RemoteControlAction>,
     remote_events_rx: Receiver<RemoteControlAction>,
     remote_task_queue: VecDeque<RemoteSubmittedTask>,
@@ -1222,6 +1224,8 @@ impl LeetcodeApp {
         let remote_token_input = config.remote_access_token.clone();
         let remote_allowed_origins_input = config.remote_allowed_origins.clone();
         let remote_rate_limit_input = config.remote_rate_limit_per_minute.to_string();
+        let remote_device_rate_limit_input = config.remote_device_rate_limit_per_minute.to_string();
+        let remote_ip_rate_limit_input = config.remote_ip_rate_limit_per_minute.to_string();
         let relay_url_input = config.relay_url.clone();
         let relay_host_token_input = config.relay_host_token.clone();
         let (remote_events_tx, remote_events_rx) = mpsc::channel();
@@ -1362,6 +1366,8 @@ impl LeetcodeApp {
             remote_token_input,
             remote_allowed_origins_input,
             remote_rate_limit_input,
+            remote_device_rate_limit_input,
+            remote_ip_rate_limit_input,
             remote_events_tx,
             remote_events_rx,
             remote_task_queue: VecDeque::new(),
@@ -9939,7 +9945,12 @@ impl LeetcodeApp {
             status_line(
                 ui,
                 "Rate limit",
-                &format!("{} req/min", self.config.remote_rate_limit_per_minute),
+                &format!(
+                    "{} global · {} device · {} IP req/min",
+                    self.config.remote_rate_limit_per_minute,
+                    self.config.remote_device_rate_limit_per_minute,
+                    self.config.remote_ip_rate_limit_per_minute
+                ),
             );
             status_line(ui, "Relay URL", &self.relay_url());
             status_line(ui, "Relay статус", &self.relay_status);
@@ -10385,6 +10396,8 @@ impl LeetcodeApp {
                 "port": self.config.remote_port,
                 "allowed_origins": self.config.remote_allowed_origins,
                 "rate_limit_per_minute": self.config.remote_rate_limit_per_minute,
+                "device_rate_limit_per_minute": self.config.remote_device_rate_limit_per_minute,
+                "ip_rate_limit_per_minute": self.config.remote_ip_rate_limit_per_minute,
                 "audit_enabled": self.config.remote_audit_enabled,
                 "roles": {
                     "view": self.config.remote_role_view,
@@ -10744,8 +10757,20 @@ impl LeetcodeApp {
 
             ui.horizontal_wrapped(|ui| {
                 ui.label("Rate limit");
+                ui.label(RichText::new("global").weak());
                 ui.add(TextEdit::singleline(&mut self.remote_rate_limit_input).desired_width(88.0))
                     .on_hover_text("Глобальный лимит API-запросов в минуту. 0 отключает лимит. Рекомендуемо: 120.");
+                ui.label(RichText::new("device").weak());
+                ui.add(
+                    TextEdit::singleline(&mut self.remote_device_rate_limit_input)
+                        .desired_width(88.0),
+                )
+                .on_hover_text("Лимит для одного доверенного устройства в минуту. 0 отключает лимит. Рекомендуемо: 60.");
+                ui.label(RichText::new("IP").weak());
+                ui.add(
+                    TextEdit::singleline(&mut self.remote_ip_rate_limit_input).desired_width(88.0),
+                )
+                .on_hover_text("Лимит для одного IP-адреса в минуту. 0 отключает лимит. Рекомендуемо: 180.");
                 ui.label(RichText::new("запросов/мин").weak());
             });
 
@@ -11260,12 +11285,35 @@ impl LeetcodeApp {
             self.remote_status = "Rate limit должен быть числом. 0 отключает лимит.".to_string();
             return;
         };
+        let Ok(device_rate_limit) = self.remote_device_rate_limit_input.trim().parse::<u32>()
+        else {
+            self.remote_status =
+                "Device rate limit должен быть числом. 0 отключает лимит.".to_string();
+            return;
+        };
+        let Ok(ip_rate_limit) = self.remote_ip_rate_limit_input.trim().parse::<u32>() else {
+            self.remote_status = "IP rate limit должен быть числом. 0 отключает лимит.".to_string();
+            return;
+        };
         self.config.remote_rate_limit_per_minute = if rate_limit == 0 {
             0
         } else {
             rate_limit.clamp(10, 5_000)
         };
+        self.config.remote_device_rate_limit_per_minute = if device_rate_limit == 0 {
+            0
+        } else {
+            device_rate_limit.clamp(10, 5_000)
+        };
+        self.config.remote_ip_rate_limit_per_minute = if ip_rate_limit == 0 {
+            0
+        } else {
+            ip_rate_limit.clamp(10, 5_000)
+        };
         self.remote_rate_limit_input = self.config.remote_rate_limit_per_minute.to_string();
+        self.remote_device_rate_limit_input =
+            self.config.remote_device_rate_limit_per_minute.to_string();
+        self.remote_ip_rate_limit_input = self.config.remote_ip_rate_limit_per_minute.to_string();
         self.config.remote_default_device_ttl_days =
             self.config.remote_default_device_ttl_days.min(365);
 
@@ -12662,6 +12710,10 @@ impl LeetcodeApp {
                 remote_port: self.config.remote_port,
                 remote_allowed_origins: self.config.remote_allowed_origins.clone(),
                 remote_rate_limit_per_minute: self.config.remote_rate_limit_per_minute,
+                remote_device_rate_limit_per_minute: self
+                    .config
+                    .remote_device_rate_limit_per_minute,
+                remote_ip_rate_limit_per_minute: self.config.remote_ip_rate_limit_per_minute,
                 remote_last_action: self.remote_last_action.clone(),
                 relay_enabled: self.config.relay_enabled,
                 relay_url: self.relay_url(),
@@ -18181,6 +18233,8 @@ fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
             .collect(),
         allowed_origins,
         rate_limit_per_minute: config.remote_rate_limit_per_minute,
+        device_rate_limit_per_minute: config.remote_device_rate_limit_per_minute,
+        ip_rate_limit_per_minute: config.remote_ip_rate_limit_per_minute,
         audit: config.remote_audit_enabled,
     }
 }

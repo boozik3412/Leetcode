@@ -49,6 +49,8 @@ pub struct RemoteAccessPolicy {
     pub devices: Vec<RemoteTrustedDevice>,
     pub allowed_origins: Vec<String>,
     pub rate_limit_per_minute: u32,
+    pub device_rate_limit_per_minute: u32,
+    pub ip_rate_limit_per_minute: u32,
     pub audit: bool,
 }
 
@@ -70,6 +72,8 @@ impl Default for RemoteAccessPolicy {
             devices: Vec::new(),
             allowed_origins: Vec::new(),
             rate_limit_per_minute: 120,
+            device_rate_limit_per_minute: 60,
+            ip_rate_limit_per_minute: 180,
             audit: true,
         }
     }
@@ -247,6 +251,10 @@ pub struct RemoteControlSnapshot {
     pub remote_allowed_origins: String,
     #[serde(default)]
     pub remote_rate_limit_per_minute: u32,
+    #[serde(default)]
+    pub remote_device_rate_limit_per_minute: u32,
+    #[serde(default)]
+    pub remote_ip_rate_limit_per_minute: u32,
     pub remote_last_action: String,
     #[serde(default)]
     pub relay_enabled: bool,
@@ -308,6 +316,8 @@ impl Default for RemoteControlSnapshot {
             remote_port: 0,
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: 0,
+            remote_device_rate_limit_per_minute: 0,
+            remote_ip_rate_limit_per_minute: 0,
             remote_last_action: String::new(),
             relay_enabled: false,
             relay_url: String::new(),
@@ -402,17 +412,20 @@ pub fn start_remote_control_server(
     let handle = thread::spawn(move || {
         while !server_stop.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _addr)) => {
+                Ok((stream, addr)) => {
                     let state = Arc::clone(&shared_state);
                     let token = token.clone();
                     let policy = policy.clone();
                     let actions = actions.clone();
                     let rate_limit = Arc::clone(&rate_limit);
                     let stop = Arc::clone(&server_stop);
+                    let client_ip = addr.ip().to_string();
                     let _ = thread::Builder::new()
                         .name("leetcode-remote-client".to_string())
                         .spawn(move || {
-                            handle_client(stream, state, token, policy, actions, rate_limit, stop)
+                            handle_client(
+                                stream, state, token, policy, actions, rate_limit, stop, client_ip,
+                            )
                         });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -440,6 +453,7 @@ fn handle_client(
     actions: Option<Sender<RemoteControlAction>>,
     rate_limit: Arc<Mutex<RemoteRateLimitState>>,
     stop: Arc<AtomicBool>,
+    client_ip: String,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let Ok(cloned_stream) = stream.try_clone() else {
@@ -511,13 +525,14 @@ fn handle_client(
                 );
                 return;
             }
-            if !check_remote_rate_limit(&rate_limit, policy.rate_limit_per_minute) {
-                send_remote_audit(actions.as_ref(), policy.audit, "rate_limited", path);
-                write_json_response(
-                    &mut stream,
-                    429,
-                    &json!({"ok": false, "error": "remote API rate limit exceeded"}),
+            if let Some(error) = check_remote_rate_limits(&rate_limit, &policy, None, &client_ip) {
+                send_remote_audit(
+                    actions.as_ref(),
+                    policy.audit,
+                    "rate_limited",
+                    &format!("{path}: {error}"),
                 );
+                write_json_response(&mut stream, 429, &json!({"ok": false, "error": error}));
                 return;
             }
             handle_pair_device(&mut stream, &body, &policy, actions.as_ref());
@@ -532,6 +547,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::View,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -549,6 +565,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::View,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -565,6 +582,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::View,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -586,6 +604,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::View,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -607,6 +626,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::View,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -644,6 +664,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::Files,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -665,6 +686,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::Files,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -690,6 +712,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::View,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -711,6 +734,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::Chat,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -727,6 +751,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::Chat,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -753,6 +778,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::Approve,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -769,6 +795,7 @@ fn handle_client(
                 &rate_limit,
                 RemoteAccessRole::Approve,
                 actions.as_ref(),
+                &client_ip,
                 path,
             ) {
                 return;
@@ -1331,18 +1358,23 @@ fn compact_remote_text(message: &str, limit: usize) -> String {
 }
 
 #[derive(Debug)]
-struct RemoteRateLimitState {
+struct RemoteRateLimitBucket {
     window_started_at: u64,
     count: u32,
 }
 
-impl Default for RemoteRateLimitState {
+impl Default for RemoteRateLimitBucket {
     fn default() -> Self {
         Self {
             window_started_at: unix_timestamp(),
             count: 0,
         }
     }
+}
+
+#[derive(Debug, Default)]
+struct RemoteRateLimitState {
+    buckets: HashMap<String, RemoteRateLimitBucket>,
 }
 
 #[derive(Clone, Debug)]
@@ -1394,6 +1426,7 @@ fn authorize_or_write(
     rate_limit: &Arc<Mutex<RemoteRateLimitState>>,
     role: RemoteAccessRole,
     actions: Option<&Sender<RemoteControlAction>>,
+    client_ip: &str,
     path: &str,
 ) -> bool {
     let Some(subject) = authorized_subject(headers, query, token, policy) else {
@@ -1426,13 +1459,14 @@ fn authorize_or_write(
         return false;
     }
 
-    if !check_remote_rate_limit(rate_limit, policy.rate_limit_per_minute) {
-        send_remote_audit(actions, policy.audit, "rate_limited", path);
-        write_json_response(
-            stream,
-            429,
-            &json!({"ok": false, "error": "remote API rate limit exceeded"}),
+    if let Some(error) = check_remote_rate_limits(rate_limit, policy, Some(&subject), client_ip) {
+        send_remote_audit(
+            actions,
+            policy.audit,
+            "rate_limited",
+            &format!("{path}: {error}"),
         );
+        write_json_response(stream, 429, &json!({"ok": false, "error": error}));
         return false;
     }
 
@@ -1472,23 +1506,83 @@ fn origin_is_allowed(headers: &HashMap<String, String>, policy: &RemoteAccessPol
     origin.eq_ignore_ascii_case(&same_http) || origin.eq_ignore_ascii_case(&same_https)
 }
 
-fn check_remote_rate_limit(rate_limit: &Arc<Mutex<RemoteRateLimitState>>, per_minute: u32) -> bool {
-    if per_minute == 0 {
-        return true;
+fn check_remote_rate_limits(
+    rate_limit: &Arc<Mutex<RemoteRateLimitState>>,
+    policy: &RemoteAccessPolicy,
+    subject: Option<&AuthorizedRemoteSubject>,
+    client_ip: &str,
+) -> Option<&'static str> {
+    let mut limits = Vec::new();
+    if policy.rate_limit_per_minute > 0 {
+        limits.push((
+            "global".to_string(),
+            policy.rate_limit_per_minute,
+            "remote API global rate limit exceeded",
+        ));
     }
+    if let Some(device_id) = subject.and_then(|subject| subject.device_id.as_deref()) {
+        if policy.device_rate_limit_per_minute > 0 {
+            limits.push((
+                format!("device:{device_id}"),
+                policy.device_rate_limit_per_minute,
+                "remote API device rate limit exceeded",
+            ));
+        }
+    }
+    if !client_ip.trim().is_empty() && policy.ip_rate_limit_per_minute > 0 {
+        limits.push((
+            format!("ip:{}", client_ip.trim()),
+            policy.ip_rate_limit_per_minute,
+            "remote API IP rate limit exceeded",
+        ));
+    }
+    if limits.is_empty() {
+        return None;
+    }
+
     let Ok(mut state) = rate_limit.lock() else {
-        return true;
+        return None;
     };
     let now = unix_timestamp();
-    if now.saturating_sub(state.window_started_at) >= 60 {
-        state.window_started_at = now;
-        state.count = 0;
+
+    for (key, _, _) in &limits {
+        let bucket = state.buckets.entry(key.clone()).or_default();
+        reset_remote_rate_limit_bucket(bucket, now);
     }
-    if state.count >= per_minute {
-        return false;
+
+    if let Some((_, _, error)) = limits.iter().find(|(key, limit, _)| {
+        state
+            .buckets
+            .get(key)
+            .map(|bucket| bucket.count >= *limit)
+            .unwrap_or(false)
+    }) {
+        return Some(*error);
     }
-    state.count = state.count.saturating_add(1);
-    true
+
+    for (key, _, _) in &limits {
+        if let Some(bucket) = state.buckets.get_mut(key) {
+            bucket.count = bucket.count.saturating_add(1);
+        }
+    }
+    prune_remote_rate_limit_buckets(&mut state, now);
+    None
+}
+
+fn reset_remote_rate_limit_bucket(bucket: &mut RemoteRateLimitBucket, now: u64) {
+    if now.saturating_sub(bucket.window_started_at) >= 60 {
+        bucket.window_started_at = now;
+        bucket.count = 0;
+    }
+}
+
+fn prune_remote_rate_limit_buckets(state: &mut RemoteRateLimitState, now: u64) {
+    if state.buckets.len() <= 256 {
+        return;
+    }
+    state
+        .buckets
+        .retain(|_, bucket| now.saturating_sub(bucket.window_started_at) < 180);
 }
 
 fn send_remote_audit(
@@ -2504,6 +2598,92 @@ mod tests {
             "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
         );
         assert!(second.starts_with("HTTP/1.1 429 Too Many Requests"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_security_rate_limits_ip_requests() {
+        let shared_state = new_remote_shared_state();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.rate_limit_per_minute = 0;
+        policy.ip_rate_limit_per_minute = 1;
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy,
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let first = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(first.starts_with("HTTP/1.1 200 OK"));
+
+        let second = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\n\r\n",
+        );
+        assert!(second.starts_with("HTTP/1.1 429 Too Many Requests"));
+        assert!(second.contains("IP rate limit"));
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_security_rate_limits_device_requests() {
+        let shared_state = new_remote_shared_state();
+        let mut policy = RemoteAccessPolicy::default();
+        policy.rate_limit_per_minute = 0;
+        policy.ip_rate_limit_per_minute = 0;
+        policy.device_rate_limit_per_minute = 1;
+        policy.devices.push(RemoteTrustedDevice {
+            id: "device-1".to_string(),
+            name: "Phone".to_string(),
+            token: "device-token".to_string(),
+            role_view: true,
+            role_chat: true,
+            role_approve: true,
+            role_files: false,
+            created_at: unix_timestamp(),
+            last_seen_at: 0,
+            expires_at: 0,
+            token_rotated_at: 0,
+            revoked_at: 0,
+            revoked: false,
+        });
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy,
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let first = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nX-Leetcode-Device-Token: device-token\r\n\r\n",
+        );
+        assert!(first.starts_with("HTTP/1.1 200 OK"));
+
+        let second = request(
+            &addr,
+            "GET /api/state HTTP/1.1\r\nHost: localhost\r\nX-Leetcode-Device-Token: device-token\r\n\r\n",
+        );
+        assert!(second.starts_with("HTTP/1.1 429 Too Many Requests"));
+        assert!(second.contains("device rate limit"));
 
         server.stop();
     }

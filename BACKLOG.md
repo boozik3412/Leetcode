@@ -282,7 +282,8 @@ Leetcode развивается из минимального локальног
 - Done: Добавить security baseline для local Remote API: роли доступа, Origin allowlist, глобальный rate limit и audit-события удалённых действий.
 - Done: Добавить safe Remote Commands: `GET /api/commands`, `POST /api/commands`, PWA-кнопки и app-side allowlist для безопасных команд палитры.
 - Todo: Расширить Remote Commands до макросов/проектных команд с отдельными ролями, подтверждениями и риск-классами.
-- Todo: Усилить безопасность до product-grade: token rotation, TLS/WSS, per-device/per-IP rate limiting.
+- Done: Усилить security baseline до управляемых trusted devices: token expiry, revoke, rotation, роли по устройствам и per-device/per-IP rate limiting.
+- Todo: Довести transport security до product-grade: TLS/WSS, signed short-lived sessions и отдельные роли run/desktop для внешнего relay.
 - Done: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Done: Сделать лёгкий desktop thin client как отдельный `leetcode-client` binary поверх Remote API: состояние агента, отправка задач, safe commands, approvals.
 - Done: Добавить installer/portable package для тонкого клиента: `package-client-windows.ps1`, `install-leetcode-client.ps1`, `uninstall-leetcode-client.ps1`, `client-latest.json`.

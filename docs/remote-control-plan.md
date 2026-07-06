@@ -69,9 +69,11 @@
   - TLS/WSS;
   - Done local-first: Origin validation с allowlist в настройках;
   - Done local-first: глобальный rate limit для Remote API;
+  - Done local-first: per-device/per-IP rate limits для Remote API;
   - Done local-first: audit log remote actions;
   - Done local-first: roles: view/chat/approve/files;
-  - later product: per-device/per-IP limits, revoke devices, run/desktop roles, signed short-lived sessions.
+  - Done local-first: device token expiry, revoke и rotation;
+  - later product: TLS/WSS, run/desktop roles, signed short-lived sessions.
 
 Критерии готовности:
 

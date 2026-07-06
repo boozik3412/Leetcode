@@ -57,6 +57,8 @@ pub struct AppConfig {
     pub remote_default_device_ttl_days: u32,
     pub remote_allowed_origins: String,
     pub remote_rate_limit_per_minute: u32,
+    pub remote_device_rate_limit_per_minute: u32,
+    pub remote_ip_rate_limit_per_minute: u32,
     pub remote_audit_enabled: bool,
     pub remote_pairing_code: String,
     pub remote_pairing_expires_at: u64,
@@ -222,6 +224,10 @@ struct PersistedConfig {
     remote_allowed_origins: String,
     #[serde(default = "default_remote_rate_limit_per_minute")]
     remote_rate_limit_per_minute: u32,
+    #[serde(default = "default_remote_device_rate_limit_per_minute")]
+    remote_device_rate_limit_per_minute: u32,
+    #[serde(default = "default_remote_ip_rate_limit_per_minute")]
+    remote_ip_rate_limit_per_minute: u32,
     #[serde(default = "default_true")]
     remote_audit_enabled: bool,
     #[serde(default)]
@@ -301,6 +307,8 @@ impl Default for PersistedConfig {
             remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_device_rate_limit_per_minute: default_remote_device_rate_limit_per_minute(),
+            remote_ip_rate_limit_per_minute: default_remote_ip_rate_limit_per_minute(),
             remote_audit_enabled: true,
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
@@ -423,6 +431,12 @@ impl AppConfig {
             remote_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
                 persisted.remote_rate_limit_per_minute,
             ),
+            remote_device_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
+                persisted.remote_device_rate_limit_per_minute,
+            ),
+            remote_ip_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
+                persisted.remote_ip_rate_limit_per_minute,
+            ),
             remote_audit_enabled: persisted.remote_audit_enabled,
             remote_pairing_code: normalize_remote_pairing_code(
                 &persisted.remote_pairing_code,
@@ -526,6 +540,12 @@ impl AppConfig {
             remote_allowed_origins: normalize_remote_allowed_origins(&self.remote_allowed_origins),
             remote_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
                 self.remote_rate_limit_per_minute,
+            ),
+            remote_device_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
+                self.remote_device_rate_limit_per_minute,
+            ),
+            remote_ip_rate_limit_per_minute: normalize_remote_rate_limit_per_minute(
+                self.remote_ip_rate_limit_per_minute,
             ),
             remote_audit_enabled: self.remote_audit_enabled,
             remote_pairing_code: normalize_remote_pairing_code(
@@ -904,6 +924,14 @@ pub fn generate_remote_pairing_code() -> String {
 
 fn default_remote_rate_limit_per_minute() -> u32 {
     120
+}
+
+fn default_remote_device_rate_limit_per_minute() -> u32 {
+    60
+}
+
+fn default_remote_ip_rate_limit_per_minute() -> u32 {
+    180
 }
 
 fn default_remote_device_ttl_days() -> u32 {
@@ -1517,6 +1545,8 @@ mod tests {
             remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_device_rate_limit_per_minute: default_remote_device_rate_limit_per_minute(),
+            remote_ip_rate_limit_per_minute: default_remote_ip_rate_limit_per_minute(),
             remote_audit_enabled: true,
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
@@ -1592,6 +1622,8 @@ mod tests {
             remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_device_rate_limit_per_minute: default_remote_device_rate_limit_per_minute(),
+            remote_ip_rate_limit_per_minute: default_remote_ip_rate_limit_per_minute(),
             remote_audit_enabled: true,
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
@@ -1833,6 +1865,8 @@ mod tests {
             remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_device_rate_limit_per_minute: default_remote_device_rate_limit_per_minute(),
+            remote_ip_rate_limit_per_minute: default_remote_ip_rate_limit_per_minute(),
             remote_audit_enabled: true,
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
@@ -1901,6 +1935,8 @@ mod tests {
             remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_device_rate_limit_per_minute: default_remote_device_rate_limit_per_minute(),
+            remote_ip_rate_limit_per_minute: default_remote_ip_rate_limit_per_minute(),
             remote_audit_enabled: true,
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
@@ -1972,6 +2008,8 @@ mod tests {
             remote_default_device_ttl_days: default_remote_device_ttl_days(),
             remote_allowed_origins: String::new(),
             remote_rate_limit_per_minute: default_remote_rate_limit_per_minute(),
+            remote_device_rate_limit_per_minute: default_remote_device_rate_limit_per_minute(),
+            remote_ip_rate_limit_per_minute: default_remote_ip_rate_limit_per_minute(),
             remote_audit_enabled: true,
             remote_pairing_code: String::new(),
             remote_pairing_expires_at: 0,
