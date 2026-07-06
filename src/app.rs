@@ -18235,6 +18235,7 @@ fn remote_access_policy_from_config(config: &AppConfig) -> RemoteAccessPolicy {
         rate_limit_per_minute: config.remote_rate_limit_per_minute,
         device_rate_limit_per_minute: config.remote_device_rate_limit_per_minute,
         ip_rate_limit_per_minute: config.remote_ip_rate_limit_per_minute,
+        session_ttl_secs: 15 * 60,
         audit: config.remote_audit_enabled,
     }
 }

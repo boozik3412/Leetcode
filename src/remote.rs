@@ -1,5 +1,8 @@
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -9,6 +12,10 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+type HmacSha256 = Hmac<Sha256>;
+const REMOTE_SESSION_TOKEN_VERSION: &str = "lrs1";
+const DEFAULT_REMOTE_SESSION_TTL_SECS: u64 = 15 * 60;
 
 #[derive(Clone, Debug)]
 pub struct RemoteControlServerConfig {
@@ -51,6 +58,7 @@ pub struct RemoteAccessPolicy {
     pub rate_limit_per_minute: u32,
     pub device_rate_limit_per_minute: u32,
     pub ip_rate_limit_per_minute: u32,
+    pub session_ttl_secs: u64,
     pub audit: bool,
 }
 
@@ -74,6 +82,7 @@ impl Default for RemoteAccessPolicy {
             rate_limit_per_minute: 120,
             device_rate_limit_per_minute: 60,
             ip_rate_limit_per_minute: 180,
+            session_ttl_secs: DEFAULT_REMOTE_SESSION_TTL_SECS,
             audit: true,
         }
     }
@@ -515,6 +524,19 @@ fn handle_client(
                 "service": "remote-control"
             }),
         ),
+        ("POST", "/api/sessions") => {
+            handle_create_session(
+                &mut stream,
+                &headers,
+                query,
+                &token,
+                &policy,
+                &rate_limit,
+                actions.as_ref(),
+                &client_ip,
+                path,
+            );
+        }
         ("POST", "/api/pair") => {
             if !origin_is_allowed(&headers, &policy) {
                 send_remote_audit(actions.as_ref(), policy.audit, "origin_denied", path);
@@ -1070,6 +1092,95 @@ fn remote_device_expires_at(created_at: u64, ttl_days: u32) -> u64 {
     }
 }
 
+fn handle_create_session(
+    stream: &mut TcpStream,
+    headers: &HashMap<String, String>,
+    query: &str,
+    token: &str,
+    policy: &RemoteAccessPolicy,
+    rate_limit: &Arc<Mutex<RemoteRateLimitState>>,
+    actions: Option<&Sender<RemoteControlAction>>,
+    client_ip: &str,
+    path: &str,
+) {
+    let Some(subject) = authorized_subject(headers, query, token, policy) else {
+        write_unauthorized(stream);
+        return;
+    };
+    if !origin_is_allowed(headers, policy) {
+        send_remote_audit(actions, policy.audit, "origin_denied", path);
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "origin is not allowed"}),
+        );
+        return;
+    }
+    if !subject.allows(RemoteAccessRole::View) {
+        send_remote_audit(actions, policy.audit, "role_denied", path);
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "forbidden: role required: view"}),
+        );
+        return;
+    }
+    if let Some(error) = check_remote_rate_limits(rate_limit, policy, Some(&subject), client_ip) {
+        send_remote_audit(
+            actions,
+            policy.audit,
+            "rate_limited",
+            &format!("{path}: {error}"),
+        );
+        write_json_response(stream, 429, &json!({"ok": false, "error": error}));
+        return;
+    }
+
+    let Some(session) = issue_remote_session_token(&subject, token, policy) else {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "session token could not be signed"}),
+        );
+        return;
+    };
+    if let Some(device_id) = subject.device_id.as_ref() {
+        if let Some(actions) = actions {
+            let _ = actions.send(RemoteControlAction::DeviceSeen {
+                device_id: device_id.clone(),
+                seen_at: unix_timestamp(),
+            });
+        }
+    }
+    send_remote_audit(
+        actions,
+        policy.audit,
+        "session_created",
+        &format!(
+            "{} expires_at={}",
+            subject.session_subject_label(),
+            session.expires_at
+        ),
+    );
+    write_json_response(
+        stream,
+        201,
+        &json!({
+            "ok": true,
+            "session_token": session.token,
+            "expires_at": session.expires_at,
+            "ttl_secs": session.ttl_secs,
+            "subject": subject.session_subject_label(),
+            "roles": {
+                "view": subject.view,
+                "chat": subject.chat,
+                "approve": subject.approve,
+                "files": subject.files
+            }
+        }),
+    );
+}
+
 fn handle_submit_task(
     stream: &mut TcpStream,
     body: &[u8],
@@ -1415,6 +1526,20 @@ impl AuthorizedRemoteSubject {
             RemoteAccessRole::Files => self.files,
         }
     }
+
+    fn session_subject_label(&self) -> String {
+        self.device_id
+            .as_ref()
+            .map(|device_id| format!("device:{device_id}"))
+            .unwrap_or_else(|| "admin".to_string())
+    }
+}
+
+#[derive(Debug)]
+struct RemoteSessionIssue {
+    token: String,
+    expires_at: u64,
+    ttl_secs: u64,
 }
 
 fn authorize_or_write(
@@ -1603,6 +1728,101 @@ fn send_remote_audit(
     }
 }
 
+fn issue_remote_session_token(
+    subject: &AuthorizedRemoteSubject,
+    access_token: &str,
+    policy: &RemoteAccessPolicy,
+) -> Option<RemoteSessionIssue> {
+    let now = unix_timestamp();
+    let ttl_secs = policy.session_ttl_secs.clamp(60, 86_400);
+    let expires_at = now.saturating_add(ttl_secs);
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let (kind, subject_id, secret) = if let Some(device_id) = subject.device_id.as_deref() {
+        let device = policy
+            .devices
+            .iter()
+            .find(|device| remote_trusted_device_is_active(device) && device.id == device_id)?;
+        (
+            "device",
+            device.id.as_str(),
+            remote_session_device_secret(access_token, &device.token),
+        )
+    } else {
+        ("admin", "_", access_token.trim().to_string())
+    };
+    if secret.trim().is_empty() {
+        return None;
+    }
+    let payload =
+        format!("{REMOTE_SESSION_TOKEN_VERSION}.{kind}.{subject_id}.{now}.{expires_at}.{nonce}");
+    let signature = sign_remote_session_payload(&secret, &payload)?;
+    Some(RemoteSessionIssue {
+        token: format!("{payload}.{signature}"),
+        expires_at,
+        ttl_secs,
+    })
+}
+
+fn authorized_remote_session(
+    session_token: &str,
+    access_token: &str,
+    policy: &RemoteAccessPolicy,
+) -> Option<AuthorizedRemoteSubject> {
+    let parts = session_token.trim().split('.').collect::<Vec<_>>();
+    if parts.len() != 7 || parts.first().copied() != Some(REMOTE_SESSION_TOKEN_VERSION) {
+        return None;
+    }
+    let kind = parts[1];
+    let subject_id = parts[2];
+    let issued_at = parts[3].parse::<u64>().ok()?;
+    let expires_at = parts[4].parse::<u64>().ok()?;
+    let signature = parts[6];
+    let now = unix_timestamp();
+    if issued_at > now.saturating_add(60) || expires_at <= now || expires_at <= issued_at {
+        return None;
+    }
+    let payload = parts[..6].join(".");
+    match kind {
+        "admin" if subject_id == "_" => {
+            verify_remote_session_signature(access_token.trim(), &payload, signature)
+                .then(|| AuthorizedRemoteSubject::admin(policy))
+        }
+        "device" => {
+            let device = policy.devices.iter().find(|device| {
+                remote_trusted_device_is_active(device) && device.id == subject_id
+            })?;
+            if device.token_rotated_at > 0 && issued_at < device.token_rotated_at {
+                return None;
+            }
+            let secret = remote_session_device_secret(access_token, &device.token);
+            verify_remote_session_signature(&secret, &payload, signature)
+                .then(|| AuthorizedRemoteSubject::from_device(device, policy))
+        }
+        _ => None,
+    }
+}
+
+fn sign_remote_session_payload(secret: &str, payload: &str) -> Option<String> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).ok()?;
+    mac.update(payload.as_bytes());
+    Some(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+}
+
+fn verify_remote_session_signature(secret: &str, payload: &str, signature: &str) -> bool {
+    let Ok(signature) = URL_SAFE_NO_PAD.decode(signature.as_bytes()) else {
+        return false;
+    };
+    let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(payload.as_bytes());
+    mac.verify_slice(&signature).is_ok()
+}
+
+fn remote_session_device_secret(access_token: &str, device_token: &str) -> String {
+    format!("{}:{}", access_token.trim(), device_token.trim())
+}
+
 fn split_target(target: &str) -> (&str, &str) {
     if let Some((path, query)) = target.split_once('?') {
         (path, query)
@@ -1617,6 +1837,9 @@ fn authorized_subject(
     token: &str,
     policy: &RemoteAccessPolicy,
 ) -> Option<AuthorizedRemoteSubject> {
+    if let Some(session_token) = presented_remote_session_token(headers, query) {
+        return authorized_remote_session(&session_token, token, policy);
+    }
     if is_authorized(headers, query, token) {
         return Some(AuthorizedRemoteSubject::admin(policy));
     }
@@ -1654,6 +1877,33 @@ fn presented_remote_token(headers: &HashMap<String, String>, query: &str) -> Opt
             return None;
         };
         (name == "token").then(|| percent_decode(value))
+    })
+}
+
+fn presented_remote_session_token(
+    headers: &HashMap<String, String>,
+    query: &str,
+) -> Option<String> {
+    if let Some(header) = headers.get("authorization") {
+        let header = header.trim();
+        if let Some(token) = header.strip_prefix("Bearer ") {
+            let token = token.trim();
+            if token.starts_with(REMOTE_SESSION_TOKEN_VERSION) {
+                return Some(token.to_string());
+            }
+        }
+    }
+    if let Some(header) = headers.get("x-leetcode-session-token") {
+        let token = header.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+    query.split('&').find_map(|part| {
+        let Some((name, value)) = part.split_once('=') else {
+            return None;
+        };
+        matches!(name, "session" | "session_token").then(|| percent_decode(value))
     })
 }
 
@@ -2689,8 +2939,79 @@ mod tests {
     }
 
     #[test]
+    fn remote_signed_session_authorizes_state_and_rejects_bad_tokens() {
+        let shared_state = new_remote_shared_state();
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy: RemoteAccessPolicy::default(),
+                actions: None,
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let session_response = request(
+            &addr,
+            "POST /api/sessions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\nContent-Length: 0\r\n\r\n",
+        );
+        assert!(session_response.starts_with("HTTP/1.1 201 Created"));
+        let session_body = response_body(&session_response);
+        let session_json = serde_json::from_str::<Value>(session_body).expect("session json");
+        let session_token = session_json
+            .get("session_token")
+            .and_then(Value::as_str)
+            .expect("session token");
+        assert!(session_token.starts_with(REMOTE_SESSION_TOKEN_VERSION));
+
+        let state = request(
+            &addr,
+            &format!(
+                "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {session_token}\r\n\r\n"
+            ),
+        );
+        assert!(state.starts_with("HTTP/1.1 200 OK"));
+
+        let mut tampered = session_token.to_string();
+        tampered.push('x');
+        let denied = request(
+            &addr,
+            &format!(
+                "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {tampered}\r\n\r\n"
+            ),
+        );
+        assert!(denied.starts_with("HTTP/1.1 401 Unauthorized"));
+
+        let now = unix_timestamp();
+        let expired_payload = format!(
+            "{REMOTE_SESSION_TOKEN_VERSION}.admin._.{}.{}.expired",
+            now.saturating_sub(120),
+            now.saturating_sub(60)
+        );
+        let expired_signature =
+            sign_remote_session_payload("lrt-test", &expired_payload).expect("signature");
+        let expired_token = format!("{expired_payload}.{expired_signature}");
+        let expired = request(
+            &addr,
+            &format!(
+                "GET /api/state HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {expired_token}\r\n\r\n"
+            ),
+        );
+        assert!(expired.starts_with("HTTP/1.1 401 Unauthorized"));
+
+        server.stop();
+    }
+
+    #[test]
     fn percent_decode_preserves_utf8_paths() {
         assert_eq!(percent_decode("%D1%84%D0%B0%D0%B9%D0%BB.txt"), "файл.txt");
+    }
+
+    fn response_body(response: &str) -> &str {
+        response.split("\r\n\r\n").nth(1).unwrap_or_default()
     }
 
     fn request(addr: &str, request: &str) -> String {

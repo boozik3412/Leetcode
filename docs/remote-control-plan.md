@@ -64,7 +64,8 @@
   - Done local-first: запускать safe-команды палитры через `POST /api/commands`;
   - Done foundation: запускать макросы/проектные команды с risk-классами, preview, confirmation и approve-gate для high-risk действий.
 - Security hardening:
-  - short-lived access tokens;
+  - Done local-first: signed short-lived sessions через `POST /api/sessions`;
+  - later product: relay-issued short-lived sessions;
   - passkeys/WebAuthn;
   - TLS/WSS;
   - Done local-first: Origin validation с allowlist в настройках;
@@ -73,7 +74,7 @@
   - Done local-first: audit log remote actions;
   - Done local-first: roles: view/chat/approve/files;
   - Done local-first: device token expiry, revoke и rotation;
-  - later product: TLS/WSS, run/desktop roles, signed short-lived sessions.
+  - later product: TLS/WSS and run/desktop roles.
 
 Критерии готовности:
 
