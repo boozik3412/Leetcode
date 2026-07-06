@@ -4,9 +4,10 @@ mod relay;
 use relay::{
     generate_relay_device_token, new_action, normalize_agent_id, RelayAction, RelayActionKind,
     RelayClientApprovalRequest, RelayClientCommandRequest, RelayClientRequest,
-    RelayClientTaskRequest, RelayDevice, RelayHostPollReply, RelayHostPollRequest, RelayPairReply,
-    RelayPairRequest, RelayQueuedReply, RelayStateReply, DEFAULT_RELAY_URL,
-    RELAY_HOST_SESSION_TTL_SECS,
+    RelayClientTaskRequest, RelayDevice, RelayHostPairingDecisionRequest, RelayHostPollReply,
+    RelayHostPollRequest, RelayPairDecisionReply, RelayPairReply, RelayPairRequest,
+    RelayPairStatusRequest, RelayPairingRequest, RelayQueuedReply, RelayStateReply,
+    DEFAULT_RELAY_URL, RELAY_HOST_SESSION_TTL_SECS,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -26,9 +27,36 @@ struct HostRecord {
     state: Value,
     pairing_code: String,
     pairing_expires_at: u64,
+    pending_pairings: HashMap<String, PendingPairingRecord>,
     devices: HashMap<String, RelayDevice>,
     actions: VecDeque<RelayAction>,
     updated_at: u64,
+}
+
+struct PendingPairingRecord {
+    request: RelayPairingRequest,
+    status: PairingRequestStatus,
+    device: Option<RelayDevice>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PairingRequestStatus {
+    Pending,
+    Approved,
+    Denied,
+    Expired,
+}
+
+impl PairingRequestStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            PairingRequestStatus::Pending => "pending",
+            PairingRequestStatus::Approved => "approved",
+            PairingRequestStatus::Denied => "denied",
+            PairingRequestStatus::Expired => "expired",
+        }
+    }
 }
 
 impl HostRecord {
@@ -38,6 +66,7 @@ impl HostRecord {
             state: json!({}),
             pairing_code: String::new(),
             pairing_expires_at: 0,
+            pending_pairings: HashMap::new(),
             devices: HashMap::new(),
             actions: VecDeque::new(),
             updated_at: unix_timestamp(),
@@ -116,7 +145,13 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
         ),
         ("GET", "/health") => handle_health(&mut stream, state),
         ("POST", "/api/hosts/poll") => handle_host_poll(&mut stream, &request.body, state),
+        ("POST", "/api/hosts/pairing/decision") => {
+            handle_host_pairing_decision(&mut stream, &request.body, state)
+        }
         ("POST", "/api/clients/pair") => handle_client_pair(&mut stream, &request.body, state),
+        ("POST", "/api/clients/pair/status") => {
+            handle_client_pair_status(&mut stream, &request.body, state)
+        }
         ("POST", "/api/clients/state") => handle_client_state(&mut stream, &request.body, state),
         ("POST", "/api/clients/tasks") => handle_client_task(&mut stream, &request.body, state),
         ("POST", "/api/clients/commands") => {
@@ -255,25 +290,31 @@ fn handle_client_pair(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
     } else {
         request.device_name.trim().chars().take(80).collect()
     };
-    let device = RelayDevice {
-        id: format!("relay-device-{}", uuid::Uuid::new_v4().simple()),
-        name,
-        token: generate_relay_device_token(),
+    let pairing_request = RelayPairingRequest {
+        request_id: format!("relay-pair-{}", uuid::Uuid::new_v4().simple()),
+        device_name: name,
         role_view: request.role_view,
         role_chat: request.role_chat,
         role_approve: request.role_approve,
         role_files: request.role_files,
         created_at: now,
-        last_seen_at: now,
-        revoked: false,
+        expires_at: now + 10 * 60,
     };
-    host.devices.insert(device.id.clone(), device.clone());
     host.actions.push_back(new_action(
-        RelayActionKind::PairDevice {
-            device: device.clone(),
+        RelayActionKind::PairingRequest {
+            request: pairing_request.clone(),
         },
         now,
     ));
+    host.pending_pairings.insert(
+        pairing_request.request_id.clone(),
+        PendingPairingRecord {
+            request: pairing_request.clone(),
+            status: PairingRequestStatus::Pending,
+            device: None,
+            error: None,
+        },
+    );
     host.pairing_code.clear();
     host.pairing_expires_at = 0;
 
@@ -282,12 +323,169 @@ fn handle_client_pair(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         201,
         &RelayPairReply {
             ok: true,
-            device_id: device.id,
-            device_name: device.name,
-            device_token: device.token,
+            device_id: String::new(),
+            device_name: pairing_request.device_name,
+            device_token: String::new(),
+            status: "pending".to_string(),
+            request_id: pairing_request.request_id,
+            poll_after_ms: 2_000,
             error: None,
         },
     );
+}
+
+fn handle_client_pair_status(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
+    let Ok(request) = serde_json::from_slice::<RelayPairStatusRequest>(body) else {
+        write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
+        return;
+    };
+    let agent_id = normalize_agent_id(&request.agent_id);
+    let now = unix_timestamp();
+    let mut state = state.lock().expect("relay state poisoned");
+    let Some(host) = state.hosts.get_mut(&agent_id) else {
+        write_json_response(
+            stream,
+            404,
+            &json!({"ok": false, "error": "agent is not connected to relay"}),
+        );
+        return;
+    };
+    let request_id = request.request_id.trim().to_string();
+    let Some(record) = host.pending_pairings.get_mut(&request_id) else {
+        write_json_response(
+            stream,
+            404,
+            &RelayPairReply {
+                ok: false,
+                device_id: String::new(),
+                device_name: String::new(),
+                device_token: String::new(),
+                status: "unknown".to_string(),
+                request_id: request.request_id,
+                poll_after_ms: 2_000,
+                error: Some("pairing request not found".to_string()),
+            },
+        );
+        return;
+    };
+    if record.status == PairingRequestStatus::Pending && record.request.expires_at <= now {
+        record.status = PairingRequestStatus::Expired;
+        record.error = Some("pairing request expired".to_string());
+    }
+    let device = record.device.clone();
+    write_json_response(
+        stream,
+        200,
+        &RelayPairReply {
+            ok: record.status == PairingRequestStatus::Approved,
+            device_id: device
+                .as_ref()
+                .map(|device| device.id.clone())
+                .unwrap_or_default(),
+            device_name: device
+                .as_ref()
+                .map(|device| device.name.clone())
+                .unwrap_or_else(|| record.request.device_name.clone()),
+            device_token: device
+                .as_ref()
+                .map(|device| device.token.clone())
+                .unwrap_or_default(),
+            status: record.status.as_str().to_string(),
+            request_id: record.request.request_id.clone(),
+            poll_after_ms: 2_000,
+            error: record.error.clone(),
+        },
+    );
+}
+
+fn handle_host_pairing_decision(
+    stream: &mut TcpStream,
+    body: &[u8],
+    state: Arc<Mutex<RelayState>>,
+) {
+    let Ok(request) = serde_json::from_slice::<RelayHostPairingDecisionRequest>(body) else {
+        write_json_response(stream, 400, &json!({"ok": false, "error": "invalid json"}));
+        return;
+    };
+    let agent_id = normalize_agent_id(&request.agent_id);
+    let now = unix_timestamp();
+    let mut state = state.lock().expect("relay state poisoned");
+    let Some(host) = state.hosts.get_mut(&agent_id) else {
+        write_json_response(
+            stream,
+            404,
+            &json!({"ok": false, "error": "agent is not connected to relay"}),
+        );
+        return;
+    };
+    if host.host_token != request.host_token {
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "host token mismatch"}),
+        );
+        return;
+    }
+    let request_id = request.request_id.trim().to_string();
+    let mut device_to_insert: Option<RelayDevice> = None;
+    let reply = {
+        let Some(record) = host.pending_pairings.get_mut(&request_id) else {
+            write_json_response(
+                stream,
+                404,
+                &RelayPairDecisionReply {
+                    ok: false,
+                    status: "unknown".to_string(),
+                    device: None,
+                    error: Some("pairing request not found".to_string()),
+                },
+            );
+            return;
+        };
+        if record.status != PairingRequestStatus::Pending {
+            RelayPairDecisionReply {
+                ok: record.status == PairingRequestStatus::Approved,
+                status: record.status.as_str().to_string(),
+                device: record.device.clone(),
+                error: record.error.clone(),
+            }
+        } else {
+            if record.request.expires_at <= now {
+                record.status = PairingRequestStatus::Expired;
+                record.error = Some("pairing request expired".to_string());
+            } else if request.approved {
+                let device = RelayDevice {
+                    id: format!("relay-device-{}", uuid::Uuid::new_v4().simple()),
+                    name: record.request.device_name.clone(),
+                    token: generate_relay_device_token(),
+                    role_view: request.role_view,
+                    role_chat: request.role_chat,
+                    role_approve: request.role_approve,
+                    role_files: request.role_files,
+                    created_at: now,
+                    last_seen_at: now,
+                    revoked: false,
+                };
+                record.status = PairingRequestStatus::Approved;
+                record.device = Some(device.clone());
+                record.error = None;
+                device_to_insert = Some(device);
+            } else {
+                record.status = PairingRequestStatus::Denied;
+                record.error = Some("pairing request denied by host".to_string());
+            }
+            RelayPairDecisionReply {
+                ok: record.status == PairingRequestStatus::Approved,
+                status: record.status.as_str().to_string(),
+                device: record.device.clone(),
+                error: record.error.clone(),
+            }
+        }
+    };
+    if let Some(device) = device_to_insert {
+        host.devices.insert(device.id.clone(), device);
+    }
+    write_json_response(stream, 200, &reply);
 }
 
 fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
@@ -681,6 +879,7 @@ pre{white-space:pre-wrap;word-break:break-word;margin:10px 0 0;background:#05080
     </div>
     <div class="actions">
       <button class="primary" onclick="pairDevice()">Подключить по коду</button>
+      <button onclick="checkPairStatus()">Проверить подтверждение</button>
       <button onclick="saveConnection()">Сохранить</button>
       <button onclick="loadState()">Обновить</button>
     </div>
@@ -738,6 +937,16 @@ function loadConnection(){
   $('deviceName').value = params().get('device_name') || localStorage.getItem('leetcode_relay_device_name') || (navigator.platform || 'iPhone');
   $('deviceToken').value = localStorage.getItem('leetcode_relay_device_token_' + $('agentId').value.trim().toUpperCase()) || '';
 }
+function pendingKey(){
+  return 'leetcode_relay_pair_request_' + $('agentId').value.trim().toUpperCase();
+}
+function currentPending(){
+  return localStorage.getItem(pendingKey()) || '';
+}
+function setPendingPairRequest(requestId){
+  if(requestId) localStorage.setItem(pendingKey(), requestId);
+  else localStorage.removeItem(pendingKey());
+}
 function saveConnection(){
   const agent = $('agentId').value.trim().toUpperCase();
   localStorage.setItem('leetcode_relay_agent_id', agent);
@@ -768,11 +977,46 @@ async function pairDevice(){
       role_view:true, role_chat:true, role_approve:true, role_files:false
     };
     const data = await relayPost('/api/clients/pair', body);
-    $('deviceToken').value = data.device_token || '';
-    saveConnection();
     $('pairingCode').value = '';
-    await loadState();
-  }catch(error){setStatus('ошибка пары: ' + error.message, false)}
+    if(data.device_token){
+      $('deviceToken').value = data.device_token || '';
+      setPendingPairRequest('');
+      saveConnection();
+      await loadState();
+      return;
+    }
+    if(data.status === 'pending' && data.request_id){
+      setPendingPairRequest(data.request_id);
+      saveConnection();
+      setStatus('запрос отправлен: подтвердите устройство в Leetcode', true);
+      return;
+    }
+    throw new Error(data.error || data.status || 'pairing не завершён');
+  }catch(error){setStatus('ошибка подключения: ' + error.message, false)}
+}
+async function checkPairStatus(){
+  const requestId = currentPending();
+  if(!requestId){setStatus('нет ожидающего подтверждения');return}
+  try{
+    const data = await relayPost('/api/clients/pair/status',{
+      agent_id:$('agentId').value.trim().toUpperCase(),
+      request_id:requestId
+    });
+    if(data.device_token){
+      $('deviceToken').value = data.device_token || '';
+      setPendingPairRequest('');
+      saveConnection();
+      setStatus('устройство подтверждено', true);
+      await loadState();
+      return;
+    }
+    if(data.status === 'pending'){
+      setStatus('ожидает подтверждения в Leetcode', true);
+      return;
+    }
+    setPendingPairRequest('');
+    setStatus('подключение не завершено: ' + (data.error || data.status || 'unknown'), false);
+  }catch(error){setStatus('ошибка проверки: ' + error.message, false)}
 }
 async function loadState(){
   const agent = $('agentId').value.trim();
@@ -859,7 +1103,11 @@ async function answer(path, approved){
 }
 loadConnection();
 if($('deviceToken').value.trim()) loadState();
-timer = setInterval(loadState, 2500);
+else if(currentPending()) checkPairStatus();
+timer = setInterval(() => {
+  if($('deviceToken').value.trim()) loadState();
+  else if(currentPending()) checkPairStatus();
+}, 2500);
 </script>
 </body>
 </html>"##
@@ -886,6 +1134,7 @@ mod tests {
         let html = relay_mobile_pwa_html();
         assert!(html.contains("/api/clients/state"));
         assert!(html.contains("/api/clients/tasks"));
+        assert!(html.contains("/api/clients/pair/status"));
         assert!(html.contains("pairing_code"));
         assert!(html.contains("apple-mobile-web-app-capable"));
     }

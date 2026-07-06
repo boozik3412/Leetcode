@@ -56,8 +56,9 @@ use crate::provider_health::{
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
 };
 use crate::relay::{
-    generate_relay_host_token, RelayAction, RelayActionKind, RelayHostPollReply,
-    RelayHostPollRequest, DEFAULT_RELAY_URL,
+    generate_relay_host_token, RelayAction, RelayActionKind, RelayHostPairingDecisionRequest,
+    RelayHostPollReply, RelayHostPollRequest, RelayPairDecisionReply, RelayPairingRequest,
+    DEFAULT_RELAY_URL,
 };
 use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
@@ -86,6 +87,8 @@ use crate::updater::{check_for_update, update_and_restart, UpdateCheck, UpdateEv
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use image::{ColorType, ImageFormat};
+use qrcode::types::Color as QrColor;
+use qrcode::QrCode;
 use regex::Regex;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
@@ -221,6 +224,10 @@ pub struct LeetcodeApp {
     relay_last_sync: Option<Instant>,
     relay_last_success_at: u64,
     relay_last_action_count: usize,
+    relay_pending_pairings: Vec<PendingRelayPairing>,
+    relay_pairing_decision_rx: Option<Receiver<Result<RelayPairDecisionReply, String>>>,
+    relay_pairing_decision_in_flight: Option<String>,
+    relay_mobile_qr: Option<(String, egui::TextureHandle)>,
     orchestration_status: String,
     asset_provider_input: String,
     asset_kind_input: String,
@@ -822,6 +829,35 @@ struct ProjectFixRequestRecord {
 }
 
 #[derive(Clone, Debug)]
+struct PendingRelayPairing {
+    request_id: String,
+    device_name: String,
+    role_view: bool,
+    role_chat: bool,
+    role_approve: bool,
+    role_files: bool,
+    created_at: u64,
+    expires_at: u64,
+    status: String,
+}
+
+impl From<RelayPairingRequest> for PendingRelayPairing {
+    fn from(request: RelayPairingRequest) -> Self {
+        Self {
+            request_id: request.request_id,
+            device_name: request.device_name,
+            role_view: request.role_view,
+            role_chat: request.role_chat,
+            role_approve: request.role_approve,
+            role_files: request.role_files,
+            created_at: request.created_at,
+            expires_at: request.expires_at,
+            status: "ожидает".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 struct ReleaseChecklistItem {
     title: String,
     detail: String,
@@ -1328,6 +1364,10 @@ impl LeetcodeApp {
             relay_last_sync: None,
             relay_last_success_at: 0,
             relay_last_action_count: 0,
+            relay_pending_pairings: Vec::new(),
+            relay_pairing_decision_rx: None,
+            relay_pairing_decision_in_flight: None,
+            relay_mobile_qr: None,
             orchestration_status: String::new(),
             asset_provider_input,
             asset_kind_input: "image".to_string(),
@@ -9987,6 +10027,70 @@ impl LeetcodeApp {
                         .weak()
                         .small(),
                     );
+                    self.show_relay_mobile_qr(ui);
+                }
+            }
+
+            ui.add_space(6.0);
+            ui.label(RichText::new("Ожидают подтверждения").strong());
+            if self.relay_pending_pairings.is_empty() {
+                ui.label(RichText::new("Нет новых устройств, ожидающих решения.").weak());
+            } else {
+                let mut decision: Option<(String, bool)> = None;
+                let in_flight_request_id = self.relay_pairing_decision_in_flight.clone();
+                for request in &mut self.relay_pending_pairings {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&request.device_name).strong());
+                        chip(ui, &request.status);
+                        ui.label(
+                            RichText::new(format!(
+                                "запрос {} · создан {} назад · истекает через {}",
+                                compact_inline(&request.request_id, 18),
+                                age_label(request.created_at),
+                                format_duration(Duration::from_secs(
+                                    request.expires_at.saturating_sub(unix_timestamp()),
+                                ))
+                            ))
+                            .weak()
+                            .small(),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("Роли").weak());
+                        ui.checkbox(&mut request.role_view, "Обзор")
+                            .on_hover_text("Устройство сможет читать состояние агента.");
+                        ui.checkbox(&mut request.role_chat, "Задачи")
+                            .on_hover_text("Устройство сможет отправлять задачи агенту.");
+                        ui.checkbox(&mut request.role_approve, "Подтверждения")
+                            .on_hover_text("Устройство сможет подтверждать планы и действия.");
+                        ui.checkbox(&mut request.role_files, "Файлы")
+                            .on_hover_text("Устройство сможет читать файлы проекта.");
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        let busy = in_flight_request_id
+                            .as_ref()
+                            .map(|id| id == &request.request_id)
+                            .unwrap_or(false);
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Подтвердить"))
+                            .clicked()
+                        {
+                            decision = Some((request.request_id.clone(), true));
+                        }
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Отклонить"))
+                            .clicked()
+                        {
+                            decision = Some((request.request_id.clone(), false));
+                        }
+                        if busy {
+                            ui.label(RichText::new("отправляю решение...").weak().small());
+                        }
+                    });
+                }
+                if let Some((request_id, approved)) = decision {
+                    self.answer_relay_pairing_request(request_id, approved);
                 }
             }
 
@@ -10132,6 +10236,75 @@ impl LeetcodeApp {
             url_query_escape(&self.config.remote_pairing_code),
             url_query_escape("iPhone")
         )
+    }
+
+    fn show_relay_mobile_qr(&mut self, ui: &mut egui::Ui) {
+        let link = self.relay_mobile_pairing_link();
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if let Some(texture) = self.relay_mobile_qr_texture(ui.ctx(), &link) {
+                ui.image((texture.id(), egui::vec2(156.0, 156.0)));
+            }
+            ui.vertical(|ui| {
+                ui.label(RichText::new("QR для iPhone").strong());
+                ui.label(
+                    RichText::new(
+                        "Откройте камеру iPhone и наведите на код. Телефон откроет мобильную Relay PWA с Agent ID и временным pairing code.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Копировать ссылку").clicked() {
+                        self.copy_relay_mobile_pairing_link_to_clipboard();
+                    }
+                    ui.label(RichText::new(compact_inline(&link, 64)).monospace().weak());
+                });
+            });
+        });
+    }
+
+    fn relay_mobile_qr_texture(
+        &mut self,
+        ctx: &egui::Context,
+        link: &str,
+    ) -> Option<egui::TextureHandle> {
+        if let Some((cached_link, texture)) = &self.relay_mobile_qr {
+            if cached_link == link {
+                return Some(texture.clone());
+            }
+        }
+
+        let code = QrCode::new(link.as_bytes()).ok()?;
+        let modules = code.width();
+        let border = 4usize;
+        let scale = 6usize;
+        let image_modules = modules + border * 2;
+        let image_size = image_modules * scale;
+        let mut image = egui::ColorImage {
+            size: [image_size, image_size],
+            pixels: vec![egui::Color32::from_rgb(244, 248, 252); image_size * image_size],
+        };
+        let dark = egui::Color32::from_rgb(9, 13, 18);
+        for y in 0..modules {
+            for x in 0..modules {
+                if code[(x, y)] != QrColor::Dark {
+                    continue;
+                }
+                let start_x = (x + border) * scale;
+                let start_y = (y + border) * scale;
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        let pixel_x = start_x + dx;
+                        let pixel_y = start_y + dy;
+                        image.pixels[pixel_y * image_size + pixel_x] = dark;
+                    }
+                }
+            }
+        }
+        let texture = ctx.load_texture("relay_mobile_qr", image, egui::TextureOptions::NEAREST);
+        self.relay_mobile_qr = Some((link.to_string(), texture.clone()));
+        Some(texture)
     }
 
     fn save_remote_control_settings(&mut self) {
@@ -10491,6 +10664,9 @@ impl LeetcodeApp {
                     created_at: device.created_at,
                 });
             }
+            RelayActionKind::PairingRequest { request } => {
+                self.add_pending_relay_pairing(request);
+            }
             RelayActionKind::DeviceSeen { device_id } => {
                 self.mark_remote_device_seen(&device_id, action.created_at);
             }
@@ -10559,6 +10735,102 @@ impl LeetcodeApp {
             content: event.detail,
         });
         self.refresh_journal();
+    }
+
+    fn add_pending_relay_pairing(&mut self, request: RelayPairingRequest) {
+        let request_id = request.request_id.clone();
+        self.relay_pending_pairings
+            .retain(|existing| existing.request_id != request_id);
+        self.relay_pending_pairings.push(request.into());
+        self.remote_last_action = "Relay: новое устройство ждёт подтверждения".to_string();
+        append_journal(format!(
+            "relay_device\tpending\t{}\t{}",
+            unix_timestamp(),
+            compact(&request_id, 160)
+        ));
+        self.refresh_journal();
+    }
+
+    fn answer_relay_pairing_request(&mut self, request_id: String, approved: bool) {
+        if self.relay_pairing_decision_in_flight.is_some() {
+            self.remote_status = "Уже отправляю решение по устройству.".to_string();
+            return;
+        }
+        let Some(request) = self
+            .relay_pending_pairings
+            .iter()
+            .find(|request| request.request_id == request_id)
+            .cloned()
+        else {
+            self.remote_status = "Запрос устройства уже не найден.".to_string();
+            return;
+        };
+        let relay_url = self.relay_url();
+        let decision = RelayHostPairingDecisionRequest {
+            agent_id: self.config.agent_id.clone(),
+            host_token: self.config.relay_host_token.clone(),
+            request_id: request.request_id.clone(),
+            approved,
+            role_view: request.role_view,
+            role_chat: request.role_chat,
+            role_approve: request.role_approve,
+            role_files: request.role_files,
+        };
+        let (tx, rx) = mpsc::channel();
+        self.relay_pairing_decision_rx = Some(rx);
+        self.relay_pairing_decision_in_flight = Some(request.request_id.clone());
+        self.remote_status = if approved {
+            format!("Подтверждаю устройство {}...", request.device_name)
+        } else {
+            format!("Отклоняю устройство {}...", request.device_name)
+        };
+        thread::spawn(move || {
+            let result = post_relay_pairing_decision(&relay_url, &decision);
+            let _ = tx.send(result);
+        });
+    }
+
+    fn drain_relay_pairing_decision(&mut self) {
+        let Some(rx) = self.relay_pairing_decision_rx.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(reply)) => {
+                let request_id = self
+                    .relay_pairing_decision_in_flight
+                    .take()
+                    .unwrap_or_default();
+                self.relay_pending_pairings
+                    .retain(|request| request.request_id != request_id);
+                if let Some(device) = reply.device {
+                    let device_name = device.name.clone();
+                    self.add_remote_paired_device(RemotePairedDevice {
+                        id: device.id,
+                        name: device.name,
+                        token: device.token,
+                        role_view: device.role_view,
+                        role_chat: device.role_chat,
+                        role_approve: device.role_approve,
+                        role_files: device.role_files,
+                        created_at: device.created_at,
+                    });
+                    self.remote_status = format!("Устройство {device_name} подтверждено.");
+                } else {
+                    self.remote_status = format!("Запрос устройства: {}", reply.status);
+                }
+            }
+            Ok(Err(err)) => {
+                self.relay_pairing_decision_in_flight = None;
+                self.remote_status = format!("Не удалось отправить решение: {err}");
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.relay_pairing_decision_rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.relay_pairing_decision_in_flight = None;
+                self.remote_status = "Решение по устройству прервано".to_string();
+            }
+        }
     }
 
     fn add_remote_paired_device(&mut self, device: RemotePairedDevice) {
@@ -14337,6 +14609,7 @@ impl eframe::App for LeetcodeApp {
         self.drain_update_events();
         self.drain_remote_control_events();
         self.drain_relay_sync();
+        self.drain_relay_pairing_decision();
         self.process_remote_task_queue();
         self.refresh_terminal_snapshot();
         self.refresh_remote_control_snapshot();
@@ -18227,6 +18500,40 @@ fn post_relay_host_poll(
         }
     })?;
     if status.is_success() && reply.ok {
+        Ok(reply)
+    } else {
+        Err(reply
+            .error
+            .unwrap_or_else(|| format!("relay вернул {status}")))
+    }
+}
+
+fn post_relay_pairing_decision(
+    relay_url: &str,
+    request: &RelayHostPairingDecisionRequest,
+) -> Result<RelayPairDecisionReply, String> {
+    let url = format!(
+        "{}/api/hosts/pairing/decision",
+        normalize_http_url(relay_url, DEFAULT_RELAY_URL)
+    );
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|err| err.to_string())?;
+    let response = client
+        .post(url)
+        .json(request)
+        .send()
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let reply = response.json::<RelayPairDecisionReply>().map_err(|err| {
+        if status.is_success() {
+            err.to_string()
+        } else {
+            format!("relay вернул {status}: {err}")
+        }
+    })?;
+    if status.is_success() && (reply.ok || reply.status == "denied" || reply.status == "expired") {
         Ok(reply)
     } else {
         Err(reply

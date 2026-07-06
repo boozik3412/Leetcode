@@ -71,6 +71,58 @@ pub struct RelayPairReply {
     #[serde(default)]
     pub device_token: String,
     #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub request_id: String,
+    #[serde(default)]
+    pub poll_after_ms: u64,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayPairStatusRequest {
+    pub agent_id: String,
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayHostPairingDecisionRequest {
+    pub agent_id: String,
+    pub host_token: String,
+    pub request_id: String,
+    pub approved: bool,
+    #[serde(default = "default_true")]
+    pub role_view: bool,
+    #[serde(default = "default_true")]
+    pub role_chat: bool,
+    #[serde(default)]
+    pub role_approve: bool,
+    #[serde(default)]
+    pub role_files: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayPairingRequest {
+    pub request_id: String,
+    pub device_name: String,
+    pub role_view: bool,
+    pub role_chat: bool,
+    pub role_approve: bool,
+    pub role_files: bool,
+    pub created_at: u64,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RelayPairDecisionReply {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub device: Option<RelayDevice>,
+    #[serde(default)]
     pub error: Option<String>,
 }
 
@@ -133,6 +185,9 @@ pub enum RelayActionKind {
     },
     PairDevice {
         device: RelayDevice,
+    },
+    PairingRequest {
+        request: RelayPairingRequest,
     },
     DeviceSeen {
         device_id: String,

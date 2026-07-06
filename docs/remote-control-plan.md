@@ -46,10 +46,10 @@
   - Done local-first: одноразовый код на host app;
   - Done local-first: device token для доверенного клиента;
   - Done local-first: device registry, роли, last seen и revoke;
-  - later product: QR, pending approval dialog и relay-подтверждение устройства.
+  - Done relay-first: QR, pending approval dialog и relay-подтверждение устройства.
 - Done local-first: тонкий desktop-клиент как отдельный Rust/egui binary `leetcode-client`.
 - Done local-first: Windows installer/portable package для тонкого клиента.
-- later product: тонкий desktop-клиент с Agent ID/pairing UX поверх relay.
+- Done relay-first: тонкий desktop-клиент с Agent ID/pending pairing UX поверх relay.
 - iPhone PWA как основной мобильный клиент.
 - Позже native iOS app при необходимости APNs, Keychain/passkeys и более стабильного фонового UX.
 - Remote actions:
@@ -104,8 +104,10 @@ Stage 28 добавляет первый рабочий relay-слой без р
 3. Включить `Relay`, указать Relay URL и сохранить.
 4. Создать `Новый код подключения` и нажать `Копировать паспорт`.
 5. В Leetcode Client включить `Relay по Agent ID`, вставить паспорт и нажать `Подключить по коду`.
+6. В основном Leetcode подтвердить или отклонить новый pending-запрос устройства.
+7. В Leetcode Client нажать `Проверить подтверждение`; после одобрения клиент сохранит свой device token.
 
-Архитектура MVP: host app отправляет на relay `POST /api/hosts/poll` с Agent ID, host token, snapshot и активным pairing code. Клиент вызывает `/api/clients/pair`, `/api/clients/state`, `/api/clients/tasks`, `/api/clients/commands`, `/api/clients/run-gate`, `/api/clients/approval`. Relay хранит только оперативное состояние в памяти и очередь действий; после перезапуска relay устройства нужно переподключить.
+Архитектура MVP: host app отправляет на relay `POST /api/hosts/poll` с Agent ID, host token, snapshot и активным pairing code. Клиент вызывает `/api/clients/pair`, получает `pending request_id`, затем опрашивает `/api/clients/pair/status` до решения host app. Host app получает pending-запрос как relay action и отправляет решение в `/api/hosts/pairing/decision`. После подтверждения клиент использует `/api/clients/state`, `/api/clients/tasks`, `/api/clients/commands`, `/api/clients/run-gate`, `/api/clients/approval`. Relay хранит только оперативное состояние в памяти и очередь действий; после перезапуска relay устройства нужно переподключить.
 
 Stage 28B добавляет слой диагностики поверх Relay MVP:
 
@@ -120,9 +122,12 @@ Stage 28B добавляет слой диагностики поверх Relay 
 1. Запустить relay: `leetcode-relay.exe --bind 127.0.0.1:19090`.
 2. Проверить `GET http://127.0.0.1:19090/health`: до host poll должно быть `host_count: 0`.
 3. Отправить host poll на `/api/hosts/poll` с тестовым Agent ID, host token, pairing code и snapshot.
-4. Выполнить `/api/clients/pair`, затем `/api/clients/state` с device token: ответ должен содержать `host_online: true`, `host_age_secs` и `queued_actions`.
-5. Отправить `/api/clients/tasks`, затем снова `/api/hosts/poll`: host должен получить действие `submit_task`.
-6. Подождать больше 15 секунд без host poll и повторить `/api/clients/state`: relay должен вернуть offline-состояние.
+4. Выполнить `/api/clients/pair`: ответ должен содержать `status: pending` и `request_id`.
+5. Выполнить `/api/hosts/pairing/decision` с host token и `approved: true`.
+6. Выполнить `/api/clients/pair/status`: ответ должен содержать `status: approved` и device token.
+7. Выполнить `/api/clients/state` с device token: ответ должен содержать `host_online: true`, `host_age_secs` и `queued_actions`.
+8. Отправить `/api/clients/tasks`, затем снова `/api/hosts/poll`: host должен получить действие `submit_task`.
+9. Подождать больше 15 секунд без host poll и повторить `/api/clients/state`: relay должен вернуть offline-состояние.
 
 ## iPhone/PWA через Relay
 
@@ -131,15 +136,17 @@ Stage 29 добавляет мобильную PWA прямо в `leetcode-relay
 1. Запустить `leetcode-relay.exe --bind 0.0.0.0:17990` на доступной машине.
 2. В основном Leetcode включить `Relay` и дождаться успешной синхронизации.
 3. Создать новый pairing code в `Контроль -> Удалённый доступ -> Подключение устройств`.
-4. Нажать `Ссылка iPhone`.
-5. Открыть скопированную ссылку на iPhone. Она заполнит Agent ID и временный pairing code.
-6. Нажать `Подключить по коду`; PWA сохранит device token в localStorage iPhone.
+4. Нажать `Ссылка iPhone` или открыть QR-код камерой iPhone.
+5. Открыть ссылку на iPhone. Она заполнит Agent ID и временный pairing code.
+6. Нажать `Подключить по коду`; PWA создаст pending-запрос устройства.
+7. В основном Leetcode подтвердить устройство и роли доступа.
+8. На iPhone нажать `Проверить подтверждение`, если PWA не обновилась автоматически; после одобрения PWA сохранит device token в localStorage iPhone.
 
 Мобильная PWA показывает online/offline статус host, возраст snapshot, текущий проект, модель, последние запуски, tail логов и безопасные команды. Через неё можно отправить задачу агенту и подтвердить или отклонить ожидающий план/действие. По умолчанию iPhone получает роли `view`, `chat`, `approve` без файлового доступа; роли можно отозвать или изменить в host app.
 
 Прямой URL PWA: `http://relay-host:17990/`. Если ссылка открыта без query-параметров, Agent ID, pairing code и device token можно ввести вручную.
 
-Следующий продуктовый слой должен заменить HTTP long-poll на WSS/TLS, добавить публичный relay deployment, QR-код поверх pairing link и pending approval dialog на host app.
+Следующий продуктовый слой должен заменить HTTP long-poll на WSS/TLS, добавить публичный relay deployment, срок действия/rotation device tokens и более подробную диагностику причин offline.
 
 ## Рекомендованный порядок
 

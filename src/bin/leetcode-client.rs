@@ -12,8 +12,8 @@ mod relay;
 
 use relay::{
     RelayClientApprovalRequest, RelayClientCommandRequest, RelayClientRequest,
-    RelayClientTaskRequest, RelayPairReply, RelayPairRequest, RelayQueuedReply, RelayStateReply,
-    DEFAULT_RELAY_URL,
+    RelayClientTaskRequest, RelayPairReply, RelayPairRequest, RelayPairStatusRequest,
+    RelayQueuedReply, RelayStateReply, DEFAULT_RELAY_URL,
 };
 
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/app-icon.png");
@@ -212,6 +212,12 @@ struct PairReply {
     #[serde(default)]
     device_token: String,
     #[serde(default)]
+    status: String,
+    #[serde(default)]
+    request_id: String,
+    #[serde(default)]
+    poll_after_ms: u64,
+    #[serde(default)]
     error: Option<String>,
 }
 
@@ -240,6 +246,7 @@ struct ThinClientApp {
     poll_in_flight: bool,
     last_poll: Option<Instant>,
     connected: bool,
+    pending_pair_request_id: String,
 }
 
 impl ThinClientApp {
@@ -264,6 +271,7 @@ impl ThinClientApp {
             poll_in_flight: false,
             last_poll: None,
             connected: false,
+            pending_pair_request_id: String::new(),
         };
         if !app.token_input.trim().is_empty() {
             app.connect();
@@ -355,11 +363,33 @@ impl ThinClientApp {
                     self.poll_now();
                 }
                 ClientEvent::Paired(Ok(reply)) => {
+                    if reply.device_token.trim().is_empty()
+                        && reply.status == "pending"
+                        && !reply.request_id.trim().is_empty()
+                    {
+                        self.pending_pair_request_id = reply.request_id.clone();
+                        self.pairing_code_input.clear();
+                        self.action_status = format!(
+                            "Запрос отправлен. Подтвердите устройство в основном Leetcode, затем нажмите «Проверить подтверждение». ID: {} · повтор через {} мс",
+                            reply.request_id,
+                            reply.poll_after_ms.max(1_000)
+                        );
+                        return;
+                    }
+                    if reply.device_token.trim().is_empty() {
+                        self.pending_pair_request_id.clear();
+                        self.action_status = format!(
+                            "Подключение не завершено: {}",
+                            empty_as(&reply.status, "нет device token")
+                        );
+                        return;
+                    }
                     self.config.device_id = reply.device_id.clone();
                     self.config.device_name =
                         empty_as(&reply.device_name, &self.config.device_name);
                     self.device_name_input = self.config.device_name.clone();
                     self.token_input = reply.device_token;
+                    self.pending_pair_request_id.clear();
                     self.pairing_code_input.clear();
                     self.config.remember_token = true;
                     self.sync_config_from_inputs();
@@ -485,6 +515,24 @@ impl ThinClientApp {
                     }),
                 )
             };
+            let _ = tx.send(ClientEvent::Paired(result));
+        });
+    }
+
+    fn check_pairing_status(&mut self) {
+        let request_id = self.pending_pair_request_id.trim().to_string();
+        if request_id.is_empty() {
+            self.action_status = "Нет ожидающего запроса подтверждения.".to_string();
+            return;
+        }
+        self.sync_config_from_inputs();
+        let relay_url = normalize_remote_url(&self.relay_url_input);
+        let agent_id = self.agent_id_input.trim().to_string();
+        let (tx, rx) = mpsc::channel();
+        self.events_rx = Some(rx);
+        self.action_status = "Проверяю подтверждение устройства...".to_string();
+        thread::spawn(move || {
+            let result = post_relay_pair_status(&relay_url, &agent_id, &request_id);
             let _ = tx.send(ClientEvent::Paired(result));
         });
     }
@@ -688,6 +736,15 @@ impl ThinClientApp {
                 }
                 if ui.button("Подключить по коду").clicked() {
                     self.pair_device();
+                }
+                if ui
+                    .add_enabled(
+                        !self.pending_pair_request_id.trim().is_empty(),
+                        egui::Button::new("Проверить подтверждение"),
+                    )
+                    .clicked()
+                {
+                    self.check_pairing_status();
                 }
                 if ui.button("Подключиться").clicked() {
                     self.connect();
@@ -1083,6 +1140,9 @@ fn post_pair(remote_url: &str, body: serde_json::Value) -> Result<PairReply, Str
         device_id: String::new(),
         device_name: String::new(),
         device_token: String::new(),
+        status: String::new(),
+        request_id: String::new(),
+        poll_after_ms: 0,
         error: None,
     });
     if status.is_success() && reply.ok && !reply.device_token.trim().is_empty() {
@@ -1165,15 +1225,71 @@ fn post_relay_pair(
         device_id: String::new(),
         device_name: String::new(),
         device_token: String::new(),
+        status: String::new(),
+        request_id: String::new(),
+        poll_after_ms: 0,
         error: None,
     });
-    if status.is_success() && reply.ok && !reply.device_token.trim().is_empty() {
+    if status.is_success() && reply.ok {
         Ok(PairReply {
             ok: true,
             device_id: reply.device_id,
             device_name: reply.device_name,
             device_token: reply.device_token,
+            status: reply.status,
+            request_id: reply.request_id,
+            poll_after_ms: reply.poll_after_ms,
             error: None,
+        })
+    } else {
+        Err(reply
+            .error
+            .unwrap_or_else(|| format!("relay вернул {status}")))
+    }
+}
+
+fn post_relay_pair_status(
+    relay_url: &str,
+    agent_id: &str,
+    request_id: &str,
+) -> Result<PairReply, String> {
+    let client = http_client()?;
+    let url = endpoint_url(relay_url, "/api/clients/pair/status")?;
+    let response = client
+        .post(url)
+        .json(&RelayPairStatusRequest {
+            agent_id: agent_id.trim().to_string(),
+            request_id: request_id.trim().to_string(),
+        })
+        .send()
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let reply = response.json::<RelayPairReply>().unwrap_or(RelayPairReply {
+        ok: status.is_success(),
+        device_id: String::new(),
+        device_name: String::new(),
+        device_token: String::new(),
+        status: String::new(),
+        request_id: request_id.trim().to_string(),
+        poll_after_ms: 0,
+        error: None,
+    });
+    if status.is_success()
+        && (reply.ok
+            || reply.status == "pending"
+            || reply.status == "denied"
+            || reply.status == "expired"
+            || reply.status == "unknown")
+    {
+        Ok(PairReply {
+            ok: reply.ok,
+            device_id: reply.device_id,
+            device_name: reply.device_name,
+            device_token: reply.device_token,
+            status: reply.status,
+            request_id: reply.request_id,
+            poll_after_ms: reply.poll_after_ms,
+            error: reply.error,
         })
     } else {
         Err(reply

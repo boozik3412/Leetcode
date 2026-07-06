@@ -271,8 +271,8 @@ Leetcode развивается из минимального локальног
 
 Цель: превратить foundation в полноценный сценарий удалённого управления с тонким клиентом, iPhone-доступом и подключением по Agent ID.
 
-- Todo: Спроектировать Leetcode Relay: исходящее WSS-соединение от host app, Agent ID, device pairing и revoke devices.
-- Todo: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
+- Done: Спроектировать Leetcode Relay MVP: исходящий poll от host app, Agent ID, device pairing и revoke devices.
+- Done: Добавить pairing flow: одноразовый код/QR, подтверждение на host app, device token.
 - Done: Добавить local-first remote action API: `POST /api/tasks`, `POST /api/run-gate`, `POST /api/approval`.
 - Done: Подключить PWA-форму отправки задачи и кнопки подтверждения/отклонения к существующей permission system.
 - Done: Добавить remote observer endpoints: `GET /api/tool-log`, `GET /api/history`, `GET /api/files`.
@@ -282,11 +282,11 @@ Leetcode развивается из минимального локальног
 - Done: Добавить security baseline для local Remote API: роли доступа, Origin allowlist, глобальный rate limit и audit-события удалённых действий.
 - Done: Добавить safe Remote Commands: `GET /api/commands`, `POST /api/commands`, PWA-кнопки и app-side allowlist для безопасных команд палитры.
 - Todo: Расширить Remote Commands до макросов/проектных команд с отдельными ролями, подтверждениями и риск-классами.
-- Todo: Усилить безопасность до product-grade: short-lived tokens, device pairing, revoke devices, TLS/WSS, per-device/per-IP rate limiting.
-- Todo: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
+- Todo: Усилить безопасность до product-grade: token rotation, TLS/WSS, per-device/per-IP rate limiting.
+- Done: Сделать iPhone-first PWA и позже решить, нужен ли native iOS-клиент.
 - Done: Сделать лёгкий desktop thin client как отдельный `leetcode-client` binary поверх Remote API: состояние агента, отправка задач, safe commands, approvals.
 - Done: Добавить installer/portable package для тонкого клиента: `package-client-windows.ps1`, `install-leetcode-client.ps1`, `uninstall-leetcode-client.ps1`, `client-latest.json`.
-- Todo: Довести thin client до Agent ID/pairing UX после появления relay/device registry.
+- Done: Довести thin client до Agent ID/pairing UX после появления relay/device registry.
 
 ## Этап 26 - Installer и обновления
 
@@ -315,8 +315,8 @@ Leetcode развивается из минимального локальног
 - Done: Обновить thin client: подключение по Remote URL + Agent ID + pairing code, автоматическое сохранение device token.
 - Done: Добавить UX pairing-passport: host app копирует Remote URL + Agent ID + одноразовый код, thin client вставляет эти данные из буфера.
 - Done: Добавить управление ролями доверенных устройств прямо в UI host app: обзор, задачи, подтверждения, файлы.
-- Todo: Добавить QR/pairing link для iPhone/PWA после стабилизации relay/pwa маршрута.
-- Todo: Добавить host-side approval dialog для новых устройств, когда появится async pairing через relay.
+- Done: Добавить QR/pairing link для iPhone/PWA после стабилизации relay/pwa маршрута.
+- Done: Добавить host-side approval dialog для новых устройств, когда появится async pairing через relay.
 - Done: Подготовить Relay/Agent ID foundation: исходящий poll от агента, подключение клиента через relay по Agent ID без прямого Remote URL.
 
 ## Этап 28 - Relay MVP
@@ -330,9 +330,9 @@ Leetcode развивается из минимального локальног
 - Done: Добавить relay mode в `leetcode-client`: Agent ID + device token, pairing через relay, state polling, задачи, команды и approvals.
 - Done: Включить `leetcode-relay.exe` в portable package тонкого клиента.
 - Todo: Заменить HTTP long-poll на WSS/TLS relay с reconnect/backoff и server-side expiry.
-- Todo: Добавить host-side approval dialog для новых relay devices вместо автопары по коду.
+- Done: Добавить host-side approval dialog для новых relay devices вместо автопары по коду.
 - Todo: Добавить публичный relay deployment/update channel или настройку своего relay URL через installer.
-- Todo: Добавить iPhone/PWA pairing link/QR поверх relay.
+- Done: Добавить iPhone/PWA pairing link/QR поверх relay.
 
 ## Этап 28B - Relay Hardening
 
@@ -351,15 +351,16 @@ Leetcode развивается из минимального локальног
 - Done: Сделать mobile-first PWA поверх relay: статус агента, отправка задачи, approvals, история запусков.
 - Done: Добавить pairing link в host app для iPhone: ссылка открывает Relay PWA с Agent ID и временным pairing code.
 - Done: Ограничить мобильный UI безопасными действиями и отдельными ролями: view/chat/approve без файлового доступа по умолчанию.
-- Todo: Добавить QR-код для iPhone поверх pairing link без внешнего сервиса.
+- Done: Добавить QR-код для iPhone поверх pairing link без внешнего сервиса.
 
 ## Этап 30 - Product-grade Pairing
 
 Цель: убрать автопару по коду и сделать понятное подтверждение новых устройств на основном компьютере.
 
-- Todo: Сделать pending device requests: клиент отправляет запрос, host app показывает карточку "подтвердить/отклонить".
+- Done: Сделать pending device requests: клиент отправляет запрос, host app показывает блок "подтвердить/отклонить".
 - Todo: Добавить редактирование имени устройства, сроков действия token и роли по умолчанию.
-- Todo: Добавить per-device audit и быстрый revoke с видимым последствием для клиента.
+- Done: Добавить базовый per-device audit и быстрый revoke с видимым последствием для клиента.
+- Todo: Добавить срок действия/rotation device tokens и отдельную диагностику истёкших/отозванных устройств.
 
 ## Этап 31 - Remote Commands и макросы
 
