@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const DEFAULT_RELAY_URL: &str = "http://127.0.0.1:17990";
+pub const RELAY_HOST_SESSION_TTL_SECS: u64 = 15;
 
 pub fn generate_relay_host_token() -> String {
     format!("rh-{}", uuid::Uuid::new_v4().simple())
@@ -35,6 +36,10 @@ pub struct RelayHostPollReply {
     pub ok: bool,
     #[serde(default)]
     pub actions: Vec<RelayAction>,
+    #[serde(default)]
+    pub server_time: u64,
+    #[serde(default)]
+    pub next_poll_after_ms: u64,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -156,6 +161,14 @@ pub struct RelayStateReply {
     pub ok: bool,
     #[serde(default)]
     pub state: Value,
+    #[serde(default)]
+    pub host_online: bool,
+    #[serde(default)]
+    pub host_updated_at: u64,
+    #[serde(default)]
+    pub host_age_secs: u64,
+    #[serde(default)]
+    pub queued_actions: usize,
     #[serde(default)]
     pub error: Option<String>,
 }

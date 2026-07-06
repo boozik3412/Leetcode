@@ -180,6 +180,15 @@ struct RemoteControlSnapshot {
     updated_at: u64,
 }
 
+#[derive(Clone, Debug)]
+struct ClientSnapshot {
+    snapshot: RemoteControlSnapshot,
+    via_relay: bool,
+    relay_host_online: bool,
+    relay_host_age_secs: u64,
+    relay_queued_actions: usize,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct ApiReply {
     #[serde(default)]
@@ -208,7 +217,7 @@ struct PairReply {
 
 #[derive(Debug)]
 enum ClientEvent {
-    State(Result<RemoteControlSnapshot, String>),
+    State(Result<ClientSnapshot, String>),
     Paired(Result<PairReply, String>),
     Action(Result<String, String>),
 }
@@ -225,7 +234,7 @@ struct ThinClientApp {
     task_input: String,
     status: String,
     action_status: String,
-    snapshot: Option<RemoteControlSnapshot>,
+    snapshot: Option<ClientSnapshot>,
     selected_command_filter: String,
     events_rx: Option<Receiver<ClientEvent>>,
     poll_in_flight: bool,
@@ -315,11 +324,21 @@ impl ThinClientApp {
                     self.poll_in_flight = false;
                     self.last_poll = Some(Instant::now());
                     self.connected = true;
+                    let transport_label = if snapshot.via_relay {
+                        if snapshot.relay_host_online {
+                            format!("relay online · snapshot {} с", snapshot.relay_host_age_secs)
+                        } else {
+                            "relay offline".to_string()
+                        }
+                    } else {
+                        "direct".to_string()
+                    };
                     self.status = format!(
-                        "Подключено к {} {} · {}",
-                        empty_as(&snapshot.app, "Leetcode"),
-                        empty_as(&snapshot.version, "unknown"),
-                        empty_as(&snapshot.agent_status, "ожидает")
+                        "Подключено к {} {} · {} · {}",
+                        empty_as(&snapshot.snapshot.app, "Leetcode"),
+                        empty_as(&snapshot.snapshot.version, "unknown"),
+                        empty_as(&snapshot.snapshot.agent_status, "ожидает"),
+                        transport_label
                     );
                     self.snapshot = Some(snapshot);
                 }
@@ -712,10 +731,33 @@ impl ThinClientApp {
             return;
         };
 
+        let relay_snapshot = snapshot;
+        let snapshot = relay_snapshot.snapshot.clone();
+
         panel(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Агент").strong().size(18.0));
                 pill(ui, &empty_as(&snapshot.agent_id, "без Agent ID"));
+                if relay_snapshot.via_relay {
+                    pill(
+                        ui,
+                        if relay_snapshot.relay_host_online {
+                            "relay online"
+                        } else {
+                            "relay offline"
+                        },
+                    );
+                    pill(
+                        ui,
+                        &format!("snapshot {} с", relay_snapshot.relay_host_age_secs),
+                    );
+                    pill(
+                        ui,
+                        &format!("relay очередь {}", relay_snapshot.relay_queued_actions),
+                    );
+                } else {
+                    pill(ui, "direct");
+                }
             });
             ui.add_space(8.0);
             ui.columns(3, |columns| {
@@ -831,6 +873,7 @@ impl ThinClientApp {
         let Some(snapshot) = self.snapshot.clone() else {
             return;
         };
+        let snapshot = snapshot.snapshot;
         panel(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Команды").strong().size(18.0));
@@ -887,6 +930,7 @@ impl ThinClientApp {
         let Some(snapshot) = self.snapshot.as_ref() else {
             return;
         };
+        let snapshot = &snapshot.snapshot;
         panel(ui, |ui| {
             ui.label(RichText::new("Последние инструменты").strong().size(18.0));
             if snapshot.tool_log_tail.is_empty() {
@@ -971,7 +1015,7 @@ impl eframe::App for ThinClientApp {
     }
 }
 
-fn get_state(remote_url: &str, token: &str) -> Result<RemoteControlSnapshot, String> {
+fn get_state(remote_url: &str, token: &str) -> Result<ClientSnapshot, String> {
     let client = http_client()?;
     let url = endpoint_url(remote_url, "/api/state")?;
     let response = client
@@ -983,9 +1027,16 @@ fn get_state(remote_url: &str, token: &str) -> Result<RemoteControlSnapshot, Str
     if !status.is_success() {
         return Err(format!("сервер вернул {status}"));
     }
-    response
+    let snapshot = response
         .json::<RemoteControlSnapshot>()
-        .map_err(|err| err.to_string())
+        .map_err(|err| err.to_string())?;
+    Ok(ClientSnapshot {
+        snapshot,
+        via_relay: false,
+        relay_host_online: true,
+        relay_host_age_secs: 0,
+        relay_queued_actions: 0,
+    })
 }
 
 fn post_json(
@@ -1047,7 +1098,7 @@ fn get_relay_state(
     relay_url: &str,
     agent_id: &str,
     device_token: &str,
-) -> Result<RemoteControlSnapshot, String> {
+) -> Result<ClientSnapshot, String> {
     let client = http_client()?;
     let url = endpoint_url(relay_url, "/api/clients/state")?;
     let response = client
@@ -1067,7 +1118,15 @@ fn get_relay_state(
         }
     })?;
     if status.is_success() && reply.ok {
-        serde_json::from_value::<RemoteControlSnapshot>(reply.state).map_err(|err| err.to_string())
+        let snapshot = serde_json::from_value::<RemoteControlSnapshot>(reply.state)
+            .map_err(|err| err.to_string())?;
+        Ok(ClientSnapshot {
+            snapshot,
+            via_relay: true,
+            relay_host_online: reply.host_online,
+            relay_host_age_secs: reply.host_age_secs,
+            relay_queued_actions: reply.queued_actions,
+        })
     } else {
         Err(reply
             .error

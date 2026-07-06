@@ -6,6 +6,7 @@ use relay::{
     RelayClientApprovalRequest, RelayClientCommandRequest, RelayClientRequest,
     RelayClientTaskRequest, RelayDevice, RelayHostPollReply, RelayHostPollRequest, RelayPairReply,
     RelayPairRequest, RelayQueuedReply, RelayStateReply, DEFAULT_RELAY_URL,
+    RELAY_HOST_SESSION_TTL_SECS,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -100,11 +101,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
     }
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/health") => write_json_response(
-            &mut stream,
-            200,
-            &json!({"ok": true, "service": "leetcode-relay", "updated_at": unix_timestamp()}),
-        ),
+        ("GET", "/health") => handle_health(&mut stream, state),
         ("POST", "/api/hosts/poll") => handle_host_poll(&mut stream, &request.body, state),
         ("POST", "/api/clients/pair") => handle_client_pair(&mut stream, &request.body, state),
         ("POST", "/api/clients/state") => handle_client_state(&mut stream, &request.body, state),
@@ -124,6 +121,31 @@ fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<RelayState>>) {
             &json!({"ok": false, "error": "not found"}),
         ),
     }
+}
+
+fn handle_health(stream: &mut TcpStream, state: Arc<Mutex<RelayState>>) {
+    let now = unix_timestamp();
+    let state = state.lock().expect("relay state poisoned");
+    let host_count = state.hosts.len();
+    let online_hosts = state
+        .hosts
+        .values()
+        .filter(|host| host_online(host, now))
+        .count();
+    let queued_actions: usize = state.hosts.values().map(|host| host.actions.len()).sum();
+    write_json_response(
+        stream,
+        200,
+        &json!({
+            "ok": true,
+            "service": "leetcode-relay",
+            "host_count": host_count,
+            "online_hosts": online_hosts,
+            "queued_actions": queued_actions,
+            "host_session_ttl_secs": RELAY_HOST_SESSION_TTL_SECS,
+            "updated_at": now
+        }),
+    );
 }
 
 fn handle_host_poll(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayState>>) {
@@ -166,6 +188,8 @@ fn handle_host_poll(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<RelayS
         &RelayHostPollReply {
             ok: true,
             actions,
+            server_time: unix_timestamp(),
+            next_poll_after_ms: 2_000,
             error: None,
         },
     );
@@ -188,6 +212,14 @@ fn handle_client_pair(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         );
         return;
     };
+    if !host_online(host, now) {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "agent is offline on relay"}),
+        );
+        return;
+    }
     if host.pairing_code.is_empty() || host.pairing_expires_at <= now {
         write_json_response(
             stream,
@@ -260,6 +292,24 @@ fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rel
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
+    let now = unix_timestamp();
+    let online = host_online(host, now);
+    if !online {
+        write_json_response(
+            stream,
+            503,
+            &RelayStateReply {
+                ok: false,
+                state: host.state.clone(),
+                host_online: false,
+                host_updated_at: host.updated_at,
+                host_age_secs: now.saturating_sub(host.updated_at),
+                queued_actions: host.actions.len(),
+                error: Some("agent is offline on relay".to_string()),
+            },
+        );
+        return;
+    }
     queue_device_seen(host, &request.device_token);
     write_json_response(
         stream,
@@ -267,6 +317,10 @@ fn handle_client_state(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rel
         &RelayStateReply {
             ok: true,
             state: host.state.clone(),
+            host_online: online,
+            host_updated_at: host.updated_at,
+            host_age_secs: now.saturating_sub(host.updated_at),
+            queued_actions: host.actions.len(),
             error: None,
         },
     );
@@ -295,6 +349,14 @@ fn handle_client_task(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<Rela
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
+    if !host_online(host, unix_timestamp()) {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "agent is offline on relay"}),
+        );
+        return;
+    }
     queue_device_seen(host, &request.device_token);
     let task_id = format!("relay-task-{}", uuid::Uuid::new_v4().simple());
     host.actions.push_back(new_action(
@@ -332,6 +394,14 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
+    if !host_online(host, unix_timestamp()) {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "agent is offline on relay"}),
+        );
+        return;
+    }
     queue_device_seen(host, &request.device_token);
     let action_id = format!("relay-command-{}", uuid::Uuid::new_v4().simple());
     host.actions.push_back(new_action(
@@ -373,6 +443,14 @@ fn handle_client_approval(
         write_json_response(stream, 403, &json!({"ok": false, "error": "access denied"}));
         return;
     };
+    if !host_online(host, unix_timestamp()) {
+        write_json_response(
+            stream,
+            503,
+            &json!({"ok": false, "error": "agent is offline on relay"}),
+        );
+        return;
+    }
     queue_device_seen(host, &request.device_token);
     let action_id = format!("relay-approval-{}", uuid::Uuid::new_v4().simple());
     let kind = if run_gate {
@@ -444,6 +522,10 @@ fn queue_device_seen(host: &mut HostRecord, token: &str) {
         },
         now,
     ));
+}
+
+fn host_online(host: &HostRecord, now: u64) -> bool {
+    now.saturating_sub(host.updated_at) <= RELAY_HOST_SESSION_TTL_SECS
 }
 
 struct HttpRequest {

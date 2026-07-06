@@ -219,6 +219,8 @@ pub struct LeetcodeApp {
     relay_sync_rx: Option<Receiver<Result<RelayHostPollReply, String>>>,
     relay_sync_in_flight: bool,
     relay_last_sync: Option<Instant>,
+    relay_last_success_at: u64,
+    relay_last_action_count: usize,
     orchestration_status: String,
     asset_provider_input: String,
     asset_kind_input: String,
@@ -1324,6 +1326,8 @@ impl LeetcodeApp {
             relay_sync_rx: None,
             relay_sync_in_flight: false,
             relay_last_sync: None,
+            relay_last_success_at: 0,
+            relay_last_action_count: 0,
             orchestration_status: String::new(),
             asset_provider_input,
             asset_kind_input: "image".to_string(),
@@ -9788,6 +9792,13 @@ impl LeetcodeApp {
             });
             status_line(ui, "Relay", &self.relay_status);
             status_line(ui, "Relay URL", &self.config.relay_url);
+            if self.relay_last_success_at > 0 {
+                status_line(
+                    ui,
+                    "Последняя связь",
+                    &format!("{} · действий {}", age_label(self.relay_last_success_at), self.relay_last_action_count),
+                );
+            }
             ui.label(
                 RichText::new(
                     "Запуск локального relay: leetcode-relay.exe --bind 0.0.0.0:17990. Для интернета нужен сервер/VPS или защищённый tunnel.",
@@ -10340,6 +10351,8 @@ impl LeetcodeApp {
                 for action in reply.actions {
                     self.handle_relay_action(action);
                 }
+                self.relay_last_success_at = unix_timestamp();
+                self.relay_last_action_count = action_count;
                 self.relay_status = if action_count == 0 {
                     "Relay синхронизирован".to_string()
                 } else {

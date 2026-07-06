@@ -107,6 +107,23 @@ Stage 28 добавляет первый рабочий relay-слой без р
 
 Архитектура MVP: host app отправляет на relay `POST /api/hosts/poll` с Agent ID, host token, snapshot и активным pairing code. Клиент вызывает `/api/clients/pair`, `/api/clients/state`, `/api/clients/tasks`, `/api/clients/commands`, `/api/clients/run-gate`, `/api/clients/approval`. Relay хранит только оперативное состояние в памяти и очередь действий; после перезапуска relay устройства нужно переподключить.
 
+Stage 28B добавляет слой диагностики поверх Relay MVP:
+
+- Relay считает host online только если последний poll был не старше 15 секунд.
+- `GET /health` показывает `host_count`, `online_hosts`, `queued_actions` и TTL host-сессии.
+- `/api/clients/state` возвращает `host_online`, `host_updated_at`, `host_age_secs` и `queued_actions`; если host устарел, клиент получает понятный offline-ответ вместо старого snapshot.
+- Leetcode Client показывает, работает ли он через direct или relay, online/offline статус host, возраст snapshot и очередь relay-действий.
+- Основное приложение показывает последнюю успешную relay-синхронизацию и число полученных действий в панели удалённого доступа.
+
+Локальная smoke-проверка Relay MVP:
+
+1. Запустить relay: `leetcode-relay.exe --bind 127.0.0.1:19090`.
+2. Проверить `GET http://127.0.0.1:19090/health`: до host poll должно быть `host_count: 0`.
+3. Отправить host poll на `/api/hosts/poll` с тестовым Agent ID, host token, pairing code и snapshot.
+4. Выполнить `/api/clients/pair`, затем `/api/clients/state` с device token: ответ должен содержать `host_online: true`, `host_age_secs` и `queued_actions`.
+5. Отправить `/api/clients/tasks`, затем снова `/api/hosts/poll`: host должен получить действие `submit_task`.
+6. Подождать больше 15 секунд без host poll и повторить `/api/clients/state`: relay должен вернуть offline-состояние.
+
 Следующий продуктовый слой должен заменить HTTP long-poll на WSS/TLS, добавить публичный relay deployment, QR/pairing link и pending approval dialog на host app.
 
 ## Рекомендованный порядок

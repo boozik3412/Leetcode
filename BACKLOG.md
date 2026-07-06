@@ -334,6 +334,48 @@ Leetcode развивается из минимального локальног
 - Todo: Добавить публичный relay deployment/update channel или настройку своего relay URL через installer.
 - Todo: Добавить iPhone/PWA pairing link/QR поверх relay.
 
+## Этап 28B - Relay Hardening
+
+Цель: превратить relay MVP в понятный и диагностируемый режим подключения, где пользователь видит online/offline статус агента, а клиент не выглядит "подключённым" к давно исчезнувшему host.
+
+- Done: Добавить TTL host-сессии на relay: если host app давно не делала poll, клиент видит "агент offline".
+- Done: Возвращать в relay state метаданные доступности: `host_online`, `host_updated_at`, `host_age_secs`, размер очереди действий.
+- Done: Показывать в thin client источник подключения: direct или relay, online/offline host, возраст последнего snapshot.
+- Done: Показывать в host app последнюю успешную relay-синхронизацию, ошибку и число полученных действий.
+- Done: Добавить ручную relay E2E-инструкцию и smoke-проверку для локального relay.
+
+## Этап 29 - iPhone/PWA Remote
+
+Цель: дать простой доступ с телефона без полноценного desktop-клиента.
+
+- Todo: Сделать mobile-first PWA поверх relay: статус агента, отправка задачи, approvals, история запусков.
+- Todo: Добавить QR/pairing link в host app для iPhone.
+- Todo: Ограничить мобильный UI безопасными действиями и отдельными ролями.
+
+## Этап 30 - Product-grade Pairing
+
+Цель: убрать автопару по коду и сделать понятное подтверждение новых устройств на основном компьютере.
+
+- Todo: Сделать pending device requests: клиент отправляет запрос, host app показывает карточку "подтвердить/отклонить".
+- Todo: Добавить редактирование имени устройства, сроков действия token и роли по умолчанию.
+- Todo: Добавить per-device audit и быстрый revoke с видимым последствием для клиента.
+
+## Этап 31 - Remote Commands и макросы
+
+Цель: разрешить удалённо запускать не только базовые команды, но и безопасные проектные сценарии.
+
+- Todo: Расширить Remote Commands до макросов/проектных команд с отдельными ролями и risk-class.
+- Todo: Добавить preview действия перед запуском команды через relay.
+- Todo: Привязать remote macros к существующей permission system и журналу действий.
+
+## Этап 32 - Observability и диагностика
+
+Цель: чтобы пользователь понимал, что делает агент, где он завис и почему удалённое подключение не работает.
+
+- Todo: Добавить панель диагностики relay/direct/PWA: URL, latency, last sync, stale/offline reasons.
+- Todo: Добавить экспорт remote debug bundle без секретов.
+- Todo: Добавить structured event timeline для remote sessions.
+
 ## Постоянная планка качества
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.

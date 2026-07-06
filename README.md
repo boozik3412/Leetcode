@@ -232,6 +232,8 @@ Direct thin-client flow: enable Remote API in the main Leetcode app, create a sh
 
 Relay MVP flow: run `leetcode-relay.exe --bind 0.0.0.0:17990` on a reachable machine. In the main Leetcode app open `Контроль -> Удалённый доступ`, enable `Relay`, set the Relay URL, and save. Create a short-lived pairing code and copy the passport. In Leetcode Client enable `Relay по Agent ID`, paste the passport, and connect by code. The client then talks to relay by Agent ID/device token; the host app pulls queued actions from relay through outgoing polling.
 
+Relay health is intentionally visible: `GET /health` on the relay reports host count, online hosts, queued actions, and host-session TTL. A host is considered online only while it keeps polling the relay; after the TTL expires, Leetcode Client shows `relay offline` instead of pretending the old snapshot is still live. In relay mode the client status also shows the snapshot age and queued action count, while the host app shows the last successful relay sync and how many actions it received.
+
 Crash reports from Rust panics are written to the OS data directory under `leetcode/crashes` and are shown in the diagnostics panel.
 
 Inside the app, open `Проект -> Релиз` to use the Release Cockpit. It shows the current version, release readiness, preflight checklist, recent check/test/build/package runs, local artifacts, and environment diagnostics. Its action buttons reuse project commands, so release runs are recorded in the same command history as normal development checks. Use `В Roadmap` to record the current release candidate, readiness checklist, artifacts, Git context, and release command history as a roadmap milestone.
