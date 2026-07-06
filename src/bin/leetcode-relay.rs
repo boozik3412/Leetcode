@@ -935,6 +935,7 @@ button:disabled{opacity:.45}.metrics{display:grid;grid-template-columns:repeat(3
 .metric{min-width:0}.metric b{display:block;font-size:22px;line-height:1.1;font-weight:640;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.metric span{display:block;margin-top:3px;color:#8d99a8;font-size:12px}
 .taskbar{position:sticky;bottom:0;background:linear-gradient(180deg,rgba(9,13,18,0),#090d12 16px);padding-top:18px}
 .pending{display:none;margin-top:10px;border-left:3px solid #59c38d;padding:8px 0 8px 12px}
+.diagnostics{white-space:pre-wrap;margin-top:12px;border-top:1px solid #26303d;padding-top:10px;color:#cbd6e2;font-size:12px;line-height:1.45}
 .list{display:grid;gap:8px}.item{display:block;width:100%;text-align:left;background:#111821;border:1px solid #26303d;border-radius:10px;padding:10px;color:#d9e3ed}
 .tabs{display:flex;gap:8px;overflow:auto;padding-bottom:2px}.tab{white-space:nowrap;background:transparent}.tab.active{background:#1f6f87;border-color:#2aa7ca}
 pre{white-space:pre-wrap;word-break:break-word;margin:10px 0 0;background:#05080c;border:1px solid #26303d;border-radius:10px;padding:10px;max-height:280px;overflow:auto;color:#cfd9e5}
@@ -977,6 +978,7 @@ pre{white-space:pre-wrap;word-break:break-word;margin:10px 0 0;background:#05080
       <div class="metric"><b id="queueCount">0</b><span>очередь relay</span></div>
       <div class="metric"><b id="runCount">0</b><span>запуски</span></div>
     </div>
+    <div id="diagnostics" class="diagnostics">Диагностика появится после подключения.</div>
     <div id="runGate" class="pending">
       <b>План ждёт подтверждения</b>
       <p id="runGateSummary" class="muted"></p>
@@ -1110,6 +1112,27 @@ async function loadState(){
     render(data);
   }catch(error){setStatus('ошибка: ' + error.message, false)}
 }
+function remoteDiagnosticsText(data, s){
+  const lines = [];
+  const hostAge = data.host_age_secs ?? 0;
+  lines.push(`Host: ${data.host_online ? 'online' : 'offline'} · snapshot ${hostAge} c · очередь ${data.queued_actions ?? 0}`);
+  if(s.remote_enabled){
+    lines.push(`Remote API: ${s.remote_server_running ? 'running' : 'stopped'} · ${s.remote_api_url || 'url нет'}`);
+  }else{
+    lines.push('Remote API: выключен для direct-клиента');
+  }
+  if(s.relay_enabled){
+    const latency = s.relay_last_latency_ms ? `${s.relay_last_latency_ms} ms` : 'нет данных';
+    const lastSync = s.relay_last_success_at ? `${Math.max(0, Math.floor(Date.now()/1000) - s.relay_last_success_at)} c назад` : 'нет успешного sync';
+    lines.push(`Relay: ${s.relay_status || 'ожидает'} · latency ${latency} · sync ${lastSync}`);
+  }else{
+    lines.push('Relay: выключен, iPhone PWA не сможет подключиться по Agent ID');
+  }
+  if(!data.host_online) lines.push('Что проверить: основной Leetcode должен быть запущен, Relay включён, device token не отозван.');
+  if(s.remote_pairing_expires_at && s.remote_pairing_expires_at > Math.floor(Date.now()/1000)) lines.push('Pairing code активен для новых устройств.');
+  else lines.push('Pairing code не активен: создайте новый код в основном Leetcode.');
+  return lines.join('\n');
+}
 function render(data){
   const s = data.state || {};
   const online = !!data.host_online;
@@ -1120,6 +1143,7 @@ function render(data){
   $('modelName').textContent = [s.provider,s.model].filter(Boolean).join(' · ') || '-';
   $('queueCount').textContent = data.queued_actions ?? 0;
   $('runCount').textContent = (s.agent_history_tail || []).length;
+  $('diagnostics').textContent = remoteDiagnosticsText(data, s);
   $('runGate').style.display = s.pending_run_gate_summary ? 'block' : 'none';
   $('runGateSummary').textContent = s.pending_run_gate_summary || '';
   $('approval').style.display = s.pending_approval_summary ? 'block' : 'none';
@@ -1242,5 +1266,7 @@ mod tests {
         assert!(html.contains("/api/clients/pair/status"));
         assert!(html.contains("pairing_code"));
         assert!(html.contains("apple-mobile-web-app-capable"));
+        assert!(html.contains("diagnostics"));
+        assert!(html.contains("remoteDiagnosticsText"));
     }
 }

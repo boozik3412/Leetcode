@@ -209,7 +209,35 @@ pub struct RemoteControlSnapshot {
     pub tool_log_entries: usize,
     pub git_changed_files: usize,
     pub remote_queue_len: usize,
+    #[serde(default)]
+    pub remote_status: String,
+    #[serde(default)]
+    pub remote_server_running: bool,
+    #[serde(default)]
+    pub remote_api_url: String,
+    #[serde(default)]
+    pub remote_bind_host: String,
+    #[serde(default)]
+    pub remote_port: u16,
+    #[serde(default)]
+    pub remote_allowed_origins: String,
+    #[serde(default)]
+    pub remote_rate_limit_per_minute: u32,
     pub remote_last_action: String,
+    #[serde(default)]
+    pub relay_enabled: bool,
+    #[serde(default)]
+    pub relay_url: String,
+    #[serde(default)]
+    pub relay_status: String,
+    #[serde(default)]
+    pub relay_last_success_at: u64,
+    #[serde(default)]
+    pub relay_last_action_count: usize,
+    #[serde(default)]
+    pub relay_sync_in_flight: bool,
+    #[serde(default)]
+    pub relay_last_latency_ms: u64,
     pub remote_devices: Vec<RemoteDeviceSummary>,
     pub remote_pairing_expires_at: u64,
     pub pending_run_gate_summary: Option<String>,
@@ -249,7 +277,21 @@ impl Default for RemoteControlSnapshot {
             tool_log_entries: 0,
             git_changed_files: 0,
             remote_queue_len: 0,
+            remote_status: String::new(),
+            remote_server_running: false,
+            remote_api_url: String::new(),
+            remote_bind_host: String::new(),
+            remote_port: 0,
+            remote_allowed_origins: String::new(),
+            remote_rate_limit_per_minute: 0,
             remote_last_action: String::new(),
+            relay_enabled: false,
+            relay_url: String::new(),
+            relay_status: String::new(),
+            relay_last_success_at: 0,
+            relay_last_action_count: 0,
+            relay_sync_in_flight: false,
+            relay_last_latency_ms: 0,
             remote_devices: Vec::new(),
             remote_pairing_expires_at: 0,
             pending_run_gate_summary: None,

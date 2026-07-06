@@ -374,7 +374,7 @@ Leetcode развивается из минимального локальног
 
 Цель: чтобы пользователь понимал, что делает агент, где он завис и почему удалённое подключение не работает.
 
-- Todo: Добавить панель диагностики relay/direct/PWA: URL, latency, last sync, stale/offline reasons.
+- Done: Добавить панель диагностики relay/direct/PWA: URL, latency, last sync, stale/offline reasons, device roles и подсказки по исправлению.
 - Todo: Добавить экспорт remote debug bundle без секретов.
 - Todo: Добавить structured event timeline для remote sessions.
 

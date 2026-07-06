@@ -58,7 +58,7 @@ use crate::provider_health::{
 use crate::relay::{
     generate_relay_host_token, RelayAction, RelayActionKind, RelayHostPairingDecisionRequest,
     RelayHostPollReply, RelayHostPollRequest, RelayPairDecisionReply, RelayPairingRequest,
-    DEFAULT_RELAY_URL,
+    DEFAULT_RELAY_URL, RELAY_HOST_SESSION_TTL_SECS,
 };
 use crate::remote::{
     generate_remote_access_token, new_remote_shared_state, start_remote_control_server,
@@ -224,6 +224,7 @@ pub struct LeetcodeApp {
     relay_last_sync: Option<Instant>,
     relay_last_success_at: u64,
     relay_last_action_count: usize,
+    relay_last_latency_ms: u64,
     relay_pending_pairings: Vec<PendingRelayPairing>,
     relay_pairing_decision_rx: Option<Receiver<Result<RelayPairDecisionReply, String>>>,
     relay_pairing_decision_in_flight: Option<String>,
@@ -1364,6 +1365,7 @@ impl LeetcodeApp {
             relay_last_sync: None,
             relay_last_success_at: 0,
             relay_last_action_count: 0,
+            relay_last_latency_ms: 0,
             relay_pending_pairings: Vec::new(),
             relay_pairing_decision_rx: None,
             relay_pairing_decision_in_flight: None,
@@ -9849,6 +9851,310 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_remote_connection_diagnostics(&mut self, ui: &mut egui::Ui) {
+        ui.collapsing("Диагностика подключения", |ui| {
+            panel_header(
+                ui,
+                "Диагностика удалённого доступа",
+                "Direct API, Relay, PWA, устройства и причины offline/stale в одном месте.",
+            );
+
+            ui.horizontal_wrapped(|ui| {
+                metric_chip(
+                    ui,
+                    "Direct",
+                    if self.remote_server.is_some() {
+                        "running"
+                    } else if self.config.remote_enabled {
+                        "stopped"
+                    } else {
+                        "off"
+                    },
+                );
+                metric_chip(
+                    ui,
+                    "Relay",
+                    if self.config.relay_enabled {
+                        if self.relay_last_success_at > 0 {
+                            "online"
+                        } else {
+                            "waiting"
+                        }
+                    } else {
+                        "off"
+                    },
+                );
+                metric_chip(
+                    ui,
+                    "PWA",
+                    if self.config.relay_enabled {
+                        "relay"
+                    } else {
+                        "disabled"
+                    },
+                );
+                metric_chip(
+                    ui,
+                    "Devices",
+                    self.config
+                        .remote_devices
+                        .iter()
+                        .filter(|device| !device.revoked)
+                        .count(),
+                );
+            });
+
+            ui.add_space(6.0);
+            status_line(ui, "Remote URL", &self.remote_control_url());
+            status_line(ui, "Remote статус", &self.remote_status);
+            status_line(
+                ui,
+                "Bind",
+                &format!(
+                    "{}:{}",
+                    self.config.remote_bind_host, self.config.remote_port
+                ),
+            );
+            status_line(
+                ui,
+                "Origins",
+                if self.config.remote_allowed_origins.trim().is_empty() {
+                    "same-origin / no Origin"
+                } else {
+                    self.config.remote_allowed_origins.as_str()
+                },
+            );
+            status_line(
+                ui,
+                "Rate limit",
+                &format!("{} req/min", self.config.remote_rate_limit_per_minute),
+            );
+            status_line(ui, "Relay URL", &self.relay_url());
+            status_line(ui, "Relay статус", &self.relay_status);
+            if self.config.relay_enabled {
+                let relay_latency_label = if self.relay_last_latency_ms > 0 {
+                    format!("{} ms", self.relay_last_latency_ms)
+                } else {
+                    "нет данных".to_string()
+                };
+                status_line(ui, "Relay latency", &relay_latency_label);
+                let relay_sync_label = if self.relay_last_success_at > 0 {
+                    format!(
+                        "{} назад · действий {}",
+                        age_label(self.relay_last_success_at),
+                        self.relay_last_action_count
+                    )
+                } else {
+                    "ещё не было успешной синхронизации".to_string()
+                };
+                status_line(ui, "Last relay sync", &relay_sync_label);
+            }
+            let pwa_link_label = if self.config.relay_enabled {
+                self.relay_mobile_pairing_link()
+            } else {
+                "включите Relay и создайте pairing code".to_string()
+            };
+            status_line(ui, "PWA link", &pwa_link_label);
+
+            ui.add_space(8.0);
+            ui.label(RichText::new("Что проверить").strong());
+            for (level, title, detail) in self.remote_connection_diagnostic_rows() {
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, level);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(title).strong().small());
+                        ui.add(egui::Label::new(RichText::new(detail).weak().small()).wrap());
+                    });
+                });
+            }
+        });
+    }
+
+    fn remote_connection_diagnostic_rows(&self) -> Vec<(&'static str, String, String)> {
+        let now = unix_timestamp();
+        let mut rows = Vec::new();
+
+        if self.config.remote_enabled {
+            if self.remote_server.is_some() {
+                rows.push((
+                    "OK",
+                    "Remote API запущен".to_string(),
+                    format!(
+                        "Direct endpoint доступен как {}.",
+                        self.remote_control_url()
+                    ),
+                ));
+            } else {
+                rows.push((
+                    "Ошибка",
+                    "Remote API включён, но сервер не запущен".to_string(),
+                    "Проверьте порт, firewall и сохраните настройки Remote API заново.".to_string(),
+                ));
+            }
+            match self.config.remote_bind_host.trim() {
+                "127.0.0.1" | "localhost" => rows.push((
+                    "Внимание",
+                    "Direct доступ только с этой машины".to_string(),
+                    "Для другого компьютера используйте Relay или bind 0.0.0.0 внутри доверенной сети/VPN.".to_string(),
+                )),
+                "0.0.0.0" => rows.push((
+                    "Внимание",
+                    "Порт открыт для локальной сети".to_string(),
+                    "Не публикуйте этот порт напрямую в интернет; используйте VPN, tunnel или relay.".to_string(),
+                )),
+                host if host.is_empty() => rows.push((
+                    "Ошибка",
+                    "Bind host пустой".to_string(),
+                    "Сохраните настройки, чтобы вернуть безопасное значение 127.0.0.1.".to_string(),
+                )),
+                _ => rows.push((
+                    "OK",
+                    "Direct bind задан явно".to_string(),
+                    format!("Сервер слушает {}:{}.", self.config.remote_bind_host, self.config.remote_port),
+                )),
+            }
+        } else {
+            rows.push((
+                "Внимание",
+                "Remote API выключен".to_string(),
+                "Direct thin client не подключится, пока Remote API выключен.".to_string(),
+            ));
+        }
+
+        if self.config.relay_enabled {
+            if self.config.agent_id.trim().is_empty()
+                || self.config.relay_host_token.trim().is_empty()
+            {
+                rows.push((
+                    "Ошибка",
+                    "Relay ждёт Agent ID или host token".to_string(),
+                    "Сгенерируйте Agent ID/host token и сохраните настройки Relay.".to_string(),
+                ));
+            } else if self.relay_last_success_at == 0 {
+                rows.push((
+                    "Внимание",
+                    "Relay ещё не синхронизировался".to_string(),
+                    "Проверьте Relay URL, запущен ли leetcode-relay.exe и доступен ли он с этой машины.".to_string(),
+                ));
+            } else {
+                let age = now.saturating_sub(self.relay_last_success_at);
+                if age > RELAY_HOST_SESSION_TTL_SECS * 2 {
+                    rows.push((
+                        "Ошибка",
+                        "Relay snapshot устарел".to_string(),
+                        format!(
+                            "Последний успешный poll был {} назад; клиент будет видеть host offline.",
+                            age_label(self.relay_last_success_at)
+                        ),
+                    ));
+                } else if age > RELAY_HOST_SESSION_TTL_SECS {
+                    rows.push((
+                        "Внимание",
+                        "Relay близок к offline".to_string(),
+                        format!(
+                            "TTL host-сессии {} с, последний sync был {} назад.",
+                            RELAY_HOST_SESSION_TTL_SECS,
+                            age_label(self.relay_last_success_at)
+                        ),
+                    ));
+                } else {
+                    rows.push((
+                        "OK",
+                        "Relay синхронизируется".to_string(),
+                        format!(
+                            "Последний sync {} назад, latency {} ms.",
+                            age_label(self.relay_last_success_at),
+                            self.relay_last_latency_ms
+                        ),
+                    ));
+                }
+            }
+        } else {
+            rows.push((
+                "Внимание",
+                "Relay выключен".to_string(),
+                "Подключение по Agent ID и iPhone PWA требуют включённого Relay.".to_string(),
+            ));
+        }
+
+        let pairing_active = !self.config.remote_pairing_code.trim().is_empty()
+            && self.config.remote_pairing_expires_at > now;
+        if pairing_active {
+            rows.push((
+                "OK",
+                "Pairing code активен".to_string(),
+                format!(
+                    "Новые устройства можно подключать ещё {}.",
+                    format_duration(Duration::from_secs(
+                        self.config.remote_pairing_expires_at.saturating_sub(now)
+                    ))
+                ),
+            ));
+        } else {
+            rows.push((
+                "Внимание",
+                "Pairing code не активен".to_string(),
+                "Для нового thin client или iPhone создайте новый код подключения.".to_string(),
+            ));
+        }
+
+        let active_devices = self
+            .config
+            .remote_devices
+            .iter()
+            .filter(|device| !device.revoked)
+            .count();
+        let approve_devices = self
+            .config
+            .remote_devices
+            .iter()
+            .filter(|device| !device.revoked && device.role_approve)
+            .count();
+        if active_devices == 0 {
+            rows.push((
+                "Внимание",
+                "Нет доверенных устройств".to_string(),
+                "Thin client/PWA должны пройти pairing и быть подтверждены на host.".to_string(),
+            ));
+        } else {
+            rows.push((
+                "OK",
+                "Есть доверенные устройства".to_string(),
+                format!(
+                    "Активных устройств: {active_devices}, с ролью approve: {approve_devices}."
+                ),
+            ));
+        }
+        if !self.relay_pending_pairings.is_empty() {
+            rows.push((
+                "Внимание",
+                "Есть ожидающие pairing-запросы".to_string(),
+                format!(
+                    "Запросов: {}. Подтвердите или отклоните их в блоке устройств.",
+                    self.relay_pending_pairings.len()
+                ),
+            ));
+        }
+
+        let high_risk_commands = self
+            .remote_command_palette_items()
+            .into_iter()
+            .map(|item| self.remote_command_summary_for_item(item))
+            .filter(|summary| summary.requires_approval)
+            .count();
+        if high_risk_commands > 0 && approve_devices == 0 {
+            rows.push((
+                "Внимание",
+                "Некому запускать high-risk команды удалённо".to_string(),
+                format!(
+                    "Опубликовано high-risk команд: {high_risk_commands}. Дайте хотя бы одному доверенному устройству роль approve."
+                ),
+            ));
+        }
+
+        rows
+    }
+
     fn show_remote_control_panel(&mut self, ui: &mut egui::Ui) {
         ui.collapsing("Удалённое управление", |ui| {
             panel_header(
@@ -9871,6 +10177,8 @@ impl LeetcodeApp {
                 .weak()
                 .small(),
             );
+            ui.add_space(6.0);
+            self.show_remote_connection_diagnostics(ui);
             ui.add_space(6.0);
 
             ui.separator();
@@ -10655,6 +10963,10 @@ impl LeetcodeApp {
         };
         match rx.try_recv() {
             Ok(Ok(reply)) => {
+                self.relay_last_latency_ms = self
+                    .relay_last_sync
+                    .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+                    .unwrap_or_default();
                 self.relay_sync_in_flight = false;
                 let action_count = reply.actions.len();
                 for action in reply.actions {
@@ -10669,6 +10981,10 @@ impl LeetcodeApp {
                 };
             }
             Ok(Err(err)) => {
+                self.relay_last_latency_ms = self
+                    .relay_last_sync
+                    .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+                    .unwrap_or_default();
                 self.relay_sync_in_flight = false;
                 self.relay_status = format!("Relay недоступен: {err}");
             }
@@ -10676,6 +10992,10 @@ impl LeetcodeApp {
                 self.relay_sync_rx = Some(rx);
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.relay_last_latency_ms = self
+                    .relay_last_sync
+                    .map(|started| started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
+                    .unwrap_or_default();
                 self.relay_sync_in_flight = false;
                 self.relay_status = "Relay sync прерван".to_string();
             }
@@ -11242,7 +11562,21 @@ impl LeetcodeApp {
                 tool_log_entries: self.tool_log.len(),
                 git_changed_files: self.git_changed_files.len(),
                 remote_queue_len: self.remote_task_queue.len(),
+                remote_status: self.remote_status.clone(),
+                remote_server_running: self.remote_server.is_some(),
+                remote_api_url: self.remote_control_url(),
+                remote_bind_host: self.config.remote_bind_host.clone(),
+                remote_port: self.config.remote_port,
+                remote_allowed_origins: self.config.remote_allowed_origins.clone(),
+                remote_rate_limit_per_minute: self.config.remote_rate_limit_per_minute,
                 remote_last_action: self.remote_last_action.clone(),
+                relay_enabled: self.config.relay_enabled,
+                relay_url: self.relay_url(),
+                relay_status: self.relay_status.clone(),
+                relay_last_success_at: self.relay_last_success_at,
+                relay_last_action_count: self.relay_last_action_count,
+                relay_sync_in_flight: self.relay_sync_in_flight,
+                relay_last_latency_ms: self.relay_last_latency_ms,
                 remote_devices,
                 remote_pairing_expires_at: self.config.remote_pairing_expires_at,
                 pending_run_gate_summary: self

@@ -169,7 +169,35 @@ struct RemoteControlSnapshot {
     #[serde(default)]
     remote_queue_len: usize,
     #[serde(default)]
+    remote_status: String,
+    #[serde(default)]
+    remote_server_running: bool,
+    #[serde(default)]
+    remote_api_url: String,
+    #[serde(default)]
+    remote_bind_host: String,
+    #[serde(default)]
+    remote_port: u16,
+    #[serde(default)]
+    remote_allowed_origins: String,
+    #[serde(default)]
+    remote_rate_limit_per_minute: u32,
+    #[serde(default)]
     remote_last_action: String,
+    #[serde(default)]
+    relay_enabled: bool,
+    #[serde(default)]
+    relay_url: String,
+    #[serde(default)]
+    relay_status: String,
+    #[serde(default)]
+    relay_last_success_at: u64,
+    #[serde(default)]
+    relay_last_action_count: usize,
+    #[serde(default)]
+    relay_sync_in_flight: bool,
+    #[serde(default)]
+    relay_last_latency_ms: u64,
     #[serde(default)]
     pending_run_gate_summary: Option<String>,
     #[serde(default)]
@@ -858,6 +886,89 @@ impl ThinClientApp {
                     pill(ui, &format!("обновлено {}", age_label(snapshot.updated_at)));
                 }
             });
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                pill(
+                    ui,
+                    if snapshot.remote_server_running {
+                        "remote api running"
+                    } else if snapshot.remote_enabled {
+                        "remote api stopped"
+                    } else {
+                        "remote api off"
+                    },
+                );
+                if !snapshot.remote_api_url.trim().is_empty() {
+                    pill(ui, &compact_client_text(&snapshot.remote_api_url, 48));
+                }
+                if snapshot.remote_port > 0 {
+                    pill(
+                        ui,
+                        &format!(
+                            "bind {}:{}",
+                            snapshot.remote_bind_host, snapshot.remote_port
+                        ),
+                    );
+                }
+                if snapshot.remote_rate_limit_per_minute > 0 {
+                    pill(
+                        ui,
+                        &format!("rate {}/min", snapshot.remote_rate_limit_per_minute),
+                    );
+                }
+                if !snapshot.remote_allowed_origins.trim().is_empty() {
+                    pill(
+                        ui,
+                        &format!(
+                            "origins {}",
+                            compact_client_text(&snapshot.remote_allowed_origins, 28)
+                        ),
+                    );
+                }
+                if snapshot.relay_enabled {
+                    pill(ui, "relay enabled");
+                    if !snapshot.relay_url.trim().is_empty() {
+                        pill(ui, &compact_client_text(&snapshot.relay_url, 42));
+                    }
+                    if snapshot.relay_sync_in_flight {
+                        pill(ui, "relay sync...");
+                    }
+                    if snapshot.relay_last_latency_ms > 0 {
+                        pill(
+                            ui,
+                            &format!("latency {} ms", snapshot.relay_last_latency_ms),
+                        );
+                    }
+                    pill(
+                        ui,
+                        &format!("last actions {}", snapshot.relay_last_action_count),
+                    );
+                    if snapshot.relay_last_success_at > 0 {
+                        pill(
+                            ui,
+                            &format!("host sync {}", age_label(snapshot.relay_last_success_at)),
+                        );
+                    }
+                }
+            });
+            if !snapshot.relay_status.trim().is_empty() || !snapshot.remote_status.trim().is_empty()
+            {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{}{}{}",
+                        snapshot.remote_status,
+                        if !snapshot.remote_status.is_empty() && !snapshot.relay_status.is_empty() {
+                            " · "
+                        } else {
+                            ""
+                        },
+                        snapshot.relay_status
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
             if let Some(path) = &snapshot.workspace_path {
                 ui.add_space(6.0);
                 ui.label(RichText::new(path).weak().small());
@@ -1681,6 +1792,17 @@ fn empty_as(value: &str, fallback: &str) -> String {
     } else {
         value.trim().to_string()
     }
+}
+
+fn compact_client_text(value: &str, max_chars: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let mut result = value.chars().take(keep).collect::<String>();
+    result.push('…');
+    result
 }
 
 fn age_label(timestamp: u64) -> String {
