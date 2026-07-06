@@ -2020,6 +2020,91 @@ impl LeetcodeApp {
             .collect()
     }
 
+    fn remote_command_summary_for_item(&self, item: CommandPaletteItem) -> RemoteCommandSummary {
+        let (kind, risk, requires_confirmation, requires_approval, steps) =
+            self.remote_command_metadata(&item);
+        RemoteCommandSummary {
+            id: item.id,
+            title: item.title,
+            category: item.category.to_string(),
+            description: item.description,
+            enabled: item.enabled,
+            kind,
+            risk,
+            requires_confirmation,
+            requires_approval,
+            steps,
+        }
+    }
+
+    fn remote_command_metadata(
+        &self,
+        item: &CommandPaletteItem,
+    ) -> (String, String, bool, bool, Vec<String>) {
+        match &item.action {
+            CommandPaletteAction::RunMacro(macro_id) => {
+                let mut risk = "medium".to_string();
+                let mut steps = Vec::new();
+                if let Some(command_macro) = self
+                    .config
+                    .command_palette_macros
+                    .iter()
+                    .find(|command_macro| command_macro.id == *macro_id)
+                {
+                    for command_id in &command_macro.command_ids {
+                        if let Some(step_item) = self.find_command_palette_item_by_id(command_id) {
+                            let step_risk = remote_command_risk_for_action(&step_item.action);
+                            if remote_risk_rank(step_risk) > remote_risk_rank(&risk) {
+                                risk = step_risk.to_string();
+                            }
+                            steps.push(format!(
+                                "{} · {} · {}",
+                                step_item.title, step_item.category, step_item.description
+                            ));
+                        } else {
+                            steps.push(format!("{command_id} · команда недоступна"));
+                        }
+                    }
+                }
+                if steps.is_empty() {
+                    steps.push("Макрос не содержит доступных шагов".to_string());
+                }
+                (
+                    "macro".to_string(),
+                    risk.clone(),
+                    true,
+                    risk == "high",
+                    steps,
+                )
+            }
+            CommandPaletteAction::StartProjectCommand(command) => {
+                let risk = remote_project_command_risk(command);
+                (
+                    "project_command".to_string(),
+                    risk.to_string(),
+                    true,
+                    risk == "high",
+                    vec![
+                        format!("Команда: {}", command.command),
+                        format!("Рабочая папка: {}", command.cwd),
+                        format!("Timeout: {} сек.", command.timeout_secs),
+                    ],
+                )
+            }
+            action => {
+                let risk = remote_command_risk_for_action(action);
+                let requires_confirmation = risk != "low";
+                (
+                    remote_command_kind(action).to_string(),
+                    risk.to_string(),
+                    requires_confirmation,
+                    risk == "high",
+                    vec![item.description.clone()],
+                )
+            }
+        }
+    }
+
     fn filtered_command_palette_items(&self) -> Vec<CommandPaletteItem> {
         let mut items = self
             .command_palette_items()
@@ -10617,11 +10702,16 @@ impl LeetcodeApp {
                 ));
                 self.refresh_journal();
             }
-            RelayActionKind::RunCommand { id, source } => {
+            RelayActionKind::RunCommand {
+                id,
+                source,
+                confirmed,
+            } => {
                 self.run_remote_command(RemoteCommandRequest {
                     id,
                     source,
                     created_at: action.created_at,
+                    confirmed,
                 });
             }
             RelayActionKind::AnswerRunGate { approved } => {
@@ -10697,6 +10787,29 @@ impl LeetcodeApp {
                 compact(&command.source, 120),
                 compact(&item.id, 240)
             ));
+            self.refresh_journal();
+            return;
+        }
+
+        let summary = self.remote_command_summary_for_item(item.clone());
+        if summary.requires_confirmation && !command.confirmed {
+            self.remote_last_action = format!(
+                "Remote: команда требует предпросмотр и подтверждение: {}",
+                item.title
+            );
+            append_journal(format!(
+                "remote_command\tneeds_confirmation\t{}\t{}\t{}",
+                command.created_at,
+                compact(&command.source, 120),
+                compact(&item.id, 240)
+            ));
+            self.tool_log.push(ToolLogLine {
+                title: "remote command blocked".to_string(),
+                content: format!(
+                    "{}\n{}\nrisk: {}\nsource: {}\npreview required",
+                    summary.title, summary.id, summary.risk, command.source
+                ),
+            });
             self.refresh_journal();
             return;
         }
@@ -11097,13 +11210,7 @@ impl LeetcodeApp {
         let remote_commands = self
             .remote_command_palette_items()
             .into_iter()
-            .map(|item| RemoteCommandSummary {
-                id: item.id,
-                title: item.title,
-                category: item.category.to_string(),
-                description: item.description,
-                enabled: item.enabled,
-            })
+            .map(|item| self.remote_command_summary_for_item(item))
             .collect::<Vec<_>>();
         let remote_devices = self
             .config
@@ -16707,10 +16814,105 @@ fn remote_command_action_allowed(action: &CommandPaletteAction) -> bool {
             | CommandPaletteAction::RefreshWorkspace
             | CommandPaletteAction::NewChat
             | CommandPaletteAction::SetPrompt(_)
+            | CommandPaletteAction::StartProjectCommand(_)
             | CommandPaletteAction::GitStatus
             | CommandPaletteAction::StopAgent
             | CommandPaletteAction::StopProjectCommand
+            | CommandPaletteAction::RunMacro(_)
     )
+}
+
+fn remote_command_kind(action: &CommandPaletteAction) -> &'static str {
+    match action {
+        CommandPaletteAction::ApplyLayout(_)
+        | CommandPaletteAction::SetWorkspaceMode(_)
+        | CommandPaletteAction::SetRightPanel(_)
+        | CommandPaletteAction::ToggleFilePanel
+        | CommandPaletteAction::OpenUpdater => "view",
+        CommandPaletteAction::RefreshWorkspace | CommandPaletteAction::StartProjectCommand(_) => {
+            "project"
+        }
+        CommandPaletteAction::NewChat
+        | CommandPaletteAction::ResetConversation
+        | CommandPaletteAction::SetPrompt(_) => "chat",
+        CommandPaletteAction::GitStatus | CommandPaletteAction::GitCommit => "git",
+        CommandPaletteAction::StopAgent | CommandPaletteAction::StopProjectCommand => "control",
+        CommandPaletteAction::RunMacro(_) => "macro",
+        CommandPaletteAction::OpenProject => "project",
+    }
+}
+
+fn remote_command_risk_for_action(action: &CommandPaletteAction) -> &'static str {
+    match action {
+        CommandPaletteAction::ApplyLayout(_)
+        | CommandPaletteAction::SetWorkspaceMode(_)
+        | CommandPaletteAction::SetRightPanel(_)
+        | CommandPaletteAction::OpenUpdater
+        | CommandPaletteAction::ToggleFilePanel
+        | CommandPaletteAction::SetPrompt(_)
+        | CommandPaletteAction::GitStatus => "low",
+        CommandPaletteAction::RefreshWorkspace
+        | CommandPaletteAction::NewChat
+        | CommandPaletteAction::StopAgent
+        | CommandPaletteAction::StopProjectCommand => "medium",
+        CommandPaletteAction::StartProjectCommand(command) => remote_project_command_risk(command),
+        CommandPaletteAction::RunMacro(_) => "medium",
+        CommandPaletteAction::OpenProject
+        | CommandPaletteAction::ResetConversation
+        | CommandPaletteAction::GitCommit => "high",
+    }
+}
+
+fn remote_project_command_risk(command: &ProjectCommand) -> &'static str {
+    let text = format!(
+        "{} {} {} {}",
+        command.id, command.label, command.command, command.description
+    )
+    .to_lowercase();
+    if [
+        "release",
+        "deploy",
+        "publish",
+        "package",
+        "installer",
+        "install",
+        "uninstall",
+        "--release",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+    {
+        "high"
+    } else if [
+        "run",
+        "start",
+        "serve",
+        "dev",
+        "editor",
+        "build",
+        "test",
+        "check",
+        "lint",
+        "preview",
+        "format",
+        "typecheck",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+    {
+        "medium"
+    } else {
+        "high"
+    }
+}
+
+fn remote_risk_rank(risk: &str) -> u8 {
+    match risk {
+        "low" => 1,
+        "medium" => 2,
+        "high" => 3,
+        _ => 4,
+    }
 }
 
 fn image_api_key_from_config(config: &AppConfig, provider_id: &str) -> String {

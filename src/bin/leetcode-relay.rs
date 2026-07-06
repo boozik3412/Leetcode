@@ -613,12 +613,61 @@ fn handle_client_command(stream: &mut TcpStream, body: &[u8], state: Arc<Mutex<R
         );
         return;
     }
+    let command_id = request.id.trim().to_string();
+    if command_id.is_empty() {
+        write_json_response(
+            stream,
+            400,
+            &json!({"ok": false, "error": "command id is empty"}),
+        );
+        return;
+    }
+    let Some(command_summary) = relay_remote_command_summary(host, &command_id) else {
+        write_json_response(
+            stream,
+            404,
+            &json!({"ok": false, "error": "command is not available"}),
+        );
+        return;
+    };
+    if !relay_command_bool(&command_summary, "enabled") {
+        write_json_response(
+            stream,
+            409,
+            &json!({"ok": false, "error": "command is disabled", "command": command_summary}),
+        );
+        return;
+    }
+    if relay_command_bool(&command_summary, "requires_confirmation") && !request.confirmed {
+        write_json_response(
+            stream,
+            409,
+            &json!({
+                "ok": false,
+                "error": "command confirmation is required",
+                "status": "preview_required",
+                "command": command_summary
+            }),
+        );
+        return;
+    }
+    if relay_command_bool(&command_summary, "requires_approval")
+        && !relay_device_allows(host, &request.device_token, DeviceRole::Approve)
+    {
+        write_json_response(
+            stream,
+            403,
+            &json!({"ok": false, "error": "command requires approve role"}),
+        );
+        return;
+    }
     queue_device_seen(host, &request.device_token);
     let action_id = format!("relay-command-{}", uuid::Uuid::new_v4().simple());
     host.actions.push_back(new_action(
         RelayActionKind::RunCommand {
-            id: request.id,
+            id: command_id,
             source: empty_as(&request.source, "leetcode-client-relay"),
+            confirmed: request.confirmed,
         },
         unix_timestamp(),
     ));
@@ -712,6 +761,39 @@ fn authorized_host_mut<'a>(
     } else {
         Err(())
     }
+}
+
+fn relay_remote_command_summary(host: &HostRecord, command_id: &str) -> Option<Value> {
+    host.state
+        .get("remote_commands")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|command| {
+            command
+                .get("id")
+                .and_then(Value::as_str)
+                .map(|id| id == command_id)
+                .unwrap_or(false)
+        })
+        .cloned()
+}
+
+fn relay_command_bool(command: &Value, key: &str) -> bool {
+    command.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn relay_device_allows(host: &HostRecord, token: &str, role: DeviceRole) -> bool {
+    let token = token.trim();
+    !token.is_empty()
+        && host.devices.values().any(|device| {
+            device.token == token
+                && !device.revoked
+                && match role {
+                    DeviceRole::View => device.role_view,
+                    DeviceRole::Chat => device.role_chat,
+                    DeviceRole::Approve => device.role_approve,
+                }
+        })
 }
 
 fn queue_device_seen(host: &mut HostRecord, token: &str) {
@@ -1062,7 +1144,10 @@ function showTab(tab){
     for(const cmd of (s.remote_commands || []).filter(c=>c.enabled).slice(0,20)){
       const b = document.createElement('button'); b.className='item';
       b.textContent = `${cmd.title} · ${cmd.category || 'команда'}`;
-      b.onclick = () => runCommand(cmd.id);
+      const risk = cmd.risk || 'low';
+      const kind = cmd.kind || 'single';
+      b.textContent = `${risk} · ${kind} · ${cmd.title} · ${cmd.category || 'команда'}`;
+      b.onclick = () => previewAndRunCommand(cmd);
       list.appendChild(b);
     }
     if(!list.children.length) $('details').textContent = 'Команд пока нет.';
@@ -1087,9 +1172,29 @@ async function submitTask(){
     await loadState();
   }catch(error){setStatus('ошибка задачи: ' + error.message, false)}
 }
-async function runCommand(id){
+function commandPreviewText(cmd){
+  const steps = (cmd.steps || []).map((step,index)=>`${index+1}. ${step}`).join('\n');
+  return [
+    `Команда: ${cmd.title || cmd.id}`,
+    `ID: ${cmd.id}`,
+    `Тип: ${cmd.kind || 'single'}`,
+    `Категория: ${cmd.category || 'команда'}`,
+    `Риск: ${cmd.risk || 'low'}`,
+    `Подтверждение: ${cmd.requires_confirmation ? 'нужно' : 'не нужно'}`,
+    `Роль approve: ${cmd.requires_approval ? 'нужна' : 'не нужна'}`,
+    cmd.description ? `Описание: ${cmd.description}` : '',
+    steps ? `Шаги:\n${steps}` : ''
+  ].filter(Boolean).join('\n');
+}
+async function previewAndRunCommand(cmd){
+  const preview = commandPreviewText(cmd);
+  $('details').textContent = preview;
+  if((cmd.requires_confirmation || cmd.requires_approval) && !confirm(preview + '\n\nЗапустить команду?')) return;
+  await runCommand(cmd.id, cmd.requires_confirmation || cmd.requires_approval);
+}
+async function runCommand(id, confirmed){
   try{
-    const data = await relayPost('/api/clients/commands',{...requestBase(),id,source:'iphone-pwa'});
+    const data = await relayPost('/api/clients/commands',{...requestBase(),id,source:'iphone-pwa',confirmed:!!confirmed});
     $('details').textContent = 'Команда поставлена: ' + (data.id || 'queued');
     await loadState();
   }catch(error){$('details').textContent = 'Ошибка команды: ' + error.message}

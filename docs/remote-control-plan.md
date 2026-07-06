@@ -62,7 +62,7 @@
   - Done local-first: читать UTF-8 файлы текущей workspace в безопасном read-only режиме через `GET /api/files/content?path=...`;
   - Done local-first: смотреть safe-команды палитры через `GET /api/commands`;
   - Done local-first: запускать safe-команды палитры через `POST /api/commands`;
-  - later product: запускать макросы/проектные команды по отдельным ролям, risk-классам и подтверждениям.
+  - Done foundation: запускать макросы/проектные команды с risk-классами, preview, confirmation и approve-gate для high-risk действий.
 - Security hardening:
   - short-lived access tokens;
   - passkeys/WebAuthn;

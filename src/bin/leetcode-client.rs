@@ -98,6 +98,16 @@ struct RemoteCommandSummary {
     description: String,
     #[serde(default)]
     enabled: bool,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    risk: String,
+    #[serde(default)]
+    requires_confirmation: bool,
+    #[serde(default)]
+    requires_approval: bool,
+    #[serde(default)]
+    steps: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -577,7 +587,7 @@ impl ThinClientApp {
             "Паспорт подключения вставлен. Нажмите «Подключить по коду».".to_string();
     }
 
-    fn run_command(&mut self, command_id: String) {
+    fn run_command(&mut self, command_id: String, confirmed: bool) {
         self.sync_config_from_inputs();
         let use_relay = self.use_relay;
         let remote_url = normalize_remote_url(&self.remote_url_input);
@@ -589,13 +599,13 @@ impl ThinClientApp {
         self.action_status = "Отправляю команду...".to_string();
         thread::spawn(move || {
             let result = if use_relay {
-                post_relay_command(&relay_url, &agent_id, &token, command_id)
+                post_relay_command(&relay_url, &agent_id, &token, command_id, confirmed)
             } else {
                 post_json(
                     &remote_url,
                     &token,
                     "/api/commands",
-                    json!({"id": command_id, "source": "leetcode-client"}),
+                    json!({"id": command_id, "source": "leetcode-client", "confirmed": confirmed}),
                 )
             }
             .map(|reply| {
@@ -951,10 +961,16 @@ impl ThinClientApp {
             }) {
                 ui.horizontal_wrapped(|ui| {
                     if ui
+                        .add_enabled(command.enabled, egui::Button::new("Предпросмотр"))
+                        .clicked()
+                    {
+                        self.action_status = command_preview_text(command);
+                    }
+                    if ui
                         .add_enabled(command.enabled, egui::Button::new("Запустить"))
                         .clicked()
                     {
-                        self.run_command(command.id.clone());
+                        self.run_command(command.id.clone(), command.requires_confirmation);
                     }
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&command.title).strong());
@@ -1033,6 +1049,52 @@ impl ThinClientApp {
             }
         });
     }
+}
+
+fn command_preview_text(command: &RemoteCommandSummary) -> String {
+    let risk = if command.risk.trim().is_empty() {
+        "low"
+    } else {
+        command.risk.trim()
+    };
+    let kind = if command.kind.trim().is_empty() {
+        "single"
+    } else {
+        command.kind.trim()
+    };
+    let mut lines = vec![
+        format!("Команда: {}", empty_as(&command.title, &command.id)),
+        format!("ID: {}", command.id),
+        format!("Тип: {kind}"),
+        format!("Категория: {}", empty_as(&command.category, "команда")),
+        format!("Риск: {risk}"),
+        format!(
+            "Подтверждение: {}",
+            if command.requires_confirmation {
+                "нужно"
+            } else {
+                "не нужно"
+            }
+        ),
+        format!(
+            "Роль approve: {}",
+            if command.requires_approval {
+                "нужна"
+            } else {
+                "не нужна"
+            }
+        ),
+    ];
+    if !command.description.trim().is_empty() {
+        lines.push(format!("Описание: {}", command.description.trim()));
+    }
+    if !command.steps.is_empty() {
+        lines.push("Шаги:".to_string());
+        for (index, step) in command.steps.iter().enumerate() {
+            lines.push(format!("{}. {}", index + 1, step));
+        }
+    }
+    lines.join("\n")
 }
 
 impl eframe::App for ThinClientApp {
@@ -1321,6 +1383,7 @@ fn post_relay_command(
     agent_id: &str,
     device_token: &str,
     command_id: String,
+    confirmed: bool,
 ) -> Result<ApiReply, String> {
     post_relay_queued(
         relay_url,
@@ -1330,6 +1393,7 @@ fn post_relay_command(
             device_token: device_token.trim().to_string(),
             id: command_id,
             source: "leetcode-client-relay".to_string(),
+            confirmed,
         },
     )
 }

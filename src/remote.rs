@@ -143,6 +143,8 @@ pub struct RemoteCommandRequest {
     pub id: String,
     pub source: String,
     pub created_at: u64,
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -152,6 +154,16 @@ pub struct RemoteCommandSummary {
     pub category: String,
     pub description: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub risk: String,
+    #[serde(default)]
+    pub requires_confirmation: bool,
+    #[serde(default)]
+    pub requires_approval: bool,
+    #[serde(default)]
+    pub steps: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -653,7 +665,17 @@ fn handle_client(
             ) {
                 return;
             }
-            handle_run_command(&mut stream, &body, actions.as_ref(), policy.audit);
+            handle_run_command(
+                &mut stream,
+                &body,
+                actions.as_ref(),
+                policy.audit,
+                &shared_state,
+                &headers,
+                query,
+                &token,
+                &policy,
+            );
         }
         ("POST", "/api/run-gate") => {
             if !authorize_or_write(
@@ -1009,7 +1031,12 @@ fn handle_run_command(
     stream: &mut TcpStream,
     body: &[u8],
     actions: Option<&Sender<RemoteControlAction>>,
-    _audit_enabled: bool,
+    audit_enabled: bool,
+    shared_state: &RemoteControlSharedState,
+    headers: &HashMap<String, String>,
+    query: &str,
+    token: &str,
+    policy: &RemoteAccessPolicy,
 ) {
     let Some(actions) = actions else {
         write_json_response(
@@ -1047,6 +1074,74 @@ fn handle_run_command(
         );
         return;
     }
+    let confirmed = payload_bool(&payload, "confirmed", false);
+    let snapshot = snapshot_or_default(shared_state);
+    let Some(summary) = snapshot
+        .remote_commands
+        .iter()
+        .find(|command| command.id == command_id)
+        .cloned()
+    else {
+        send_remote_audit(
+            Some(actions),
+            audit_enabled,
+            "remote_command_denied",
+            &format!("unknown command {command_id}"),
+        );
+        write_json_response(
+            stream,
+            404,
+            &json!({"ok": false, "error": "remote command is not available"}),
+        );
+        return;
+    };
+    if !summary.enabled {
+        send_remote_audit(
+            Some(actions),
+            audit_enabled,
+            "remote_command_denied",
+            &format!("disabled command {command_id}"),
+        );
+        write_json_response(
+            stream,
+            409,
+            &json!({"ok": false, "error": "remote command is disabled", "command": summary}),
+        );
+        return;
+    }
+    if summary.requires_confirmation && !confirmed {
+        write_json_response(
+            stream,
+            409,
+            &json!({
+                "ok": false,
+                "error": "command confirmation is required",
+                "status": "preview_required",
+                "command": summary
+            }),
+        );
+        return;
+    }
+    if summary.requires_approval {
+        let Some(subject) = authorized_subject(headers, query, token, policy) else {
+            write_unauthorized(stream);
+            return;
+        };
+        if !subject.allows(RemoteAccessRole::Approve) {
+            send_remote_audit(
+                Some(actions),
+                audit_enabled,
+                "remote_command_denied",
+                &format!("{command_id} requires approve role"),
+            );
+            write_json_response(
+                stream,
+                403,
+                &json!({"ok": false, "error": "forbidden: command requires approve role"}),
+            );
+            return;
+        }
+    }
     let source = payload
         .get("source")
         .and_then(|value| value.as_str())
@@ -1060,6 +1155,7 @@ fn handle_run_command(
             source.chars().take(80).collect()
         },
         created_at: unix_timestamp(),
+        confirmed,
     };
     let id = request.id.clone();
     if actions
@@ -1426,6 +1522,7 @@ fn write_json_response<T: Serialize>(stream: &mut TcpStream, status: u16, value:
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
         429 => "Too Many Requests",
         503 => "Service Unavailable",
         _ => "OK",
@@ -1971,6 +2068,11 @@ mod tests {
                     category: "Git".to_string(),
                     description: "Refresh Git status".to_string(),
                     enabled: true,
+                    kind: "single".to_string(),
+                    risk: "low".to_string(),
+                    requires_confirmation: false,
+                    requires_approval: false,
+                    steps: Vec::new(),
                 }],
                 ..RemoteControlSnapshot::default()
             },
@@ -2014,6 +2116,58 @@ mod tests {
             }
             _ => panic!("expected command action"),
         }
+
+        server.stop();
+    }
+
+    #[test]
+    fn remote_server_requires_command_confirmation_preview() {
+        let shared_state = new_remote_shared_state();
+        update_remote_shared_state(
+            &shared_state,
+            RemoteControlSnapshot {
+                remote_commands: vec![RemoteCommandSummary {
+                    id: "macro:release".to_string(),
+                    title: "Release macro".to_string(),
+                    category: "Macro".to_string(),
+                    description: "Run release workflow".to_string(),
+                    enabled: true,
+                    kind: "macro".to_string(),
+                    risk: "high".to_string(),
+                    requires_confirmation: true,
+                    requires_approval: false,
+                    steps: vec![
+                        "cargo test".to_string(),
+                        "cargo build --release".to_string(),
+                    ],
+                }],
+                ..RemoteControlSnapshot::default()
+            },
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut server = start_remote_control_server(
+            RemoteControlServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 0,
+                token: "lrt-test".to_string(),
+                policy: RemoteAccessPolicy::default(),
+                actions: Some(tx),
+            },
+            shared_state,
+        )
+        .expect("starts remote server");
+        let addr = server.bind_addr().to_string();
+
+        let body = r#"{"id":"macro:release","source":"test"}"#;
+        let http_request = format!(
+            "POST /api/commands HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer lrt-test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let response = request(&addr, &http_request);
+        assert!(response.starts_with("HTTP/1.1 409 Conflict"));
+        assert!(response.contains("preview_required"));
+        assert!(rx.try_recv().is_err());
 
         server.stop();
     }

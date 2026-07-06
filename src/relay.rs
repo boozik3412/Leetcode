@@ -148,6 +148,8 @@ pub struct RelayClientCommandRequest {
     pub id: String,
     #[serde(default)]
     pub source: String,
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,6 +178,8 @@ pub enum RelayActionKind {
     RunCommand {
         id: String,
         source: String,
+        #[serde(default)]
+        confirmed: bool,
     },
     AnswerRunGate {
         approved: bool,

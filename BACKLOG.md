@@ -366,9 +366,9 @@ Leetcode развивается из минимального локальног
 
 Цель: разрешить удалённо запускать не только базовые команды, но и безопасные проектные сценарии.
 
-- Todo: Расширить Remote Commands до макросов/проектных команд с отдельными ролями и risk-class.
-- Todo: Добавить preview действия перед запуском команды через relay.
-- Todo: Привязать remote macros к существующей permission system и журналу действий.
+- Done: Расширить Remote Commands до макросов/проектных команд с risk-class, confirmation и approve-gate для high-risk действий.
+- Done: Добавить preview действия перед запуском команды через relay/PWA и thin client.
+- Done: Привязать remote macros к существующей permission system, журналу действий и tool log.
 
 ## Этап 32 - Observability и диагностика
 
