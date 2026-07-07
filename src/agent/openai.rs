@@ -948,6 +948,7 @@ pub fn act_tool_schema() -> Value {
                                 "record_project_goal",
                                 "record_memory_source",
                                 "remove_memory_source",
+                                "project_graph_snapshot",
                                 "roadmap_snapshot",
                                 "record_milestone",
                                 "update_roadmap_item",
@@ -1240,6 +1241,7 @@ pub fn gemini_act_function_declaration() -> Value {
                         "record_project_goal",
                         "record_memory_source",
                         "remove_memory_source",
+                        "project_graph_snapshot",
                         "roadmap_snapshot",
                         "record_milestone",
                         "update_roadmap_item",
@@ -1323,6 +1325,7 @@ fn act_compatible_parameters_schema() -> Value {
                     "record_project_goal",
                     "record_memory_source",
                     "remove_memory_source",
+                    "project_graph_snapshot",
                     "roadmap_snapshot",
                     "record_milestone",
                     "update_roadmap_item",
@@ -1595,6 +1598,7 @@ mod tests {
             assert!(schema.contains("record_project_goal"));
             assert!(schema.contains("record_memory_source"));
             assert!(schema.contains("remove_memory_source"));
+            assert!(schema.contains("project_graph_snapshot"));
             assert!(schema.contains("roadmap_snapshot"));
             assert!(schema.contains("record_milestone"));
             assert!(schema.contains("update_roadmap_item"));

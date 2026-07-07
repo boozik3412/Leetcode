@@ -379,6 +379,12 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "Удалить источник из памяти проекта.",
         ),
         spec(
+            "project_graph_snapshot",
+            "project_graph",
+            "low",
+            "Посмотреть машинную карту проекта: узлы, связи, команды, память и roadmap.",
+        ),
+        spec(
             "roadmap_snapshot",
             "roadmap",
             "low",
@@ -607,6 +613,7 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::RecordProjectGoal => "record_project_goal",
         ToolAction::RecordMemorySource => "record_memory_source",
         ToolAction::RemoveMemorySource => "remove_memory_source",
+        ToolAction::ProjectGraphSnapshot => "project_graph_snapshot",
         ToolAction::RoadmapSnapshot => "roadmap_snapshot",
         ToolAction::RecordMilestone => "record_milestone",
         ToolAction::UpdateRoadmapItem => "update_roadmap_item",

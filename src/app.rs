@@ -51,6 +51,10 @@ use crate::orchestration::{
     orchestration_snapshot, parse_agent_role, record_handoff,
 };
 use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
+use crate::project_graph::{
+    load_project_graph, save_project_graph, scan_project_graph, ProjectGraphEdge,
+    ProjectGraphEdgeKind, ProjectGraphNode, ProjectGraphNodeKind, ProjectGraphState,
+};
 use crate::provider_health::{
     load_provider_validation_history, provider_health_report, provider_validation_plan,
     record_provider_validation_run, run_provider_live_validation, ProviderValidationRun,
@@ -95,7 +99,7 @@ use image::{ColorType, ImageFormat};
 use qrcode::types::Color as QrColor;
 use qrcode::QrCode;
 use regex::Regex;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -275,6 +279,15 @@ pub struct LeetcodeApp {
     file_panel_collapsed: bool,
     roadmap_filter: RoadmapFilter,
     roadmap_status: String,
+    project_map_query: String,
+    project_map_filter: ProjectMapFilter,
+    project_map_selected_node_id: Option<String>,
+    project_map_hidden_node_ids: BTreeSet<String>,
+    project_map_pinned_node_ids: BTreeSet<String>,
+    project_map_pan: egui::Vec2,
+    project_map_zoom: f32,
+    project_map_relation_target: String,
+    project_map_status: String,
     active_center_tab: CenterTab,
     file_tabs: Vec<FilePreviewTab>,
 }
@@ -415,6 +428,7 @@ enum RightPanelView {
     Overview,
     Context,
     Roadmap,
+    Map,
     Release,
     Project,
     Assets,
@@ -426,6 +440,7 @@ enum RightPanelView {
 enum WorkspaceMode {
     Chat,
     Code,
+    Map,
     Assets,
     Project,
 }
@@ -602,6 +617,54 @@ enum RoadmapFilter {
     Done,
     Now,
     Next,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectMapFilter {
+    All,
+    Code,
+    Commands,
+    Planning,
+    Assets,
+}
+
+impl ProjectMapFilter {
+    const ALL: [ProjectMapFilter; 5] = [
+        ProjectMapFilter::All,
+        ProjectMapFilter::Code,
+        ProjectMapFilter::Commands,
+        ProjectMapFilter::Planning,
+        ProjectMapFilter::Assets,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            ProjectMapFilter::All => "Все",
+            ProjectMapFilter::Code => "Код",
+            ProjectMapFilter::Commands => "Команды",
+            ProjectMapFilter::Planning => "План",
+            ProjectMapFilter::Assets => "Ассеты",
+        }
+    }
+
+    fn matches(self, kind: ProjectGraphNodeKind) -> bool {
+        match self {
+            ProjectMapFilter::All => true,
+            ProjectMapFilter::Code => matches!(
+                kind,
+                ProjectGraphNodeKind::Folder
+                    | ProjectGraphNodeKind::File
+                    | ProjectGraphNodeKind::Module
+                    | ProjectGraphNodeKind::Symbol
+            ),
+            ProjectMapFilter::Commands => kind == ProjectGraphNodeKind::Command,
+            ProjectMapFilter::Planning => matches!(
+                kind,
+                ProjectGraphNodeKind::Memory | ProjectGraphNodeKind::RoadmapItem
+            ),
+            ProjectMapFilter::Assets => kind == ProjectGraphNodeKind::Asset,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -903,6 +966,7 @@ impl RightPanelView {
             RightPanelView::Overview => "Сводка",
             RightPanelView::Context => "Контекст",
             RightPanelView::Roadmap => "Roadmap",
+            RightPanelView::Map => "Карта",
             RightPanelView::Release => "Релиз",
             RightPanelView::Project => "Проект",
             RightPanelView::Assets => "Ассеты",
@@ -921,6 +985,9 @@ impl RightPanelView {
             }
             RightPanelView::Roadmap => {
                 "Живая дорожная карта проекта: что сделано, что в работе и что запланировано."
+            }
+            RightPanelView::Map => {
+                "Выбранный узел карты проекта: описание, связи, быстрые действия и контекст для агента."
             }
             RightPanelView::Release => {
                 "Release cockpit: версия, preflight-чеклист, сборки, артефакты и готовность публикации."
@@ -942,9 +1009,10 @@ impl RightPanelView {
 }
 
 impl WorkspaceMode {
-    const ALL: [WorkspaceMode; 4] = [
+    const ALL: [WorkspaceMode; 5] = [
         WorkspaceMode::Chat,
         WorkspaceMode::Code,
+        WorkspaceMode::Map,
         WorkspaceMode::Assets,
         WorkspaceMode::Project,
     ];
@@ -953,6 +1021,7 @@ impl WorkspaceMode {
         match self {
             WorkspaceMode::Chat => "Чат",
             WorkspaceMode::Code => "Код",
+            WorkspaceMode::Map => "Карта",
             WorkspaceMode::Assets => "Ассеты",
             WorkspaceMode::Project => "Проект",
         }
@@ -962,6 +1031,7 @@ impl WorkspaceMode {
         match self {
             WorkspaceMode::Chat => "chat",
             WorkspaceMode::Code => "code",
+            WorkspaceMode::Map => "map",
             WorkspaceMode::Assets => "assets",
             WorkspaceMode::Project => "project",
         }
@@ -970,6 +1040,7 @@ impl WorkspaceMode {
     fn from_id(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "code" => WorkspaceMode::Code,
+            "map" => WorkspaceMode::Map,
             "assets" => WorkspaceMode::Assets,
             "project" => WorkspaceMode::Project,
             _ => WorkspaceMode::Chat,
@@ -980,6 +1051,7 @@ impl WorkspaceMode {
         match self {
             WorkspaceMode::Chat => "диалог, разрешения и журнал агента",
             WorkspaceMode::Code => "файлы, правки, терминал и проверки",
+            WorkspaceMode::Map => "узлы проекта, связи и архитектурный контекст",
             WorkspaceMode::Assets => "генерация, история и библиотека ассетов",
             WorkspaceMode::Project => "команды, preview, сборка и рабочий стол",
         }
@@ -989,6 +1061,7 @@ impl WorkspaceMode {
         match self {
             WorkspaceMode::Chat => RightPanelView::Context,
             WorkspaceMode::Code => RightPanelView::Project,
+            WorkspaceMode::Map => RightPanelView::Map,
             WorkspaceMode::Assets => RightPanelView::Control,
             WorkspaceMode::Project => RightPanelView::Release,
         }
@@ -1008,7 +1081,15 @@ impl WorkspaceMode {
                 RightPanelView::Release,
                 RightPanelView::Context,
                 RightPanelView::Roadmap,
+                RightPanelView::Map,
                 RightPanelView::Control,
+                RightPanelView::Logs,
+            ],
+            WorkspaceMode::Map => &[
+                RightPanelView::Map,
+                RightPanelView::Context,
+                RightPanelView::Roadmap,
+                RightPanelView::Project,
                 RightPanelView::Logs,
             ],
             WorkspaceMode::Assets => &[
@@ -1034,6 +1115,7 @@ impl RightPanelView {
             RightPanelView::Overview => "overview",
             RightPanelView::Context => "context",
             RightPanelView::Roadmap => "roadmap",
+            RightPanelView::Map => "map",
             RightPanelView::Release => "release",
             RightPanelView::Project => "project",
             RightPanelView::Assets => "assets",
@@ -1046,6 +1128,7 @@ impl RightPanelView {
         match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "overview" => RightPanelView::Overview,
             "roadmap" => RightPanelView::Roadmap,
+            "map" => RightPanelView::Map,
             "release" => RightPanelView::Release,
             "project" => RightPanelView::Project,
             "assets" => RightPanelView::Assets,
@@ -1430,6 +1513,15 @@ impl LeetcodeApp {
             file_panel_collapsed,
             roadmap_filter: RoadmapFilter::All,
             roadmap_status: String::new(),
+            project_map_query: String::new(),
+            project_map_filter: ProjectMapFilter::All,
+            project_map_selected_node_id: None,
+            project_map_hidden_node_ids: BTreeSet::new(),
+            project_map_pinned_node_ids: BTreeSet::new(),
+            project_map_pan: egui::Vec2::ZERO,
+            project_map_zoom: 1.0,
+            project_map_relation_target: String::new(),
+            project_map_status: String::new(),
             active_center_tab: CenterTab::Agent,
             file_tabs: Vec::new(),
         };
@@ -2648,6 +2740,7 @@ impl LeetcodeApp {
             self.workspace_mode = match view {
                 RightPanelView::Release | RightPanelView::Project => WorkspaceMode::Project,
                 RightPanelView::Assets => WorkspaceMode::Assets,
+                RightPanelView::Map => WorkspaceMode::Map,
                 RightPanelView::Overview
                 | RightPanelView::Context
                 | RightPanelView::Roadmap
@@ -5424,6 +5517,61 @@ impl LeetcodeApp {
         }
     }
 
+    fn message_with_selected_project_node_context(&self, message: &str) -> String {
+        let Some(context) = self.selected_project_map_context_block() else {
+            return message.to_string();
+        };
+        format!("{message}\n\nКонтекст выбранного узла карты проекта:\n{context}")
+    }
+
+    fn selected_project_map_context_block(&self) -> Option<String> {
+        let workspace = self.workspace.as_ref()?;
+        let selected_id = self.project_map_selected_node_id.as_ref()?;
+        let graph = load_project_graph(workspace);
+        let node = graph.nodes.iter().find(|node| &node.id == selected_id)?;
+        let mut lines = vec![
+            format!("id: {}", node.id),
+            format!("тип: {}", project_graph_kind_label(node.kind)),
+            format!("название: {}", node.label),
+        ];
+        if let Some(path) = node.path.as_deref() {
+            lines.push(format!("путь: {path}"));
+        }
+        if !node.summary.trim().is_empty() {
+            lines.push(format!("summary: {}", compact_inline(&node.summary, 360)));
+        }
+        let mut related = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == node.id || edge.to == node.id)
+            .take(10)
+            .map(|edge| {
+                let other = if edge.from == node.id {
+                    &edge.to
+                } else {
+                    &edge.from
+                };
+                let direction = if edge.from == node.id {
+                    "исходящая"
+                } else {
+                    "входящая"
+                };
+                format!(
+                    "- {direction}: {} -> {}",
+                    project_graph_edge_label(edge.kind),
+                    project_graph_node_label_by_id(&graph, other)
+                )
+            })
+            .collect::<Vec<_>>();
+        if related.is_empty() {
+            lines.push("связи: нет".to_string());
+        } else {
+            related.insert(0, "связи:".to_string());
+            lines.extend(related);
+        }
+        Some(lines.join("\n"))
+    }
+
     fn send_current_input(&mut self) {
         if self.pending_run_gate.is_some() {
             let typed_message = self.input.trim().to_string();
@@ -5452,6 +5600,7 @@ impl LeetcodeApp {
 
         let attachments = self.input_attachments.clone();
         let message = format_input_message_with_attachments(&typed_message, &attachments);
+        let agent_message = self.message_with_selected_project_node_context(&message);
         self.input.clear();
         self.input_attachments.clear();
         self.input_attachment_status.clear();
@@ -5466,7 +5615,7 @@ impl LeetcodeApp {
         self.refresh_journal();
         self.persist_current_conversation();
         if should_require_run_gate(&message) {
-            let gate = self.build_pre_run_gate(&message, &attachments);
+            let gate = self.build_pre_run_gate(&agent_message, &attachments);
             self.agent_live_status = "Ждёт подтверждение плана".to_string();
             self.active_center_tab = CenterTab::Agent;
             if let Some(timeline) = &mut self.run_timeline {
@@ -5481,7 +5630,7 @@ impl LeetcodeApp {
             return;
         }
 
-        self.launch_agent_run(message.clone(), message, None);
+        self.launch_agent_run(agent_message, message, None);
     }
 
     fn revise_pending_run_gate_from_input(&mut self) {
@@ -12942,6 +13091,9 @@ impl LeetcodeApp {
                             "Roadmap",
                             "история проекта, текущий фокус и следующие этапы",
                         ),
+                        RightPanelView::Map => {
+                            ("Карта проекта", "выбранный узел, связи и быстрые действия")
+                        }
                         RightPanelView::Release => (
                             "Релиз",
                             "версии, сборки, артефакты и preflight перед публикацией",
@@ -13001,6 +13153,7 @@ impl LeetcodeApp {
                         RightPanelView::Overview => self.show_right_overview(ui),
                         RightPanelView::Context => self.show_context_control_center(ui),
                         RightPanelView::Roadmap => self.show_roadmap_panel(ui),
+                        RightPanelView::Map => self.show_project_map_side_panel(ui),
                         RightPanelView::Release => self.show_release_cockpit(ui),
                         RightPanelView::Project => {
                             flat_section(ui, |ui| self.show_project_panel(ui));
@@ -15745,6 +15898,7 @@ impl LeetcodeApp {
         match self.workspace_mode {
             WorkspaceMode::Chat => self.show_center_tabs(ui),
             WorkspaceMode::Code => self.show_code_workspace(ui),
+            WorkspaceMode::Map => self.show_project_map_center(ui, ctx),
             WorkspaceMode::Assets => self.show_asset_studio_center(ui, ctx),
             WorkspaceMode::Project => self.show_project_command_center(ui),
         }
@@ -15765,6 +15919,491 @@ impl LeetcodeApp {
         });
         ui.add_space(6.0);
         self.show_center_tabs(ui);
+    }
+
+    fn show_project_map_center(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(workspace) = self.workspace.clone() else {
+            empty_state(
+                ui,
+                "Карта проекта недоступна",
+                "Выберите рабочую папку, чтобы построить карту файлов, команд, памяти и roadmap.",
+            );
+            return;
+        };
+
+        let mut graph = load_project_graph(&workspace);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Карта проекта").strong().size(22.0));
+            ui.label(RichText::new(format!("{} узлов", graph.nodes.len())).weak());
+            ui.label(RichText::new(format!("{} связей", graph.edges.len())).weak());
+            if ui.button("Обновить карту").clicked() {
+                graph = scan_project_graph(&workspace);
+                match save_project_graph(&workspace, &graph) {
+                    Ok(()) => {
+                        self.project_map_status =
+                            "карта обновлена и сохранена в project_graph.json".to_string();
+                    }
+                    Err(err) => self.project_map_status = format!("не удалось сохранить: {err}"),
+                }
+            }
+            if ui.button("Сбросить вид").clicked() {
+                self.project_map_pan = egui::Vec2::ZERO;
+                self.project_map_zoom = 1.0;
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Перетаскивайте полотно, меняйте масштаб, кликайте по узлам. Двойной клик по файловому узлу откроет предпросмотр.",
+            )
+            .weak(),
+        );
+        if !self.project_map_status.is_empty() {
+            ui.label(RichText::new(&self.project_map_status).weak());
+        }
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                [260.0, 26.0],
+                TextEdit::singleline(&mut self.project_map_query)
+                    .hint_text("поиск по узлам, путям, summary"),
+            );
+            egui::ComboBox::from_id_salt("project_map_filter")
+                .selected_text(self.project_map_filter.label())
+                .show_ui(ui, |ui| {
+                    for filter in ProjectMapFilter::ALL {
+                        ui.selectable_value(&mut self.project_map_filter, filter, filter.label());
+                    }
+                });
+            ui.add(egui::Slider::new(&mut self.project_map_zoom, 0.45..=1.9).text("масштаб"));
+            if ui.button("Показать скрытые").clicked() {
+                self.project_map_hidden_node_ids.clear();
+            }
+        });
+        ui.add_space(6.0);
+
+        let visible_nodes = self.filtered_project_map_nodes(&graph);
+        if visible_nodes.is_empty() {
+            empty_state(
+                ui,
+                "Узлы не найдены",
+                "Сбросьте поиск/фильтр или нажмите «Обновить карту».",
+            );
+            return;
+        }
+
+        let width = safe_available_width(ui, 520.0);
+        let height = ui.available_height().max(360.0);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(
+            rect,
+            egui::Rounding::same(8.0),
+            egui::Color32::from_rgb(8, 10, 14),
+        );
+        painter.rect_stroke(
+            rect,
+            egui::Rounding::same(8.0),
+            egui::Stroke::new(1.0, border_color()),
+        );
+
+        if response.dragged() {
+            let delta = ui.input(|input| input.pointer.delta());
+            self.project_map_pan += delta;
+            ctx.request_repaint();
+        }
+
+        let positions = project_map_positions(&visible_nodes);
+        let screen_positions = positions
+            .iter()
+            .map(|(id, pos)| {
+                (
+                    id.clone(),
+                    project_map_to_screen(*pos, rect, self.project_map_pan, self.project_map_zoom),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for edge in &graph.edges {
+            let Some(from) = screen_positions.get(&edge.from) else {
+                continue;
+            };
+            let Some(to) = screen_positions.get(&edge.to) else {
+                continue;
+            };
+            let selected_edge = self
+                .project_map_selected_node_id
+                .as_ref()
+                .map(|selected| selected == &edge.from || selected == &edge.to)
+                .unwrap_or(false);
+            let stroke = if selected_edge {
+                egui::Stroke::new(1.5, subtle_accent())
+            } else {
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 50, 59))
+            };
+            painter.line_segment([*from, *to], stroke);
+        }
+
+        let pointer_pos = response.interact_pointer_pos();
+        let mut hover_node: Option<ProjectGraphNode> = None;
+        let mut clicked_node: Option<ProjectGraphNode> = None;
+        for node in &visible_nodes {
+            let Some(pos) = screen_positions.get(&node.id) else {
+                continue;
+            };
+            let radius =
+                project_map_node_radius(node.kind) * self.project_map_zoom.clamp(0.7, 1.35);
+            let is_selected = self.project_map_selected_node_id.as_deref() == Some(&node.id);
+            let is_pinned = self.project_map_pinned_node_ids.contains(&node.id);
+            let fill = project_map_node_color(node.kind, is_selected, is_pinned);
+            painter.circle_filled(*pos, radius, fill);
+            painter.circle_stroke(
+                *pos,
+                radius,
+                egui::Stroke::new(
+                    if is_selected { 2.0 } else { 1.0 },
+                    if is_selected {
+                        accent_color()
+                    } else {
+                        border_color()
+                    },
+                ),
+            );
+            let label = compact_inline(&node.label, 28);
+            painter.text(
+                *pos + egui::vec2(0.0, radius + 5.0),
+                egui::Align2::CENTER_TOP,
+                label,
+                egui::FontId::proportional(12.0),
+                if is_selected {
+                    text_color()
+                } else {
+                    muted_color()
+                },
+            );
+            if let Some(pointer) = pointer_pos {
+                if pointer.distance(*pos) <= radius + 8.0 {
+                    hover_node = Some(node.clone());
+                    if response.clicked() {
+                        clicked_node = Some(node.clone());
+                    }
+                }
+            }
+        }
+
+        let canvas_clicked = response.clicked();
+        let canvas_double_clicked = response.double_clicked();
+
+        if let Some(node) = hover_node {
+            response.on_hover_text(format!(
+                "{}\n{}\n{}",
+                node.label,
+                project_graph_kind_label(node.kind),
+                node.path.as_deref().unwrap_or("без пути")
+            ));
+        }
+
+        if let (true, Some(node)) = (canvas_clicked, clicked_node) {
+            self.project_map_selected_node_id = Some(node.id.clone());
+            self.right_panel_view = RightPanelView::Map;
+            self.persist_layout_state();
+            if canvas_double_clicked {
+                if let Some(path) = node.path.as_deref() {
+                    if matches!(
+                        node.kind,
+                        ProjectGraphNodeKind::File | ProjectGraphNodeKind::Asset
+                    ) {
+                        self.load_file_preview(path);
+                    }
+                }
+            }
+        }
+    }
+
+    fn filtered_project_map_nodes(&self, graph: &ProjectGraphState) -> Vec<ProjectGraphNode> {
+        let query = self.project_map_query.trim().to_ascii_lowercase();
+        let mut nodes = graph
+            .nodes
+            .iter()
+            .filter(|node| !self.project_map_hidden_node_ids.contains(&node.id))
+            .filter(|node| self.project_map_filter.matches(node.kind))
+            .filter(|node| {
+                if query.is_empty() {
+                    return true;
+                }
+                project_graph_node_search_blob(node).contains(&query)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| {
+            let left_pin = self.project_map_pinned_node_ids.contains(&left.id);
+            let right_pin = self.project_map_pinned_node_ids.contains(&right.id);
+            right_pin
+                .cmp(&left_pin)
+                .then(
+                    project_graph_kind_sort_key(left.kind)
+                        .cmp(&project_graph_kind_sort_key(right.kind)),
+                )
+                .then(left.label.cmp(&right.label))
+        });
+        if nodes.len() > 260 {
+            nodes.truncate(260);
+        }
+        nodes
+    }
+
+    fn show_project_map_side_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(workspace) = self.workspace.clone() else {
+            empty_state(
+                ui,
+                "Карта недоступна",
+                "Выберите проект, чтобы увидеть узлы, связи и быстрые действия.",
+            );
+            return;
+        };
+
+        let mut graph = load_project_graph(&workspace);
+        ui.horizontal_wrapped(|ui| {
+            metric_chip(ui, "узлы", graph.nodes.len());
+            metric_chip(ui, "связи", graph.edges.len());
+            metric_chip(ui, "скрыто", self.project_map_hidden_node_ids.len());
+        });
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Открыть карту").clicked() {
+                self.set_workspace_mode(WorkspaceMode::Map);
+                self.right_panel_view = RightPanelView::Map;
+            }
+            if ui.button("Обновить").clicked() {
+                graph = scan_project_graph(&workspace);
+                match save_project_graph(&workspace, &graph) {
+                    Ok(()) => {
+                        self.project_map_status =
+                            "карта обновлена и сохранена в project_graph.json".to_string();
+                    }
+                    Err(err) => self.project_map_status = format!("не удалось сохранить: {err}"),
+                }
+            }
+            if ui.button("Сбросить скрытые").clicked() {
+                self.project_map_hidden_node_ids.clear();
+            }
+        });
+        if !self.project_map_status.is_empty() {
+            ui.label(RichText::new(&self.project_map_status).weak().small());
+        }
+
+        ui.separator();
+        let selected_id = self.project_map_selected_node_id.clone();
+        let Some(selected_id) = selected_id else {
+            empty_state(
+                ui,
+                "Узел не выбран",
+                "Откройте карту проекта и выберите файл, модуль, команду, roadmap или ассет.",
+            );
+            return;
+        };
+
+        let Some(node) = graph
+            .nodes
+            .iter()
+            .find(|candidate| candidate.id == selected_id)
+            .cloned()
+        else {
+            self.project_map_selected_node_id = None;
+            empty_state(
+                ui,
+                "Узел не найден",
+                "Карта изменилась. Обновите карту и выберите узел заново.",
+            );
+            return;
+        };
+
+        ui.label(RichText::new(&node.label).strong().size(18.0));
+        ui.horizontal_wrapped(|ui| {
+            chip(ui, project_graph_kind_label(node.kind));
+            if self.project_map_pinned_node_ids.contains(&node.id) {
+                chip(ui, "закреплён");
+            }
+            if node.confidence > 0.0 {
+                chip(ui, format!("уверенность {:.0}%", node.confidence * 100.0));
+            }
+        });
+        if let Some(path) = node.path.as_deref() {
+            ui.label(RichText::new(path).monospace().weak());
+        }
+        if !node.summary.trim().is_empty() {
+            ui.add_space(4.0);
+            ui.label(&node.summary);
+        }
+        if !node.source.trim().is_empty() {
+            ui.label(
+                RichText::new(format!("источник: {}", node.source))
+                    .weak()
+                    .small(),
+            );
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if node.path.is_some()
+                && matches!(node.kind, ProjectGraphNodeKind::File | ProjectGraphNodeKind::Asset)
+                && ui.button("Открыть файл").clicked()
+            {
+                if let Some(path) = node.path.as_deref() {
+                    self.load_file_preview(path);
+                }
+            }
+            let pinned = self.project_map_pinned_node_ids.contains(&node.id);
+            if ui
+                .button(if pinned { "Открепить" } else { "Закрепить" })
+                .clicked()
+            {
+                if pinned {
+                    self.project_map_pinned_node_ids.remove(&node.id);
+                } else {
+                    self.project_map_pinned_node_ids.insert(node.id.clone());
+                }
+            }
+            if ui.button("Спросить агента").clicked() {
+                self.input = format!(
+                    "Работай с выбранным узлом карты проекта `{}`. Объясни его роль, связи и предложи следующий полезный шаг.",
+                    node.label
+                );
+                self.set_workspace_mode(WorkspaceMode::Chat);
+                self.active_center_tab = CenterTab::Agent;
+            }
+            if ui.button("Скрыть").clicked() {
+                self.project_map_hidden_node_ids.insert(node.id.clone());
+                self.project_map_selected_node_id = None;
+            }
+        });
+
+        ui.separator();
+        panel_header(
+            ui,
+            "Связи",
+            "Исходящие и входящие связи выбранного узла. Можно добавить ручную связь по имени, id или пути.",
+        );
+        ui.horizontal(|ui| {
+            ui.add_sized(
+                [safe_available_width(ui, 140.0) - 94.0, 24.0],
+                TextEdit::singleline(&mut self.project_map_relation_target)
+                    .hint_text("узел, путь или id"),
+            );
+            if ui.button("Связать").clicked() {
+                let target = self.project_map_relation_target.clone();
+                self.add_project_map_relation(&workspace, &node.id, &target);
+            }
+        });
+
+        let mut related = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == node.id || edge.to == node.id)
+            .cloned()
+            .collect::<Vec<_>>();
+        related.sort_by(|left, right| {
+            project_graph_edge_label(left.kind)
+                .cmp(project_graph_edge_label(right.kind))
+                .then(left.to.cmp(&right.to))
+        });
+        if related.is_empty() {
+            ui.label(RichText::new("Связей пока нет.").weak());
+        } else {
+            for edge in related.iter().take(18) {
+                let other_id = if edge.from == node.id {
+                    &edge.to
+                } else {
+                    &edge.from
+                };
+                let direction = if edge.from == node.id { "→" } else { "←" };
+                let other_label = project_graph_node_label_by_id(&graph, other_id);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(direction).monospace().weak());
+                    ui.label(project_graph_edge_label(edge.kind));
+                    ui.label(RichText::new(other_label).strong());
+                });
+            }
+        }
+
+        if !node.metadata.is_empty() {
+            ui.separator();
+            panel_header(ui, "Метаданные", "Детали, собранные сканером карты.");
+            for (key, value) in &node.metadata {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(key).weak());
+                    ui.label(compact_inline(value, 80));
+                });
+            }
+        }
+    }
+
+    fn add_project_map_relation(
+        &mut self,
+        workspace: &Workspace,
+        from_id: &str,
+        target_hint: &str,
+    ) {
+        let target_hint = target_hint.trim();
+        if target_hint.is_empty() {
+            self.project_map_status = "укажите id, путь или имя целевого узла".to_string();
+            return;
+        }
+
+        let mut graph = load_project_graph(workspace);
+        let lower_hint = target_hint.to_ascii_lowercase();
+        let Some(target) = graph
+            .nodes
+            .iter()
+            .find(|node| {
+                node.id.eq_ignore_ascii_case(target_hint)
+                    || node
+                        .path
+                        .as_deref()
+                        .map(|path| path.eq_ignore_ascii_case(target_hint))
+                        .unwrap_or(false)
+                    || node.label.eq_ignore_ascii_case(target_hint)
+                    || node.label.to_ascii_lowercase().contains(&lower_hint)
+                    || node
+                        .path
+                        .as_deref()
+                        .map(|path| path.to_ascii_lowercase().contains(&lower_hint))
+                        .unwrap_or(false)
+            })
+            .cloned()
+        else {
+            self.project_map_status = format!("узел не найден: {target_hint}");
+            return;
+        };
+
+        if target.id == from_id {
+            self.project_map_status = "нельзя связать узел с самим собой".to_string();
+            return;
+        }
+
+        let edge_id = format!("edge:related_to:{from_id}:{}", target.id);
+        if graph.edges.iter().any(|edge| edge.id == edge_id) {
+            self.project_map_status = "такая связь уже есть".to_string();
+            return;
+        }
+
+        graph.edges.push(ProjectGraphEdge {
+            id: edge_id,
+            from: from_id.to_string(),
+            to: target.id.clone(),
+            kind: ProjectGraphEdgeKind::RelatedTo,
+            label: "связано с".to_string(),
+            source: "ui:project_map".to_string(),
+            confidence: 0.8,
+            updated_at: unix_timestamp(),
+        });
+        match save_project_graph(workspace, &graph) {
+            Ok(()) => {
+                self.project_map_relation_target.clear();
+                self.project_map_status = format!("связь добавлена: {from_id} → {}", target.id);
+            }
+            Err(err) => self.project_map_status = format!("не удалось сохранить связь: {err}"),
+        }
     }
 
     fn show_project_task_tree(&mut self, ui: &mut egui::Ui) {
@@ -19957,6 +20596,7 @@ fn category_label(category: &str) -> &'static str {
         "desktop" => "рабочий стол",
         "governance" => "доступ",
         "memory" => "память",
+        "project_graph" => "карта проекта",
         "providers" => "провайдеры",
         _ => "другое",
     }
@@ -20180,6 +20820,157 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
         compacted.push_str("...");
     }
     compacted
+}
+
+fn project_map_positions(nodes: &[ProjectGraphNode]) -> BTreeMap<String, egui::Pos2> {
+    let mut grouped: BTreeMap<u8, Vec<&ProjectGraphNode>> = BTreeMap::new();
+    for node in nodes {
+        grouped
+            .entry(project_graph_kind_sort_key(node.kind))
+            .or_default()
+            .push(node);
+    }
+
+    let mut positions = BTreeMap::new();
+    let total_columns = grouped.len().max(1) as f32;
+    let column_spacing = 210.0;
+    let start_x = -((total_columns - 1.0) * column_spacing) / 2.0;
+
+    for (column_index, (_kind, mut column_nodes)) in grouped.into_iter().enumerate() {
+        column_nodes.sort_by(|left, right| left.label.cmp(&right.label));
+        let total_rows = column_nodes.len().max(1) as f32;
+        let row_spacing = if column_nodes.len() > 34 { 38.0 } else { 54.0 };
+        let start_y = -((total_rows - 1.0) * row_spacing) / 2.0;
+        for (row_index, node) in column_nodes.into_iter().enumerate() {
+            let stagger = if row_index % 2 == 0 { 0.0 } else { 18.0 };
+            positions.insert(
+                node.id.clone(),
+                egui::pos2(
+                    start_x + column_index as f32 * column_spacing + stagger,
+                    start_y + row_index as f32 * row_spacing,
+                ),
+            );
+        }
+    }
+
+    positions
+}
+
+fn project_map_to_screen(
+    pos: egui::Pos2,
+    rect: egui::Rect,
+    pan: egui::Vec2,
+    zoom: f32,
+) -> egui::Pos2 {
+    rect.center() + egui::vec2(pos.x * zoom, pos.y * zoom) + pan
+}
+
+fn project_map_node_radius(kind: ProjectGraphNodeKind) -> f32 {
+    match kind {
+        ProjectGraphNodeKind::Project => 18.0,
+        ProjectGraphNodeKind::Folder => 12.0,
+        ProjectGraphNodeKind::File => 10.0,
+        ProjectGraphNodeKind::Module => 13.0,
+        ProjectGraphNodeKind::Symbol => 8.0,
+        ProjectGraphNodeKind::Command => 11.0,
+        ProjectGraphNodeKind::Asset => 12.0,
+        ProjectGraphNodeKind::Memory => 11.0,
+        ProjectGraphNodeKind::RoadmapItem => 11.0,
+    }
+}
+
+fn project_map_node_color(
+    kind: ProjectGraphNodeKind,
+    selected: bool,
+    pinned: bool,
+) -> egui::Color32 {
+    if selected {
+        return egui::Color32::from_rgb(56, 172, 209);
+    }
+    if pinned {
+        return egui::Color32::from_rgb(210, 176, 92);
+    }
+    match kind {
+        ProjectGraphNodeKind::Project => egui::Color32::from_rgb(67, 143, 205),
+        ProjectGraphNodeKind::Folder => egui::Color32::from_rgb(96, 128, 160),
+        ProjectGraphNodeKind::File => egui::Color32::from_rgb(132, 151, 168),
+        ProjectGraphNodeKind::Module => egui::Color32::from_rgb(99, 174, 152),
+        ProjectGraphNodeKind::Symbol => egui::Color32::from_rgb(151, 132, 205),
+        ProjectGraphNodeKind::Command => egui::Color32::from_rgb(219, 162, 87),
+        ProjectGraphNodeKind::Asset => egui::Color32::from_rgb(197, 126, 168),
+        ProjectGraphNodeKind::Memory => egui::Color32::from_rgb(116, 184, 112),
+        ProjectGraphNodeKind::RoadmapItem => egui::Color32::from_rgb(190, 188, 106),
+    }
+}
+
+fn project_graph_kind_label(kind: ProjectGraphNodeKind) -> &'static str {
+    match kind {
+        ProjectGraphNodeKind::Project => "проект",
+        ProjectGraphNodeKind::Folder => "папка",
+        ProjectGraphNodeKind::File => "файл",
+        ProjectGraphNodeKind::Module => "модуль",
+        ProjectGraphNodeKind::Symbol => "символ",
+        ProjectGraphNodeKind::Command => "команда",
+        ProjectGraphNodeKind::Asset => "ассет",
+        ProjectGraphNodeKind::Memory => "память",
+        ProjectGraphNodeKind::RoadmapItem => "roadmap",
+    }
+}
+
+fn project_graph_edge_label(kind: ProjectGraphEdgeKind) -> &'static str {
+    match kind {
+        ProjectGraphEdgeKind::Contains => "содержит",
+        ProjectGraphEdgeKind::Imports => "импортирует",
+        ProjectGraphEdgeKind::DependsOn => "зависит от",
+        ProjectGraphEdgeKind::Calls => "вызывает",
+        ProjectGraphEdgeKind::Generates => "генерирует",
+        ProjectGraphEdgeKind::Tests => "проверяет",
+        ProjectGraphEdgeKind::Documents => "документирует",
+        ProjectGraphEdgeKind::RelatedTo => "связано с",
+    }
+}
+
+fn project_graph_kind_sort_key(kind: ProjectGraphNodeKind) -> u8 {
+    match kind {
+        ProjectGraphNodeKind::Project => 0,
+        ProjectGraphNodeKind::Folder => 1,
+        ProjectGraphNodeKind::Module => 2,
+        ProjectGraphNodeKind::File => 3,
+        ProjectGraphNodeKind::Symbol => 4,
+        ProjectGraphNodeKind::Command => 5,
+        ProjectGraphNodeKind::Asset => 6,
+        ProjectGraphNodeKind::Memory => 7,
+        ProjectGraphNodeKind::RoadmapItem => 8,
+    }
+}
+
+fn project_graph_node_search_blob(node: &ProjectGraphNode) -> String {
+    let mut parts = vec![
+        node.id.as_str(),
+        node.label.as_str(),
+        node.summary.as_str(),
+        node.source.as_str(),
+        project_graph_kind_label(node.kind),
+    ];
+    if let Some(path) = node.path.as_deref() {
+        parts.push(path);
+    }
+    let metadata = node
+        .metadata
+        .iter()
+        .map(|(key, value)| format!("{key} {value}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{} {}", parts.join(" "), metadata).to_ascii_lowercase()
+}
+
+fn project_graph_node_label_by_id(graph: &ProjectGraphState, id: &str) -> String {
+    graph
+        .nodes
+        .iter()
+        .find(|node| node.id == id)
+        .map(|node| node.label.clone())
+        .unwrap_or_else(|| compact_inline(id, 48))
 }
 
 fn remote_debug_bundle_dir() -> Result<PathBuf, String> {

@@ -142,6 +142,7 @@ pub enum ToolAction {
     RecordProjectGoal,
     RecordMemorySource,
     RemoveMemorySource,
+    ProjectGraphSnapshot,
     RoadmapSnapshot,
     RecordMilestone,
     UpdateRoadmapItem,
@@ -415,6 +416,10 @@ mod tests {
                 r#"{"action":"record_memory_source","args":{"title":"Brief","content":"Use cozy art direction."}}"#,
                 "memory",
             ),
+            (
+                r#"{"action":"project_graph_snapshot","args":{"save_if_missing":true,"refresh":true}}"#,
+                "graph",
+            ),
             (r#"{"action":"roadmap_snapshot","args":{}}"#, "roadmap"),
             (
                 r#"{"action":"record_milestone","args":{"title":"Stage 22","detail":"Roadmap module","status":"done"}}"#,
@@ -452,6 +457,7 @@ mod tests {
                         | ToolAction::UpsertTask
                         | ToolAction::RecordMemorySource
                 )),
+                "graph" => assert!(matches!(request.action, ToolAction::ProjectGraphSnapshot)),
                 "roadmap" => assert!(matches!(
                     request.action,
                     ToolAction::RoadmapSnapshot

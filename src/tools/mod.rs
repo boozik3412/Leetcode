@@ -19,6 +19,7 @@ use crate::memory::{
     RecordDecisionArgs, RecordMemorySourceArgs, RecordProjectGoalArgs, RemoveMemorySourceArgs,
     UpdateTaskStatusArgs, UpsertTaskArgs,
 };
+use crate::project_graph::ProjectGraphSnapshotArgs;
 use crate::provider_health;
 use crate::roadmap::{
     ExportRoadmapArgs, PlanRoadmapItemArgs, RecordMilestoneArgs, RoadmapSnapshotArgs,
@@ -770,6 +771,15 @@ impl ToolDispatcher {
                         }
                         crate::memory::remove_memory_source(workspace, args)
                     }
+                    Err(err) => ToolResult::error(err.to_string()),
+                }
+            }
+            ToolAction::ProjectGraphSnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<ProjectGraphSnapshotArgs>(request.args) {
+                    Ok(args) => crate::project_graph::project_graph_snapshot(workspace, args),
                     Err(err) => ToolResult::error(err.to_string()),
                 }
             }

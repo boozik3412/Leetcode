@@ -16,6 +16,7 @@ mod http;
 mod memory;
 mod orchestration;
 mod project;
+mod project_graph;
 mod provider_health;
 mod relay;
 mod remote;

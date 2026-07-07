@@ -403,21 +403,21 @@ Leetcode развивается из минимального локальног
 
 Цель: построить машинно-читаемую карту проекта: узлы, связи, источники уверенности и связь с файлами, roadmap, памятью и командами.
 
-- Todo: Добавить `src/project_graph.rs` и workspace-local состояние `assets/generated/leetcode/project_graph.json`.
-- Todo: Описать типы узлов: Project, Folder, File, Module, Symbol, Command, Asset, Memory, RoadmapItem.
-- Todo: Описать типы связей: contains, imports, depends_on, calls, generates, tests, documents, related_to.
-- Todo: Реализовать первый scanner: файловое дерево, project profiles, команды проекта, roadmap items и memory sources.
-- Todo: Добавить agent-callable snapshot выбранной карты проекта.
+- Done: Добавить `src/project_graph.rs` и workspace-local состояние `assets/generated/leetcode/project_graph.json`.
+- Done: Описать типы узлов: Project, Folder, File, Module, Symbol, Command, Asset, Memory, RoadmapItem.
+- Done: Описать типы связей: contains, imports, depends_on, calls, generates, tests, documents, related_to.
+- Done: Реализовать первый scanner: файловое дерево, project profiles, команды проекта, roadmap items и memory sources.
+- Done: Добавить agent-callable snapshot выбранной карты проекта.
 
 ## Этап 35 - Интерактивная карта проекта
 
 Цель: дать пользователю визуальную навигацию по проекту и дать агенту точный selected-node context.
 
-- Todo: Добавить режим `Карта` рядом с `Чат`, `Код`, `Ассеты`, `Проект`.
-- Todo: Реализовать canvas с pan/zoom, поиском и фильтрами по типам узлов.
-- Todo: По клику на узел показывать правую панель: описание, путь, связи, последние изменения и быстрые действия.
-- Todo: Добавить действия `Открыть`, `Спросить агента`, `Добавить связь`, `Скрыть`, `Закрепить`.
-- Todo: Передавать выбранный узел в контекст агента, чтобы пользователь мог сказать “улучши это” после клика по узлу.
+- Done: Добавить режим `Карта` рядом с `Чат`, `Код`, `Ассеты`, `Проект`.
+- Done: Реализовать canvas с pan/zoom, поиском и фильтрами по типам узлов.
+- Done: По клику на узел показывать правую панель: описание, путь, связи, последние изменения и быстрые действия.
+- Done: Добавить действия `Открыть`, `Спросить агента`, `Добавить связь`, `Скрыть`, `Закрепить`.
+- Done: Передавать выбранный узел в контекст агента, чтобы пользователь мог сказать “улучши это” после клика по узлу.
 
 ## Постоянная планка качества
 
