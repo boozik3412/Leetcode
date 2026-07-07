@@ -843,6 +843,7 @@ struct ProjectFixRequestRecord {
 struct PendingRelayPairing {
     request_id: String,
     device_name: String,
+    connect_mode: String,
     role_view: bool,
     role_chat: bool,
     role_approve: bool,
@@ -859,6 +860,7 @@ impl From<RelayPairingRequest> for PendingRelayPairing {
         Self {
             request_id: request.request_id,
             device_name: request.device_name,
+            connect_mode: request.connect_mode,
             role_view: request.role_view,
             role_chat: request.role_chat,
             role_approve: request.role_approve,
@@ -11004,7 +11006,7 @@ impl LeetcodeApp {
             if self.relay_pending_pairings.is_empty() {
                 ui.label(RichText::new("Нет новых устройств, ожидающих решения.").weak());
             } else {
-                let mut decision: Option<(String, bool)> = None;
+                let mut decision: Option<(String, bool, bool)> = None;
                 let in_flight_request_id = self.relay_pairing_decision_in_flight.clone();
                 for request in &mut self.relay_pending_pairings {
                     ui.separator();
@@ -11013,7 +11015,8 @@ impl LeetcodeApp {
                         chip(ui, &request.status);
                         ui.label(
                             RichText::new(format!(
-                                "запрос {} · создан {} назад · истекает через {}",
+                                "{} · запрос {} · создан {} назад · истекает через {}",
+                                relay_connect_mode_label(&request.connect_mode),
                                 compact_inline(&request.request_id, 18),
                                 age_label(request.created_at),
                                 format_duration(Duration::from_secs(
@@ -11045,24 +11048,30 @@ impl LeetcodeApp {
                             .map(|id| id == &request.request_id)
                             .unwrap_or(false);
                         if ui
-                            .add_enabled(!busy, egui::Button::new("Подтвердить"))
+                            .add_enabled(!busy, egui::Button::new("Принять один раз"))
                             .clicked()
                         {
-                            decision = Some((request.request_id.clone(), true));
+                            decision = Some((request.request_id.clone(), true, false));
+                        }
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Принять и запомнить"))
+                            .clicked()
+                        {
+                            decision = Some((request.request_id.clone(), true, true));
                         }
                         if ui
                             .add_enabled(!busy, egui::Button::new("Отклонить"))
                             .clicked()
                         {
-                            decision = Some((request.request_id.clone(), false));
+                            decision = Some((request.request_id.clone(), false, false));
                         }
                         if busy {
                             ui.label(RichText::new("отправляю решение...").weak().small());
                         }
                     });
                 }
-                if let Some((request_id, approved)) = decision {
-                    self.answer_relay_pairing_request(request_id, approved);
+                if let Some((request_id, approved, remember)) = decision {
+                    self.answer_relay_pairing_request(request_id, approved, remember);
                 }
             }
 
@@ -12151,6 +12160,7 @@ impl LeetcodeApp {
         pending.role_files = role_files;
         pending.role_run = role_run;
         pending.role_desktop = role_desktop;
+        let connect_mode = pending.connect_mode.clone();
         self.relay_pending_pairings
             .retain(|existing| existing.request_id != request_id);
         self.relay_pending_pairings.push(pending);
@@ -12166,6 +12176,7 @@ impl LeetcodeApp {
             .with_created_at(created_at)
             .with_related_id(request_id.clone())
             .with_metadata("expires_at", expires_at.to_string())
+            .with_metadata("connect_mode", connect_mode)
             .with_metadata("view", role_view.to_string())
             .with_metadata("chat", role_chat.to_string())
             .with_metadata("approve", role_approve.to_string())
@@ -12181,7 +12192,7 @@ impl LeetcodeApp {
         self.refresh_journal();
     }
 
-    fn answer_relay_pairing_request(&mut self, request_id: String, approved: bool) {
+    fn answer_relay_pairing_request(&mut self, request_id: String, approved: bool, remember: bool) {
         if self.relay_pairing_decision_in_flight.is_some() {
             self.remote_status = "Уже отправляю решение по устройству.".to_string();
             return;
@@ -12196,6 +12207,12 @@ impl LeetcodeApp {
             return;
         };
         let relay_url = self.relay_url();
+        let now = unix_timestamp();
+        let device_expires_at = if approved && !remember {
+            now.saturating_add(60 * 60)
+        } else {
+            self.default_remote_device_expires_at(now)
+        };
         let decision = RelayHostPairingDecisionRequest {
             agent_id: self.config.agent_id.clone(),
             host_token: self.config.relay_host_token.clone(),
@@ -12207,13 +12224,20 @@ impl LeetcodeApp {
             role_files: request.role_files,
             role_run: request.role_run,
             role_desktop: request.role_desktop,
-            device_expires_at: self.default_remote_device_expires_at(unix_timestamp()),
+            device_expires_at,
         };
         let (tx, rx) = mpsc::channel();
         self.relay_pairing_decision_rx = Some(rx);
         self.relay_pairing_decision_in_flight = Some(request.request_id.clone());
         self.remote_status = if approved {
-            format!("Подтверждаю устройство {}...", request.device_name)
+            if remember {
+                format!("Запоминаю устройство {}...", request.device_name)
+            } else {
+                format!(
+                    "Подтверждаю устройство {} на один сеанс...",
+                    request.device_name
+                )
+            }
         } else {
             format!("Отклоняю устройство {}...", request.device_name)
         };
@@ -12231,7 +12255,8 @@ impl LeetcodeApp {
             .with_metadata("approve", request.role_approve.to_string())
             .with_metadata("files", request.role_files.to_string())
             .with_metadata("run", request.role_run.to_string())
-            .with_metadata("desktop", request.role_desktop.to_string()),
+            .with_metadata("desktop", request.role_desktop.to_string())
+            .with_metadata("remember", remember.to_string()),
         );
         thread::spawn(move || {
             let result = post_relay_pairing_decision(&relay_url, &decision);
@@ -15000,6 +15025,7 @@ impl LeetcodeApp {
             });
         }
         self.show_context_inspector(ui);
+        self.show_remote_pairing_banner(ui);
         self.show_context_note_suggestions(ui);
         self.show_archived_conversations(ui);
         ui.add_space(10.0);
@@ -15061,6 +15087,77 @@ impl LeetcodeApp {
                     },
                 );
             });
+    }
+
+    fn show_remote_pairing_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(request) = self.relay_pending_pairings.first().cloned() else {
+            return;
+        };
+        ui.add_space(8.0);
+        let mut decision: Option<(String, bool, bool)> = None;
+        egui::Frame::none()
+            .fill(egui::Color32::from_rgb(20, 45, 55))
+            .stroke(egui::Stroke::new(1.0, accent_color()))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::same(12.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new("Входящее подключение")
+                            .strong()
+                            .color(text_color()),
+                    );
+                    chip(ui, relay_connect_mode_label(&request.connect_mode));
+                    chip(ui, compact_inline(&request.request_id, 18));
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} хочет подключиться к этому агенту. Роли: {}. Запрос истекает через {}.",
+                        request.device_name,
+                        pending_relay_roles_label(&request),
+                        format_duration(Duration::from_secs(
+                            request.expires_at.saturating_sub(unix_timestamp()),
+                        ))
+                    ))
+                    .weak(),
+                );
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    let busy = self
+                        .relay_pairing_decision_in_flight
+                        .as_ref()
+                        .map(|id| id == &request.request_id)
+                        .unwrap_or(false);
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Принять один раз"))
+                        .clicked()
+                    {
+                        decision = Some((request.request_id.clone(), true, false));
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Принять и запомнить"))
+                        .clicked()
+                    {
+                        decision = Some((request.request_id.clone(), true, true));
+                    }
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("Отклонить"))
+                        .clicked()
+                    {
+                        decision = Some((request.request_id.clone(), false, false));
+                    }
+                    if ui.button("Открыть контроль").clicked() {
+                        self.right_panel_view = RightPanelView::Control;
+                    }
+                    if busy {
+                        ui.label(RichText::new("отправляю решение...").weak().small());
+                    }
+                });
+            });
+        if let Some((request_id, approved, remember)) = decision {
+            self.answer_relay_pairing_request(request_id, approved, remember);
+        }
     }
 
     fn show_agent_daily_home(&mut self, ui: &mut egui::Ui) {
@@ -18512,6 +18609,41 @@ fn remote_device_roles_label(device: &RemoteDeviceConfig) -> String {
         roles.push("запуски");
     }
     if device.role_desktop {
+        roles.push("рабочий стол");
+    }
+    if roles.is_empty() {
+        "без ролей".to_string()
+    } else {
+        roles.join(", ")
+    }
+}
+
+fn relay_connect_mode_label(mode: &str) -> &'static str {
+    match mode.trim() {
+        "agent_id" => "по Agent ID",
+        "pairing_code" => "по коду",
+        _ => "relay",
+    }
+}
+
+fn pending_relay_roles_label(request: &PendingRelayPairing) -> String {
+    let mut roles = Vec::new();
+    if request.role_view {
+        roles.push("обзор");
+    }
+    if request.role_chat {
+        roles.push("задачи");
+    }
+    if request.role_approve {
+        roles.push("подтверждения");
+    }
+    if request.role_files {
+        roles.push("файлы");
+    }
+    if request.role_run {
+        roles.push("запуски");
+    }
+    if request.role_desktop {
         roles.push("рабочий стол");
     }
     if roles.is_empty() {

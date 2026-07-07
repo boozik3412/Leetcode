@@ -50,7 +50,10 @@ pub struct RelayHostPollReply {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RelayPairRequest {
     pub agent_id: String,
+    #[serde(default)]
     pub pairing_code: String,
+    #[serde(default)]
+    pub connect_mode: String,
     #[serde(default)]
     pub device_name: String,
     #[serde(default = "default_true")]
@@ -119,6 +122,8 @@ pub struct RelayHostPairingDecisionRequest {
 pub struct RelayPairingRequest {
     pub request_id: String,
     pub device_name: String,
+    #[serde(default)]
+    pub connect_mode: String,
     pub role_view: bool,
     pub role_chat: bool,
     pub role_approve: bool,

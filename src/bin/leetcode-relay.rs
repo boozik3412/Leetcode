@@ -451,21 +451,24 @@ fn handle_client_pair(
         );
         return;
     }
-    if host.pairing_code.is_empty() || host.pairing_expires_at <= now {
-        write_json_response(
-            stream,
-            403,
-            &json!({"ok": false, "error": "pairing code is not active"}),
-        );
-        return;
-    }
-    if code != host.pairing_code {
-        write_json_response(
-            stream,
-            403,
-            &json!({"ok": false, "error": "pairing code is invalid"}),
-        );
-        return;
+    let uses_pairing_code = !code.is_empty();
+    if uses_pairing_code {
+        if host.pairing_code.is_empty() || host.pairing_expires_at <= now {
+            write_json_response(
+                stream,
+                403,
+                &json!({"ok": false, "error": "pairing code is not active"}),
+            );
+            return;
+        }
+        if code != host.pairing_code {
+            write_json_response(
+                stream,
+                403,
+                &json!({"ok": false, "error": "pairing code is invalid"}),
+            );
+            return;
+        }
     }
 
     let name = if request.device_name.trim().is_empty() {
@@ -476,6 +479,15 @@ fn handle_client_pair(
     let pairing_request = RelayPairingRequest {
         request_id: format!("relay-pair-{}", uuid::Uuid::new_v4().simple()),
         device_name: name,
+        connect_mode: if request.connect_mode.trim().is_empty() {
+            if uses_pairing_code {
+                "pairing_code".to_string()
+            } else {
+                "agent_id".to_string()
+            }
+        } else {
+            request.connect_mode.trim().chars().take(40).collect()
+        },
         role_view: request.role_view,
         role_chat: request.role_chat,
         role_approve: request.role_approve,
@@ -500,8 +512,10 @@ fn handle_client_pair(
             error: None,
         },
     );
-    host.pairing_code.clear();
-    host.pairing_expires_at = 0;
+    if uses_pairing_code {
+        host.pairing_code.clear();
+        host.pairing_expires_at = 0;
+    }
 
     write_json_response(
         stream,
@@ -1730,6 +1744,22 @@ mod tests {
         assert!(html.contains("apple-mobile-web-app-capable"));
         assert!(html.contains("diagnostics"));
         assert!(html.contains("remoteDiagnosticsText"));
+    }
+
+    #[test]
+    fn relay_pair_request_allows_agent_id_only_flow() {
+        let request = serde_json::from_str::<RelayPairRequest>(
+            r#"{"agent_id":"lc-test","device_name":"Office PC"}"#,
+        )
+        .expect("pair request");
+
+        assert_eq!(normalize_agent_id(&request.agent_id), "LC-TEST");
+        assert!(request.pairing_code.is_empty());
+        assert!(request.connect_mode.is_empty());
+        assert_eq!(request.device_name, "Office PC");
+        assert!(request.role_view);
+        assert!(request.role_chat);
+        assert!(!request.role_run);
     }
 
     #[test]

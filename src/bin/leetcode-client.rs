@@ -76,7 +76,7 @@ impl Default for ClientConfig {
         Self {
             remote_url: default_remote_url(),
             relay_url: default_relay_url(),
-            use_relay: false,
+            use_relay: true,
             agent_id: String::new(),
             device_name: default_device_name(),
             device_id: String::new(),
@@ -286,6 +286,7 @@ struct ThinClientApp {
     remote_url_input: String,
     relay_url_input: String,
     use_relay: bool,
+    show_advanced_connection: bool,
     agent_id_input: String,
     device_name_input: String,
     pairing_code_input: String,
@@ -302,6 +303,8 @@ struct ThinClientApp {
     poll_delay: Duration,
     connected: bool,
     pending_pair_request_id: String,
+    pair_status_in_flight: bool,
+    last_pair_status_check: Option<Instant>,
 }
 
 impl ThinClientApp {
@@ -312,6 +315,7 @@ impl ThinClientApp {
             remote_url_input: config.remote_url.clone(),
             relay_url_input: config.relay_url.clone(),
             use_relay: config.use_relay,
+            show_advanced_connection: false,
             agent_id_input: config.agent_id.clone(),
             device_name_input: config.device_name.clone(),
             pairing_code_input: String::new(),
@@ -329,6 +333,8 @@ impl ThinClientApp {
             poll_delay: relay_backoff_delay(0),
             connected: false,
             pending_pair_request_id: String::new(),
+            pair_status_in_flight: false,
+            last_pair_status_check: None,
         };
         if !app.token_input.trim().is_empty() {
             app.connect();
@@ -427,6 +433,8 @@ impl ThinClientApp {
                     self.poll_now();
                 }
                 ClientEvent::Paired(Ok(reply)) => {
+                    self.pair_status_in_flight = false;
+                    self.last_pair_status_check = Some(Instant::now());
                     if reply.device_token.trim().is_empty()
                         && reply.status == "pending"
                         && !reply.request_id.trim().is_empty()
@@ -466,6 +474,8 @@ impl ThinClientApp {
                     self.connect();
                 }
                 ClientEvent::Paired(Err(err)) => {
+                    self.pair_status_in_flight = false;
+                    self.last_pair_status_check = Some(Instant::now());
                     self.action_status = format!("Ошибка подключения устройства: {err}");
                 }
             }
@@ -473,6 +483,7 @@ impl ThinClientApp {
     }
 
     fn maybe_poll(&mut self) {
+        self.maybe_poll_pairing_status();
         if !self.connected || self.poll_in_flight {
             return;
         }
@@ -482,6 +493,19 @@ impl ThinClientApp {
             .unwrap_or(true);
         if due {
             self.poll_now();
+        }
+    }
+
+    fn maybe_poll_pairing_status(&mut self) {
+        if self.pending_pair_request_id.trim().is_empty() || self.pair_status_in_flight {
+            return;
+        }
+        let due = self
+            .last_pair_status_check
+            .map(|time| time.elapsed() >= Duration::from_secs(2))
+            .unwrap_or(true);
+        if due {
+            self.check_pairing_status();
         }
     }
 
@@ -564,7 +588,7 @@ impl ThinClientApp {
         self.action_status = "Подключаю устройство...".to_string();
         thread::spawn(move || {
             let result = if use_relay {
-                post_relay_pair(&relay_url, &agent_id, &code, &device_name)
+                post_relay_pair(&relay_url, &agent_id, &code, &device_name, "pairing_code")
             } else {
                 post_pair(
                     &remote_url,
@@ -585,6 +609,31 @@ impl ThinClientApp {
         });
     }
 
+    fn request_connection_by_agent_id(&mut self) {
+        self.use_relay = true;
+        self.pairing_code_input.clear();
+        self.sync_config_from_inputs();
+        if self.agent_id_input.trim().is_empty() {
+            self.action_status = "Введите Agent ID основного Leetcode.".to_string();
+            return;
+        }
+        self.save_config();
+        let relay_url = normalize_remote_url(&self.relay_url_input);
+        let agent_id = self.agent_id_input.trim().to_string();
+        let device_name = self.device_name_input.trim().to_string();
+        let (tx, rx) = mpsc::channel();
+        self.events_rx = Some(rx);
+        self.pending_pair_request_id.clear();
+        self.pair_status_in_flight = true;
+        self.last_pair_status_check = Some(Instant::now());
+        self.action_status =
+            "Отправляю запрос подключения. Подтвердите устройство в основном Leetcode.".to_string();
+        thread::spawn(move || {
+            let result = post_relay_pair(&relay_url, &agent_id, "", &device_name, "agent_id");
+            let _ = tx.send(ClientEvent::Paired(result));
+        });
+    }
+
     fn check_pairing_status(&mut self) {
         let request_id = self.pending_pair_request_id.trim().to_string();
         if request_id.is_empty() {
@@ -596,6 +645,8 @@ impl ThinClientApp {
         let agent_id = self.agent_id_input.trim().to_string();
         let (tx, rx) = mpsc::channel();
         self.events_rx = Some(rx);
+        self.pair_status_in_flight = true;
+        self.last_pair_status_check = Some(Instant::now());
         self.action_status = "Проверяю подтверждение устройства...".to_string();
         thread::spawn(move || {
             let result = post_relay_pair_status(&relay_url, &agent_id, &request_id);
@@ -714,54 +765,27 @@ impl ThinClientApp {
     fn show_connection_panel(&mut self, ui: &mut egui::Ui) {
         panel(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Подключение").strong().size(18.0));
+                ui.label(RichText::new("Соединения").strong().size(18.0));
                 if self.connected {
                     pill(ui, "online");
                 } else {
                     pill(ui, "offline");
                 }
-            });
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .checkbox(&mut self.use_relay, "Relay по Agent ID")
-                    .changed()
-                {
-                    self.sync_config_from_inputs();
-                    self.save_config();
+                if !self.pending_pair_request_id.trim().is_empty() {
+                    pill(ui, "ожидает подтверждения");
                 }
-                ui.label(
-                    RichText::new(if self.use_relay {
-                        "Клиент ходит в relay, host-агент сам забирает действия."
-                    } else {
-                        "Клиент подключается напрямую к Remote API host-агента."
-                    })
-                    .weak()
-                    .small(),
-                );
             });
-            egui::Grid::new("connection_grid")
+            ui.label(
+                RichText::new(
+                    "Введите Agent ID основного Leetcode. На основном компьютере появится запрос подключения.",
+                )
+                .weak(),
+            );
+            ui.add_space(10.0);
+            egui::Grid::new("simple_connection_grid")
                 .num_columns(2)
-                .spacing([10.0, 8.0])
+                .spacing([12.0, 8.0])
                 .show(ui, |ui| {
-                    ui.label(RichText::new("Relay URL").weak());
-                    ui.add(
-                        TextEdit::singleline(&mut self.relay_url_input)
-                            .desired_width(420.0)
-                            .hint_text(DEFAULT_RELAY_URL),
-                    )
-                    .on_hover_text("Нужен только для режима Relay по Agent ID.");
-                    ui.end_row();
-
-                    ui.label(RichText::new("Remote URL").weak());
-                    ui.add(
-                        TextEdit::singleline(&mut self.remote_url_input)
-                            .desired_width(420.0)
-                            .hint_text("http://127.0.0.1:17890"),
-                    )
-                    .on_hover_text("Нужен только для прямого подключения без relay.");
-                    ui.end_row();
-
                     ui.label(RichText::new("Agent ID").weak());
                     ui.add(
                         TextEdit::singleline(&mut self.agent_id_input)
@@ -777,31 +801,11 @@ impl ThinClientApp {
                             .hint_text("Домашний ноутбук"),
                     );
                     ui.end_row();
-
-                    ui.label(RichText::new("Pairing code").weak());
-                    ui.add(
-                        TextEdit::singleline(&mut self.pairing_code_input)
-                            .desired_width(220.0)
-                            .hint_text("ABC-123"),
-                    );
-                    ui.end_row();
-
-                    ui.label(RichText::new("Token").weak());
-                    ui.add(
-                        TextEdit::singleline(&mut self.token_input)
-                            .desired_width(420.0)
-                            .password(true)
-                            .hint_text("lrt-..."),
-                    );
-                    ui.end_row();
                 });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Вставить паспорт").clicked() {
-                    self.paste_pairing_passport_from_clipboard();
-                }
-                if ui.button("Подключить по коду").clicked() {
-                    self.pair_device();
+                if ui.button("+ Добавить соединение").clicked() {
+                    self.request_connection_by_agent_id();
                 }
                 if ui
                     .add_enabled(
@@ -812,7 +816,13 @@ impl ThinClientApp {
                 {
                     self.check_pairing_status();
                 }
-                if ui.button("Подключиться").clicked() {
+                if ui
+                    .add_enabled(
+                        !self.token_input.trim().is_empty(),
+                        egui::Button::new("Подключиться"),
+                    )
+                    .clicked()
+                {
                     self.connect();
                 }
                 if ui.button("Обновить").clicked() {
@@ -821,22 +831,114 @@ impl ThinClientApp {
                 if ui.button("Отключиться").clicked() {
                     self.disconnect();
                 }
-                if ui
-                    .checkbox(&mut self.config.remember_token, "Запомнить token")
-                    .changed()
-                {
-                    self.sync_config_from_inputs();
-                    self.save_config();
-                }
             });
+            if !self.pending_pair_request_id.trim().is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "Запрос отправлен: {}. Ожидаю, пока его примут в основном Leetcode.",
+                        compact_client_text(&self.pending_pair_request_id, 24)
+                    ))
+                    .color(accent_color())
+                    .small(),
+                );
+            }
             ui.add_space(6.0);
-            ui.label(
-                RichText::new(
-                    "Паспорт подключения копируется в основном Leetcode: Контроль → Удалённый доступ → Подключение устройств.",
-                )
-                .weak()
-                .small(),
-            );
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .selectable_label(self.show_advanced_connection, "Дополнительно")
+                    .clicked()
+                {
+                    self.show_advanced_connection = !self.show_advanced_connection;
+                }
+                ui.label(
+                    RichText::new("URL, pairing code, token и прямое подключение для диагностики.")
+                        .weak()
+                        .small(),
+                );
+            });
+            if self.show_advanced_connection {
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .checkbox(&mut self.use_relay, "Relay по Agent ID")
+                        .changed()
+                    {
+                        self.sync_config_from_inputs();
+                        self.save_config();
+                    }
+                    ui.label(
+                        RichText::new(if self.use_relay {
+                            "Клиент ходит в relay, host-агент сам забирает действия."
+                        } else {
+                            "Клиент подключается напрямую к Remote API host-агента."
+                        })
+                        .weak()
+                        .small(),
+                    );
+                });
+                egui::Grid::new("connection_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Relay URL").weak());
+                        ui.add(
+                            TextEdit::singleline(&mut self.relay_url_input)
+                                .desired_width(420.0)
+                                .hint_text(DEFAULT_RELAY_URL),
+                        )
+                        .on_hover_text("Нужен только для режима Relay по Agent ID.");
+                        ui.end_row();
+
+                        ui.label(RichText::new("Remote URL").weak());
+                        ui.add(
+                            TextEdit::singleline(&mut self.remote_url_input)
+                                .desired_width(420.0)
+                                .hint_text("http://127.0.0.1:17890"),
+                        )
+                        .on_hover_text("Нужен только для прямого подключения без relay.");
+                        ui.end_row();
+
+                        ui.label(RichText::new("Pairing code").weak());
+                        ui.add(
+                            TextEdit::singleline(&mut self.pairing_code_input)
+                                .desired_width(220.0)
+                                .hint_text("ABC-123"),
+                        );
+                        ui.end_row();
+
+                        ui.label(RichText::new("Token").weak());
+                        ui.add(
+                            TextEdit::singleline(&mut self.token_input)
+                                .desired_width(420.0)
+                                .password(true)
+                                .hint_text("lrt-..."),
+                        );
+                        ui.end_row();
+                    });
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Вставить паспорт").clicked() {
+                        self.paste_pairing_passport_from_clipboard();
+                    }
+                    if ui.button("Подключить по коду").clicked() {
+                        self.pair_device();
+                    }
+                    if ui
+                        .checkbox(&mut self.config.remember_token, "Запомнить token")
+                        .changed()
+                    {
+                        self.sync_config_from_inputs();
+                        self.save_config();
+                    }
+                });
+                ui.label(
+                    RichText::new(
+                        "Старый паспорт подключения находится в основном Leetcode: Контроль -> Удалённый доступ -> Подключение устройств.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
             ui.label(RichText::new(&self.status).weak());
             if !self.action_status.trim().is_empty() {
                 ui.label(RichText::new(&self.action_status).color(accent_color()));
@@ -1426,6 +1528,7 @@ fn post_relay_pair(
     agent_id: &str,
     pairing_code: &str,
     device_name: &str,
+    connect_mode: &str,
 ) -> Result<PairReply, String> {
     let client = http_client()?;
     let url = endpoint_url(relay_url, "/api/clients/pair")?;
@@ -1434,6 +1537,7 @@ fn post_relay_pair(
         .json(&RelayPairRequest {
             agent_id: agent_id.trim().to_string(),
             pairing_code: pairing_code.trim().to_string(),
+            connect_mode: connect_mode.trim().to_string(),
             device_name: if device_name.trim().is_empty() {
                 default_device_name()
             } else {
@@ -1929,6 +2033,16 @@ fn age_label(timestamp: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_defaults_to_agent_id_relay_flow() {
+        let config = ClientConfig::default();
+
+        assert!(config.use_relay);
+        assert_eq!(config.relay_url, DEFAULT_RELAY_URL);
+        assert!(config.remote_url.contains("17890"));
+        assert!(config.agent_id.is_empty());
+    }
 
     #[test]
     fn parses_key_value_pairing_passport() {
