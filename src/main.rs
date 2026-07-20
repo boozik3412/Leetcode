@@ -22,6 +22,7 @@ mod orchestration;
 mod production_validation;
 mod project;
 mod project_graph;
+mod project_semantics;
 mod provider_health;
 mod relay;
 mod remote;

@@ -565,6 +565,54 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "Посмотреть текущую сессию конструктора и подтверждённый TaskManifest.",
         ),
         spec(
+            "semantic_catalog_snapshot",
+            "project_semantics",
+            "low",
+            "Посмотреть каталог нативных смысловых меток проекта.",
+        ),
+        spec(
+            "analyze_project_semantics",
+            "project_semantics",
+            "low",
+            "Обновить внешний семантический индекс по Project Map и Asset Registry.",
+        ),
+        spec(
+            "semantic_node_snapshot",
+            "project_semantics",
+            "low",
+            "Посмотреть метки, доказательства, предложения и связи конкретного узла.",
+        ),
+        spec(
+            "resolve_semantic_targets",
+            "project_semantics",
+            "low",
+            "Найти цели операции по типу, роли, подсистеме и связям Project Map.",
+        ),
+        spec(
+            "propose_semantic_labels",
+            "project_semantics",
+            "medium",
+            "Предложить смысловые метки без их автоматического подтверждения.",
+        ),
+        spec(
+            "decide_semantic_proposals",
+            "project_semantics",
+            "medium",
+            "Подтвердить или отклонить предложенные смысловые метки.",
+        ),
+        spec(
+            "update_semantic_labels",
+            "project_semantics",
+            "medium",
+            "Вручную изменить подтверждённые смысловые метки узла.",
+        ),
+        spec(
+            "export_semantic_index",
+            "project_semantics",
+            "medium",
+            "Явно экспортировать смысловой индекс в рабочий проект.",
+        ),
+        spec(
             "roadmap_snapshot",
             "roadmap",
             "low",
@@ -914,6 +962,14 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::PrepareGameTaskProposal => "prepare_game_task_proposal",
         ToolAction::ProposeProjectRelation => "propose_project_relation",
         ToolAction::GameTaskSnapshot => "game_task_snapshot",
+        ToolAction::SemanticCatalogSnapshot => "semantic_catalog_snapshot",
+        ToolAction::AnalyzeProjectSemantics => "analyze_project_semantics",
+        ToolAction::SemanticNodeSnapshot => "semantic_node_snapshot",
+        ToolAction::ResolveSemanticTargets => "resolve_semantic_targets",
+        ToolAction::ProposeSemanticLabels => "propose_semantic_labels",
+        ToolAction::DecideSemanticProposals => "decide_semantic_proposals",
+        ToolAction::UpdateSemanticLabels => "update_semantic_labels",
+        ToolAction::ExportSemanticIndex => "export_semantic_index",
         ToolAction::RoadmapSnapshot => "roadmap_snapshot",
         ToolAction::RecordMilestone => "record_milestone",
         ToolAction::UpdateRoadmapItem => "update_roadmap_item",
@@ -1127,9 +1183,20 @@ mod tests {
             ("prepare_game_task_proposal", "medium"),
             ("propose_project_relation", "medium"),
             ("game_task_snapshot", "low"),
+            ("semantic_catalog_snapshot", "low"),
+            ("analyze_project_semantics", "low"),
+            ("semantic_node_snapshot", "low"),
+            ("resolve_semantic_targets", "low"),
+            ("propose_semantic_labels", "medium"),
+            ("decide_semantic_proposals", "medium"),
+            ("update_semantic_labels", "medium"),
+            ("export_semantic_index", "medium"),
         ] {
             let spec = spec_for_tool(tool).expect("game task builder spec");
-            assert_eq!(spec.category, "game_task_builder");
+            assert!(matches!(
+                spec.category,
+                "game_task_builder" | "project_semantics"
+            ));
             assert_eq!(spec.risk, risk);
         }
     }

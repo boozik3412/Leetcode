@@ -51,7 +51,8 @@ use crate::game_task_builder::{
     save_custom_catalog_option, DeepScanRecord, EvaluateGameTaskPrerequisitesArgs,
     GameTaskBuilderSession, PrepareGameTaskProposalArgs, PrerequisiteReport,
     ProjectMapReadinessReport, ProjectMapReadinessStatus, RefreshProjectMapDeepArgs,
-    ResolveGameTaskTargetsArgs, TargetResolutionReport, TaskManifest,
+    ResolveGameTaskTargetsArgs, SemanticTargetSuggestion, TargetResolutionReport, TaskManifest,
+    TaskTargetBinding,
 };
 use crate::game_workflows::{
     parse_workflow_kind, run_game_workflow, workflow_specs, GameWorkflowRequest,
@@ -75,9 +76,15 @@ use crate::production_validation::{
 };
 use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
 use crate::project_graph::{
-    load_project_graph, load_project_graph_selection, refresh_project_graph, save_project_graph,
-    save_project_graph_selection, selected_project_node_context_value, ProjectGraphEdge,
-    ProjectGraphEdgeKind, ProjectGraphNode, ProjectGraphNodeKind, ProjectGraphState,
+    load_project_graph, load_project_graph_selection, project_graph_fingerprint,
+    refresh_project_graph, save_project_graph, save_project_graph_selection,
+    selected_project_node_context_value, ProjectGraphEdge, ProjectGraphEdgeKind, ProjectGraphNode,
+    ProjectGraphNodeKind, ProjectGraphState,
+};
+use crate::project_semantics::{
+    analyze_project_semantics, decide_semantic_proposals, export_semantic_index,
+    load_semantic_index, semantic_catalog_map, update_semantic_labels, DecideSemanticProposalsArgs,
+    SemanticIndexState, SemanticTagGroup, UpdateSemanticLabelsArgs,
 };
 use crate::provider_health::{
     load_provider_validation_history, provider_health_report, provider_validation_plan,
@@ -346,8 +353,11 @@ pub struct LeetcodeApp {
     project_map_status: String,
     project_map_cache: Option<Arc<ProjectMapGraphCache>>,
     project_map_view_mode: ProjectMapViewMode,
+    project_map_overview_group: Option<ProjectMapGroup>,
+    project_map_overview_focus_node_id: Option<String>,
     project_map_depth: usize,
     project_map_structure_anchor_id: Option<String>,
+    project_map_structure_group: Option<ProjectMapGroup>,
     project_map_structure_page: usize,
     project_map_navigation_back: Vec<String>,
     project_map_navigation_forward: Vec<String>,
@@ -380,6 +390,10 @@ struct GameTaskBuilderUiState {
     setup_confirmation: bool,
     setup_include_mcp: bool,
     analysis_only: bool,
+    semantic_index: Option<SemanticIndexState>,
+    semantic_tag_query: String,
+    semantic_editor_node_id: Option<String>,
+    semantic_status: String,
 }
 
 #[derive(Default)]
@@ -388,6 +402,39 @@ struct ProjectMapAnalysisActions {
     retry_scan: bool,
     import_registry: bool,
     open_editor: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectAnalysisFreshness {
+    Running,
+    Current,
+    ChangesDetected,
+    Partial,
+    Failed,
+    Unknown,
+}
+
+impl ProjectAnalysisFreshness {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "идёт анализ",
+            Self::Current => "актуален",
+            Self::ChangesDetected => "есть изменения",
+            Self::Partial => "неполный",
+            Self::Failed => "ошибка",
+            Self::Unknown => "не проверен",
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            Self::Running => accent_color(),
+            Self::Current => egui::Color32::from_rgb(101, 196, 139),
+            Self::ChangesDetected | Self::Partial => egui::Color32::from_rgb(224, 176, 84),
+            Self::Failed => egui::Color32::from_rgb(226, 104, 104),
+            Self::Unknown => muted_color(),
+        }
+    }
 }
 
 impl Default for GameTaskBuilderUiState {
@@ -414,6 +461,10 @@ impl Default for GameTaskBuilderUiState {
             setup_confirmation: false,
             setup_include_mcp: true,
             analysis_only: false,
+            semantic_index: None,
+            semantic_tag_query: String::new(),
+            semantic_editor_node_id: None,
+            semantic_status: String::new(),
         }
     }
 }
@@ -881,11 +932,14 @@ struct ProjectMapGraphCache {
     graph: ProjectGraphState,
     group_counts: BTreeMap<ProjectMapGroup, usize>,
     group_edges: BTreeMap<(ProjectMapGroup, ProjectMapGroup), usize>,
+    node_groups: HashMap<String, ProjectMapGroup>,
+    group_node_ids: BTreeMap<ProjectMapGroup, Vec<String>>,
     node_indices: HashMap<String, usize>,
     incoming_edge_indices_by_node: HashMap<String, Vec<usize>>,
     outgoing_edge_indices_by_node: HashMap<String, Vec<usize>>,
     structural_children_by_node: HashMap<String, Vec<(String, usize)>>,
     structural_parent_by_node: HashMap<String, String>,
+    subtree_group_counts_by_node: HashMap<String, BTreeMap<ProjectMapGroup, usize>>,
     group_edge_kinds:
         BTreeMap<(ProjectMapGroup, ProjectMapGroup), BTreeMap<ProjectGraphEdgeKind, usize>>,
 }
@@ -913,11 +967,16 @@ impl ProjectMapGraphCache {
     fn new(workspace_root: PathBuf, graph: ProjectGraphState) -> Self {
         let mut group_counts = BTreeMap::new();
         let mut node_groups = HashMap::new();
+        let mut group_node_ids = BTreeMap::<ProjectMapGroup, Vec<String>>::new();
         let mut node_indices = HashMap::new();
         for (index, node) in graph.nodes.iter().enumerate() {
             let group = project_map_group_for_node(node);
             *group_counts.entry(group).or_default() += 1;
             node_groups.insert(node.id.clone(), group);
+            group_node_ids
+                .entry(group)
+                .or_default()
+                .push(node.id.clone());
             node_indices.insert(node.id.clone(), index);
         }
 
@@ -985,16 +1044,72 @@ impl ProjectMapGraphCache {
             children.dedup_by(|left, right| left.0 == right.0);
         }
 
+        for node_ids in group_node_ids.values_mut() {
+            node_ids.sort_by(|left_id, right_id| {
+                let left_score = project_map_node_relevance_score(
+                    &graph,
+                    &node_indices,
+                    &incoming_edge_indices_by_node,
+                    &outgoing_edge_indices_by_node,
+                    left_id,
+                );
+                let right_score = project_map_node_relevance_score(
+                    &graph,
+                    &node_indices,
+                    &incoming_edge_indices_by_node,
+                    &outgoing_edge_indices_by_node,
+                    right_id,
+                );
+                right_score.cmp(&left_score).then_with(|| {
+                    let left_label = node_indices
+                        .get(left_id)
+                        .and_then(|index| graph.nodes.get(*index))
+                        .map(|node| node.label.as_str())
+                        .unwrap_or(left_id);
+                    let right_label = node_indices
+                        .get(right_id)
+                        .and_then(|index| graph.nodes.get(*index))
+                        .map(|node| node.label.as_str())
+                        .unwrap_or(right_id);
+                    left_label.cmp(right_label)
+                })
+            });
+        }
+
+        let mut subtree_group_counts_by_node =
+            HashMap::<String, BTreeMap<ProjectMapGroup, usize>>::new();
+        for node in &graph.nodes {
+            let Some(group) = node_groups.get(&node.id).copied() else {
+                continue;
+            };
+            let mut cursor = node.id.clone();
+            let mut visited = BTreeSet::new();
+            while visited.insert(cursor.clone()) {
+                *subtree_group_counts_by_node
+                    .entry(cursor.clone())
+                    .or_default()
+                    .entry(group)
+                    .or_default() += 1;
+                let Some(parent_id) = structural_parent_by_node.get(&cursor) else {
+                    break;
+                };
+                cursor = parent_id.clone();
+            }
+        }
+
         Self {
             workspace_root,
             graph,
             group_counts,
             group_edges,
+            node_groups,
+            group_node_ids,
             node_indices,
             incoming_edge_indices_by_node,
             outgoing_edge_indices_by_node,
             structural_children_by_node,
             structural_parent_by_node,
+            subtree_group_counts_by_node,
             group_edge_kinds,
         }
     }
@@ -1944,8 +2059,11 @@ impl LeetcodeApp {
             project_map_status: String::new(),
             project_map_cache: None,
             project_map_view_mode: ProjectMapViewMode::Overview,
+            project_map_overview_group: None,
+            project_map_overview_focus_node_id: None,
             project_map_depth: 2,
             project_map_structure_anchor_id: None,
+            project_map_structure_group: None,
             project_map_structure_page: 0,
             project_map_navigation_back: Vec::new(),
             project_map_navigation_forward: Vec::new(),
@@ -1981,9 +2099,12 @@ impl LeetcodeApp {
                 self.workspace = Some(workspace);
                 self.invalidate_project_map_cache();
                 self.project_map_view_mode = ProjectMapViewMode::Overview;
+                self.project_map_overview_group = None;
+                self.project_map_overview_focus_node_id = None;
                 self.project_map_pan = egui::Vec2::ZERO;
                 self.project_map_zoom = 1.0;
                 self.project_map_structure_anchor_id = None;
+                self.project_map_structure_group = None;
                 self.project_map_structure_page = 0;
                 self.project_map_navigation_back.clear();
                 self.project_map_navigation_forward.clear();
@@ -6401,6 +6522,9 @@ impl LeetcodeApp {
 
     fn stop_run(&mut self) {
         self.agent_live_status = "Агент останавливается".to_string();
+        if self.game_task_manifest_run_active {
+            self.game_task_manifest_run_failed = true;
+        }
         if let Some(timeline) = &mut self.run_timeline {
             timeline.cancel_requested();
         }
@@ -15392,6 +15516,7 @@ impl LeetcodeApp {
             ),
         };
 
+        let mut refresh_requested = false;
         flat_section(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
@@ -15434,14 +15559,28 @@ impl LeetcodeApp {
                 chip(ui, format!("MCP: {}", readiness.mcp_server_count));
             });
             if readiness.updated_at > 0 {
-                ui.label(
-                    RichText::new(format!(
-                        "Карта обновлена {}",
-                        age_label(readiness.updated_at)
-                    ))
-                    .weak()
-                    .small(),
-                );
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Карта обновлена {}",
+                            age_label(readiness.updated_at)
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                    if scan_running {
+                        ui.spinner();
+                        ui.label(RichText::new("обновляется").weak().small());
+                    } else if ui
+                        .link(RichText::new("Обновить").small())
+                        .on_hover_text(
+                            "Получить свежий Unreal Asset Registry и перестроить Project Map в фоне.",
+                        )
+                        .clicked()
+                    {
+                        refresh_requested = true;
+                    }
+                });
             }
             if readiness.unreal_project && !readiness.changes.baseline_available {
                 ui.label(
@@ -15453,6 +15592,10 @@ impl LeetcodeApp {
                 );
             }
         });
+
+        if refresh_requested {
+            self.start_game_task_builder_scan();
+        }
 
         if !readiness.changes.is_empty() {
             flat_collapsing_section(
@@ -15631,6 +15774,7 @@ impl LeetcodeApp {
         }
 
         if let Some(scan) = last_scan.as_ref() {
+            let freshness = project_analysis_freshness(&readiness, Some(scan), scan_running);
             flat_section(ui, |ui| {
                 panel_header(
                     ui,
@@ -15638,14 +15782,26 @@ impl LeetcodeApp {
                     "Сохранённый итог глубокого анализа.",
                 );
                 ui.horizontal_wrapped(|ui| {
-                    chip(ui, scan.status.label());
+                    soft_badge(ui, freshness.label(), freshness.color());
                     if let Some(duration_ms) = scan.duration_ms {
                         chip(ui, format_history_duration_ms(duration_ms));
                     }
                     if let Some(finished_at) = scan.finished_at {
-                        ui.label(RichText::new(age_label(finished_at)).weak().small());
+                        ui.label(
+                            RichText::new(format!("проведён {}", age_label(finished_at)))
+                                .weak()
+                                .small(),
+                        );
                     }
                 });
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(project_analysis_freshness_detail(freshness, &readiness))
+                            .weak()
+                            .small(),
+                    )
+                    .wrap(),
+                );
                 ui.add(egui::Label::new(RichText::new(&scan.detail).weak().small()).wrap());
             });
         }
@@ -18133,7 +18289,7 @@ impl LeetcodeApp {
         });
         ui.label(
             RichText::new(
-                "Карта показывает только полезный срез графа. Колесо меняет масштаб, drag перемещает полотно, клик выбирает узел.",
+                "Карта показывает только полезный срез графа. Колесо меняет масштаб, drag перемещает полотно, клик открывает ветвь или выбирает узел.",
             )
             .weak(),
         );
@@ -18142,6 +18298,10 @@ impl LeetcodeApp {
         }
         ui.add_space(6.0);
         let mut focus_query_requested = false;
+        let mut show_full_structure_requested = false;
+        let mut overview_home_requested = false;
+        let mut overview_clear_focus_requested = false;
+        let mut overview_open_tree_requested = false;
         ui.horizontal_wrapped(|ui| {
             for mode in ProjectMapViewMode::ALL {
                 if ui
@@ -18153,6 +18313,7 @@ impl LeetcodeApp {
                     self.project_map_pan = egui::Vec2::ZERO;
                     self.project_map_zoom = 1.0;
                     if mode == ProjectMapViewMode::Structure {
+                        self.project_map_structure_group = None;
                         self.project_map_structure_page = 0;
                         if let Some(selected_id) = self.project_map_selected_node_id.clone() {
                             self.set_project_map_structure_anchor_for_node(&cache, &selected_id);
@@ -18201,6 +18362,23 @@ impl LeetcodeApp {
                     .on_hover_text("Сколько уровней связей показывать от выбранного узла");
                 }
                 if self.project_map_view_mode == ProjectMapViewMode::Structure {
+                    if let Some(group) = self.project_map_structure_group {
+                        ui.label(
+                            RichText::new(format!("Подсистема: {}", group.label()))
+                                .color(group.color()),
+                        )
+                        .on_hover_text(format!(
+                            "Дерево показывает только ветви, содержащие узлы подсистемы «{}».",
+                            group.label()
+                        ));
+                        if ui
+                            .small_button("Весь проект")
+                            .on_hover_text("Снять фильтр подсистемы и показать полную структуру")
+                            .clicked()
+                        {
+                            show_full_structure_requested = true;
+                        }
+                    }
                     let anchor_id = self
                         .project_map_structure_anchor_id
                         .as_deref()
@@ -18210,6 +18388,7 @@ impl LeetcodeApp {
                         anchor_id,
                         &self.project_map_hidden_node_ids,
                         self.project_map_filter,
+                        self.project_map_structure_group,
                     );
                     let page_count = child_count.div_ceil(PROJECT_MAP_STRUCTURE_PAGE_SIZE).max(1);
                     if self.project_map_structure_page >= page_count {
@@ -18251,11 +18430,57 @@ impl LeetcodeApp {
                     self.project_map_hidden_node_ids.clear();
                 }
             } else {
-                ui.label(
-                    RichText::new("клик по подсистеме — открыть её структуру")
-                        .small()
-                        .weak(),
-                );
+                if let Some(group) = self.project_map_overview_group {
+                    if ui
+                        .button("← Подсистемы")
+                        .on_hover_text("Вернуться к общей карте подсистем")
+                        .clicked()
+                    {
+                        overview_home_requested = true;
+                    }
+                    ui.label(RichText::new(group.label()).color(group.color()));
+                    if let Some(focus_id) = self.project_map_overview_focus_node_id.as_deref() {
+                        let focus_label = cache
+                            .node_indices
+                            .get(focus_id)
+                            .and_then(|index| cache.graph.nodes.get(*index))
+                            .map(|node| compact_inline(&node.label, 28))
+                            .unwrap_or_else(|| "узел удалён".to_string());
+                        ui.label(
+                            RichText::new(format!("Фокус: {focus_label}"))
+                                .small()
+                                .strong(),
+                        );
+                        if ui
+                            .small_button("Показать всю подсистему")
+                            .on_hover_text("Снять фокус с объекта, не покидая подсистему")
+                            .clicked()
+                        {
+                            overview_clear_focus_requested = true;
+                        }
+                    } else {
+                        ui.label(
+                            RichText::new("клик по объекту — показать его локальные связи")
+                                .small()
+                                .weak(),
+                        );
+                    }
+                    if ui
+                        .button("Открыть как дерево")
+                        .on_hover_text(
+                            "Перейти к файловой иерархии этой подсистемы. Семантическая карта останется доступна в «Обзоре».",
+                        )
+                        .clicked()
+                    {
+                        overview_open_tree_requested = true;
+                    }
+                } else {
+                    ui.label(
+                        RichText::new("клик по подсистеме — раскрыть её объекты и связи")
+                            .small()
+                            .weak(),
+                    );
+                }
             }
             ui.add(
                 egui::Slider::new(&mut self.project_map_zoom, 0.35..=2.4)
@@ -18264,6 +18489,44 @@ impl LeetcodeApp {
             )
             .on_hover_text("Масштаб также меняется колесом мыши над картой");
         });
+        if show_full_structure_requested {
+            self.project_map_structure_group = None;
+            self.project_map_structure_anchor_id = Some(map_root_id.clone());
+            self.project_map_structure_page = 0;
+            self.apply_project_map_selection(&workspace, &map_root_id, true);
+            self.project_map_pan = egui::Vec2::ZERO;
+            self.project_map_zoom = 1.0;
+            self.project_map_status = "показана полная структура проекта".to_string();
+        }
+        if overview_home_requested {
+            self.project_map_overview_group = None;
+            self.project_map_overview_focus_node_id = None;
+            self.project_map_pan = egui::Vec2::ZERO;
+            self.project_map_zoom = 1.0;
+            self.project_map_status = "показана общая карта подсистем".to_string();
+        }
+        if overview_clear_focus_requested {
+            self.project_map_overview_focus_node_id = None;
+            self.project_map_pan = egui::Vec2::ZERO;
+            self.project_map_zoom = 1.0;
+            self.project_map_status = "показаны ключевые объекты выбранной подсистемы".to_string();
+        }
+        if overview_open_tree_requested {
+            if let Some(group) = self.project_map_overview_group {
+                self.project_map_view_mode = ProjectMapViewMode::Structure;
+                self.project_map_filter = ProjectMapFilter::All;
+                self.project_map_structure_group = Some(group);
+                let (anchor_id, selected_id) = project_map_overview_entry_for_group(&cache, group);
+                self.project_map_structure_anchor_id = Some(anchor_id.clone());
+                self.project_map_structure_page = 0;
+                let selected_id = selected_id.unwrap_or_else(|| anchor_id.clone());
+                self.apply_project_map_selection(&workspace, &selected_id, true);
+                self.project_map_pan = egui::Vec2::ZERO;
+                self.project_map_zoom = 1.0;
+                self.project_map_status =
+                    format!("открыто файловое дерево подсистемы «{}»", group.label());
+            }
+        }
         ui.label(
             RichText::new(self.project_map_view_mode.description())
                 .small()
@@ -18274,6 +18537,7 @@ impl LeetcodeApp {
         }
         if focus_query_requested {
             if let Some(node_id) = project_map_find_node(&cache.graph, &self.project_map_query) {
+                self.project_map_structure_group = None;
                 self.select_project_map_node(&workspace, &node_id);
                 if self.project_map_view_mode == ProjectMapViewMode::Structure {
                     self.set_project_map_structure_anchor_for_node(&cache, &node_id);
@@ -18336,11 +18600,11 @@ impl LeetcodeApp {
         let mut action = None;
 
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Навигация").small().weak());
+            ui.label(RichText::new("История:").small().weak());
             if ui
                 .add_enabled(
                     !self.project_map_navigation_back.is_empty(),
-                    egui::Button::new("←"),
+                    egui::Button::new("Назад"),
                 )
                 .on_hover_text("Вернуться к предыдущему выбранному узлу")
                 .clicked()
@@ -18350,35 +18614,38 @@ impl LeetcodeApp {
             if ui
                 .add_enabled(
                     !self.project_map_navigation_forward.is_empty(),
-                    egui::Button::new("→"),
+                    egui::Button::new("Вперед"),
                 )
                 .on_hover_text("Перейти вперёд по истории карты")
                 .clicked()
             {
                 action = Some(ProjectMapNavigationAction::Forward);
             }
+            ui.separator();
+            ui.label(RichText::new("Иерархия:").small().weak());
             if ui
-                .add_enabled(parent_id.is_some(), egui::Button::new("↑"))
+                .add_enabled(parent_id.is_some(), egui::Button::new("Выше"))
                 .on_hover_text("Подняться к родительскому узлу, не меняя режим карты")
                 .clicked()
             {
                 action = Some(ProjectMapNavigationAction::Parent);
             }
             if ui
-                .button("⌂")
+                .add_enabled(focus_id != root_id, egui::Button::new("Корень"))
                 .on_hover_text("Перейти к корню проекта")
                 .clicked()
             {
                 action = Some(ProjectMapNavigationAction::Root);
             }
             ui.separator();
+            ui.label(RichText::new("Путь:").small().weak());
             let visible_start = breadcrumbs.len().saturating_sub(6);
             if visible_start > 0 {
-                ui.label(RichText::new("…").weak());
+                ui.label(RichText::new("...").weak());
             }
             for (index, node_id) in breadcrumbs.iter().enumerate().skip(visible_start) {
                 if index > visible_start {
-                    ui.label(RichText::new("›").weak());
+                    ui.label(RichText::new(">").weak());
                 }
                 let label = cache
                     .node_indices
@@ -18464,26 +18731,13 @@ impl LeetcodeApp {
         cache: &ProjectMapGraphCache,
         node_id: &str,
     ) {
-        let (anchor_id, page) = if project_map_has_structural_children(cache, node_id) {
-            (node_id.to_string(), 0)
-        } else {
-            let anchor_id = cache
-                .structural_parent_by_node
-                .get(node_id)
-                .cloned()
-                .unwrap_or_else(|| project_map_root_id(&cache.graph).to_string());
-            let page = project_map_visible_structural_children(
-                cache,
-                &anchor_id,
-                &self.project_map_hidden_node_ids,
-                self.project_map_filter,
-            )
-            .iter()
-            .position(|(child_id, _)| child_id == node_id)
-            .map(|index| index / PROJECT_MAP_STRUCTURE_PAGE_SIZE)
-            .unwrap_or_default();
-            (anchor_id, page)
-        };
+        let (anchor_id, page) = project_map_structure_anchor_target(
+            cache,
+            node_id,
+            &self.project_map_hidden_node_ids,
+            self.project_map_filter,
+            self.project_map_structure_group,
+        );
         if self.project_map_structure_anchor_id.as_deref() != Some(&anchor_id)
             || self.project_map_structure_page != page
         {
@@ -18521,13 +18775,20 @@ impl LeetcodeApp {
 
     fn draw_project_map_overview(
         &mut self,
-        _ui: &egui::Ui,
+        ui: &egui::Ui,
         rect: egui::Rect,
         response: &egui::Response,
         painter: &egui::Painter,
         workspace: &Workspace,
         cache: &ProjectMapGraphCache,
     ) {
+        if let Some(group) = self.project_map_overview_group {
+            self.draw_project_map_overview_detail(
+                ui, rect, response, painter, workspace, cache, group,
+            );
+            return;
+        }
+
         let positions = project_map_overview_positions();
         let screen_positions = positions
             .iter()
@@ -18650,13 +18911,258 @@ impl LeetcodeApp {
                 group.description()
             ));
             if response.clicked() {
-                self.project_map_view_mode = ProjectMapViewMode::Structure;
+                self.project_map_overview_group = Some(group);
+                self.project_map_overview_focus_node_id = None;
                 self.project_map_pan = egui::Vec2::ZERO;
                 self.project_map_zoom = 1.0;
-                let anchor_id = project_map_overview_anchor_for_group(cache, group);
-                self.project_map_structure_anchor_id = Some(anchor_id.clone());
-                self.project_map_structure_page = 0;
-                self.apply_project_map_selection(workspace, &anchor_id, true);
+                self.project_map_status = format!(
+                    "раскрыта подсистема «{}»: показаны её ключевые объекты и реальные связи",
+                    group.label()
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_project_map_overview_detail(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        workspace: &Workspace,
+        cache: &ProjectMapGraphCache,
+        group: ProjectMapGroup,
+    ) {
+        let focus_id = self
+            .project_map_overview_focus_node_id
+            .as_deref()
+            .filter(|id| cache.node_indices.contains_key(*id));
+        let layout = project_map_overview_detail_layout(
+            cache,
+            group,
+            focus_id,
+            &self.project_map_hidden_node_ids,
+        );
+        if layout.nodes.is_empty() {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "В этой подсистеме пока нет доступных объектов. Обновите карту или откройте файловое дерево.",
+                egui::FontId::proportional(15.0),
+                muted_color(),
+            );
+            return;
+        }
+
+        let screen_positions = layout
+            .positions
+            .iter()
+            .map(|(id, pos)| {
+                (
+                    id.clone(),
+                    project_map_to_screen(*pos, rect, self.project_map_pan, self.project_map_zoom),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let node_radii = layout
+            .nodes
+            .iter()
+            .map(|node| {
+                let visible_degree = layout
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from == node.id || edge.to == node.id)
+                    .count();
+                let radius = (27.0 + (visible_degree.max(1) as f32).ln_1p() * 4.6)
+                    * self.project_map_zoom.clamp(0.68, 1.28);
+                (node.id.clone(), radius)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let pointer = response.hover_pos();
+        let hovered_node_id = pointer.and_then(|pointer| {
+            layout.nodes.iter().find_map(|node| {
+                let center = screen_positions.get(&node.id)?;
+                let radius = node_radii.get(&node.id).copied().unwrap_or(30.0);
+                (pointer.distance(*center) <= radius + 7.0).then(|| node.id.clone())
+            })
+        });
+
+        let mut routed_edges = Vec::new();
+        let mut hovered_edge = None;
+        let mut hovered_edge_distance = f32::MAX;
+        for edge in &layout.edges {
+            let (Some(from), Some(to)) = (
+                screen_positions.get(&edge.from),
+                screen_positions.get(&edge.to),
+            ) else {
+                continue;
+            };
+            let route = project_map_circle_edge_route(
+                *from,
+                *to,
+                node_radii.get(&edge.from).copied().unwrap_or(30.0),
+                node_radii.get(&edge.to).copied().unwrap_or(30.0),
+            );
+            if let Some(pointer) = pointer {
+                let distance = distance_to_polyline(pointer, &route);
+                if distance <= 8.0 && distance < hovered_edge_distance {
+                    hovered_edge_distance = distance;
+                    hovered_edge = Some(edge.clone());
+                }
+            }
+            routed_edges.push((edge, route));
+        }
+
+        for (edge, route) in &routed_edges {
+            let incident_to_hover = hovered_node_id
+                .as_deref()
+                .is_some_and(|id| edge.from == id || edge.to == id);
+            let incident_to_focus = focus_id.is_some_and(|id| edge.from == id || edge.to == id);
+            let is_hovered = hovered_edge.as_ref().is_some_and(|item| item.id == edge.id);
+            let dimmed = hovered_node_id.is_some() && !incident_to_hover && !is_hovered;
+            let color = project_map_edge_color(
+                edge.kind,
+                is_hovered || incident_to_hover || incident_to_focus,
+                dimmed,
+            );
+            let width = if is_hovered {
+                2.8
+            } else if incident_to_hover || incident_to_focus {
+                1.9
+            } else {
+                1.0
+            };
+            draw_project_map_arrow(painter, route, egui::Stroke::new(width, color));
+        }
+
+        if let Some(edge) = &hovered_edge {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Help);
+            let from = project_graph_node_label_by_id(&cache.graph, &edge.from);
+            let to = project_graph_node_label_by_id(&cache.graph, &edge.to);
+            response
+                .clone()
+                .on_hover_text(project_map_edge_tooltip(edge, &from, &to));
+            if let Some(pointer) = pointer {
+                draw_project_map_edge_badge(
+                    painter,
+                    rect,
+                    pointer,
+                    project_graph_edge_label(edge.kind),
+                );
+            }
+        }
+
+        let mut hovered_node = None;
+        for node in &layout.nodes {
+            let Some(center) = screen_positions.get(&node.id).copied() else {
+                continue;
+            };
+            let radius = node_radii.get(&node.id).copied().unwrap_or(30.0);
+            if !rect.expand(radius + 70.0).contains(center) {
+                continue;
+            }
+            let is_hovered = hovered_node_id.as_deref() == Some(&node.id);
+            let is_focused = focus_id == Some(node.id.as_str());
+            let is_selected = self.project_map_selected_node_id.as_deref() == Some(&node.id);
+            let is_related = hovered_node_id.as_deref().is_none_or(|hovered_id| {
+                hovered_id == node.id
+                    || layout.edges.iter().any(|edge| {
+                        (edge.from == hovered_id && edge.to == node.id)
+                            || (edge.to == hovered_id && edge.from == node.id)
+                    })
+            });
+            let node_group = cache.node_groups.get(&node.id).copied().unwrap_or(group);
+            let base = node_group.color();
+            let fill = if is_related {
+                base
+            } else {
+                egui::Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), 52)
+            };
+            painter.circle_filled(center, radius, fill);
+            painter.circle_stroke(
+                center,
+                radius,
+                egui::Stroke::new(
+                    if is_hovered || is_focused || is_selected {
+                        2.6
+                    } else {
+                        1.0
+                    },
+                    if is_focused || is_selected {
+                        egui::Color32::from_rgb(77, 199, 232)
+                    } else if is_hovered {
+                        text_color()
+                    } else {
+                        border_color()
+                    },
+                ),
+            );
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                project_map_circle_badge(node.kind),
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+            painter.text(
+                center + egui::vec2(0.0, radius + 7.0),
+                egui::Align2::CENTER_TOP,
+                compact_inline(&node.label, 24),
+                egui::FontId::proportional(12.5),
+                if is_related {
+                    text_color()
+                } else {
+                    muted_color()
+                },
+            );
+            if let Some(count) = layout
+                .hidden_neighbours
+                .get(&node.id)
+                .filter(|count| **count > 0)
+            {
+                painter.text(
+                    center + egui::vec2(radius * 0.72, -radius * 0.72),
+                    egui::Align2::CENTER_CENTER,
+                    format!("+{count}"),
+                    egui::FontId::proportional(9.5),
+                    text_color(),
+                );
+            }
+            if is_hovered {
+                hovered_node = Some(node.clone());
+            }
+        }
+
+        if hovered_edge.is_none() {
+            if let Some(node) = &hovered_node {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                response.clone().on_hover_text(format!(
+                    "{}\n\nКлик — сфокусировать объект и показать его локальные связи",
+                    project_map_node_tooltip(cache, node)
+                ));
+            }
+        }
+
+        if response.clicked() {
+            if let Some(node) = hovered_node.as_ref() {
+                self.select_project_map_node(workspace, &node.id);
+                self.project_map_overview_focus_node_id = Some(node.id.clone());
+                self.project_map_pan = egui::Vec2::ZERO;
+                self.project_map_zoom = 1.0;
+                self.project_map_status = format!(
+                    "фокус «{}»: показаны входящие, исходящие и связанные объекты",
+                    node.label
+                );
+            }
+        }
+        if response.double_clicked() {
+            if let Some(node) = hovered_node {
+                if let Some(path) = node.path.as_deref() {
+                    if project_map_node_opens_file(node.kind) {
+                        self.load_file_preview(path);
+                    }
+                }
             }
         }
     }
@@ -18681,6 +19187,7 @@ impl LeetcodeApp {
             self.project_map_selected_node_id.as_deref(),
             &self.project_map_hidden_node_ids,
             self.project_map_filter,
+            self.project_map_structure_group,
             self.project_map_structure_page,
         );
         if layout.nodes.is_empty() {
@@ -18920,22 +19427,30 @@ impl LeetcodeApp {
         if response.clicked() {
             if let Some(node) = hovered_node.as_ref() {
                 self.select_project_map_node(workspace, &node.id);
+                if canvas_mode == ProjectMapViewMode::Structure {
+                    let opens_branch = !project_map_visible_structural_children(
+                        cache,
+                        &node.id,
+                        &self.project_map_hidden_node_ids,
+                        self.project_map_filter,
+                        self.project_map_structure_group,
+                    )
+                    .is_empty();
+                    self.set_project_map_structure_anchor_for_node(cache, &node.id);
+                    self.project_map_pan = egui::Vec2::ZERO;
+                    self.project_map_zoom = 1.0;
+                    if opens_branch {
+                        self.project_map_status = format!(
+                            "открыта ветвь «{}» · вернуться можно кнопкой «Назад» или по пути навигации",
+                            node.label
+                        );
+                    }
+                }
             }
         }
         if response.double_clicked() {
             if let Some(node) = hovered_node {
-                if canvas_mode == ProjectMapViewMode::Structure
-                    && project_map_has_structural_children(cache, &node.id)
-                {
-                    self.project_map_structure_anchor_id = Some(node.id.clone());
-                    self.project_map_structure_page = 0;
-                    self.project_map_pan = egui::Vec2::ZERO;
-                    self.project_map_zoom = 1.0;
-                    self.project_map_status = format!(
-                        "открыта ветвь «{}» · вернуться можно кнопкой ← или по хлебным крошкам",
-                        node.label
-                    );
-                } else if let Some(path) = node.path.as_deref() {
+                if let Some(path) = node.path.as_deref() {
                     if project_map_node_opens_file(node.kind) {
                         self.load_file_preview(path);
                     }
@@ -18991,12 +19506,21 @@ impl LeetcodeApp {
             workspace.root().to_path_buf(),
             graph,
         ));
+        if self
+            .project_map_overview_focus_node_id
+            .as_deref()
+            .is_some_and(|id| !cache.node_indices.contains_key(id))
+        {
+            self.project_map_overview_focus_node_id = None;
+        }
         self.project_map_cache = Some(cache.clone());
+        self.game_task_builder_ui.semantic_index = None;
         cache
     }
 
     fn invalidate_project_map_cache(&mut self) {
         self.project_map_cache = None;
+        self.game_task_builder_ui.semantic_index = None;
     }
 
     fn show_project_map_side_panel(&mut self, ui: &mut egui::Ui) {
@@ -19096,6 +19620,8 @@ impl LeetcodeApp {
                     .small(),
             );
         }
+
+        self.show_semantic_node_panel(ui, &workspace, graph, &node);
 
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -19215,6 +19741,300 @@ impl LeetcodeApp {
                     ui.label(compact_inline(value, 80));
                 });
             }
+        }
+    }
+
+    fn show_semantic_node_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+        graph: &ProjectGraphState,
+        node: &ProjectGraphNode,
+    ) {
+        if self.game_task_builder_ui.semantic_index.is_none() {
+            self.game_task_builder_ui.semantic_index = Some(load_semantic_index(workspace));
+        }
+        let index = self
+            .game_task_builder_ui
+            .semantic_index
+            .clone()
+            .unwrap_or_default();
+        let annotation = index
+            .nodes
+            .iter()
+            .find(|annotation| annotation.node_id == node.id)
+            .cloned();
+        let proposals = index
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.node_id == node.id && proposal.status == "pending")
+            .cloned()
+            .collect::<Vec<_>>();
+        let assignment_count = annotation
+            .as_ref()
+            .map(|annotation| annotation.assignments.len())
+            .unwrap_or_default();
+        let index_is_current = !index.graph_fingerprint.is_empty()
+            && index.graph_fingerprint == project_graph_fingerprint(graph);
+        let mut refresh_requested = false;
+        let mut decision: Option<(String, bool)> = None;
+        let mut add_tag_id = None;
+        let mut remove_tag_id = None;
+
+        ui.separator();
+        egui::CollapsingHeader::new(
+            RichText::new(format!("Смысловые метки · {assignment_count}")).strong(),
+        )
+        .id_salt(format!("semantic_node_panel:{}", node.id))
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if index_is_current {
+                    chip(ui, "синхронизированы с картой");
+                } else {
+                    ui.label(
+                        RichText::new("нужно обновить после изменений Project Map")
+                            .color(egui::Color32::from_rgb(216, 178, 95)),
+                    );
+                }
+                if ui.button("Обновить метки").clicked() {
+                    refresh_requested = true;
+                }
+            });
+
+            let catalog = semantic_catalog_map();
+            if let Some(annotation) = &annotation {
+                for assignment in &annotation.assignments {
+                    let label = catalog
+                        .get(&assignment.tag_id)
+                        .map(|definition| definition.label.as_str())
+                        .unwrap_or(assignment.tag_id.as_str());
+                    ui.horizontal_wrapped(|ui| {
+                        chip(ui, label);
+                        ui.label(
+                            RichText::new(format!(
+                                "{:.0}% · {}{}",
+                                assignment.confidence * 100.0,
+                                assignment.source.label(),
+                                if assignment.confirmed_by_user {
+                                    " · закреплено"
+                                } else {
+                                    ""
+                                }
+                            ))
+                            .weak()
+                            .small(),
+                        );
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Убрать эту метку и не предлагать её снова")
+                            .clicked()
+                        {
+                            remove_tag_id = Some(assignment.tag_id.clone());
+                        }
+                    });
+                    if let Some(evidence) = assignment.evidence.first() {
+                        ui.label(
+                            RichText::new(format!("основание: {}", evidence.detail))
+                                .weak()
+                                .small(),
+                        );
+                    }
+                }
+            }
+            if assignment_count == 0 {
+                ui.label(
+                    RichText::new(
+                        "Для узла пока нет надёжных меток. Их можно добавить вручную или получить после анализа.",
+                    )
+                    .weak(),
+                );
+            }
+
+            for proposal in &proposals {
+                ui.separator();
+                let label = catalog
+                    .get(&proposal.tag_id)
+                    .map(|definition| definition.label.as_str())
+                    .unwrap_or(proposal.tag_id.as_str());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Предложение").strong());
+                    chip(ui, label);
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.0}% · {}",
+                            proposal.confidence * 100.0,
+                            proposal.source.label()
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                });
+                ui.label(RichText::new(&proposal.reason).weak().small());
+                ui.horizontal(|ui| {
+                    if ui.button("Подтвердить").clicked() {
+                        decision = Some((proposal.id.clone(), true));
+                    }
+                    if ui.button("Отклонить").clicked() {
+                        decision = Some((proposal.id.clone(), false));
+                    }
+                });
+            }
+
+            let editor_open = self
+                .game_task_builder_ui
+                .semantic_editor_node_id
+                .as_deref()
+                == Some(node.id.as_str());
+            if ui
+                .button(if editor_open {
+                    "Закрыть редактор меток"
+                } else {
+                    "Добавить метку"
+                })
+                .clicked()
+            {
+                self.game_task_builder_ui.semantic_editor_node_id = if editor_open {
+                    None
+                } else {
+                    Some(node.id.clone())
+                };
+                self.game_task_builder_ui.semantic_tag_query.clear();
+            }
+            if editor_open {
+                ui.add(
+                    TextEdit::singleline(&mut self.game_task_builder_ui.semantic_tag_query)
+                        .hint_text("Поиск: HUD, персонаж, NPC, прицел..."),
+                );
+                let query = self
+                    .game_task_builder_ui
+                    .semantic_tag_query
+                    .trim()
+                    .to_ascii_lowercase();
+                let assigned = annotation
+                    .as_ref()
+                    .map(|annotation| {
+                        annotation
+                            .assignments
+                            .iter()
+                            .map(|assignment| assignment.tag_id.as_str())
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut definitions = catalog
+                    .values()
+                    .filter(|definition| !assigned.contains(definition.id.as_str()))
+                    .filter(|definition| {
+                        if query.is_empty() {
+                            matches!(
+                                definition.group,
+                                SemanticTagGroup::Role
+                                    | SemanticTagGroup::Capability
+                                    | SemanticTagGroup::Importance
+                            )
+                        } else {
+                            definition.label.to_ascii_lowercase().contains(&query)
+                                || definition.id.to_ascii_lowercase().contains(&query)
+                                || definition.description.to_ascii_lowercase().contains(&query)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                definitions.sort_by(|left, right| left.label.cmp(&right.label));
+                for definition in definitions.into_iter().take(12) {
+                    if ui
+                        .button(format!(
+                            "+ {} · {}",
+                            definition.label,
+                            semantic_tag_group_label(definition.group)
+                        ))
+                        .on_hover_text(format!("{}\n{}", definition.id, definition.description))
+                        .clicked()
+                    {
+                        add_tag_id = Some(definition.id.clone());
+                    }
+                }
+                if query.is_empty() {
+                    ui.label(
+                        RichText::new(
+                            "Показаны роли и возможности. Введите название подсистемы или сущности для полного поиска.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                }
+            }
+            if !self.game_task_builder_ui.semantic_status.is_empty() {
+                ui.label(
+                    RichText::new(&self.game_task_builder_ui.semantic_status)
+                        .weak()
+                        .small(),
+                );
+            }
+        });
+
+        if refresh_requested {
+            let previous = load_semantic_index(workspace);
+            match analyze_project_semantics(workspace, graph, previous, true) {
+                Ok((index, report)) => {
+                    self.game_task_builder_ui.semantic_index = Some(index);
+                    self.game_task_builder_ui.semantic_status = format!(
+                        "Метки обновлены: {} объектов, {} предложений",
+                        report.annotated_nodes, report.pending_proposals
+                    );
+                }
+                Err(error) => self.game_task_builder_ui.semantic_status = error.to_string(),
+            }
+        }
+        if let Some((proposal_id, accept)) = decision {
+            let result = decide_semantic_proposals(
+                workspace,
+                DecideSemanticProposalsArgs {
+                    proposal_ids: vec![proposal_id],
+                    accept,
+                },
+            );
+            self.game_task_builder_ui.semantic_status = if result.ok {
+                if accept {
+                    "Метка подтверждена".to_string()
+                } else {
+                    "Предложение отклонено".to_string()
+                }
+            } else {
+                result.output
+            };
+            self.game_task_builder_ui.semantic_index = Some(load_semantic_index(workspace));
+        }
+        if let Some(tag_id) = add_tag_id {
+            let result = update_semantic_labels(
+                workspace,
+                UpdateSemanticLabelsArgs {
+                    node_id: node.id.clone(),
+                    add_tag_ids: vec![tag_id],
+                    remove_tag_ids: Vec::new(),
+                },
+            );
+            self.game_task_builder_ui.semantic_status = if result.ok {
+                "Метка добавлена и закреплена пользователем".to_string()
+            } else {
+                result.output
+            };
+            self.game_task_builder_ui.semantic_index = Some(load_semantic_index(workspace));
+        }
+        if let Some(tag_id) = remove_tag_id {
+            let result = update_semantic_labels(
+                workspace,
+                UpdateSemanticLabelsArgs {
+                    node_id: node.id.clone(),
+                    add_tag_ids: Vec::new(),
+                    remove_tag_ids: vec![tag_id],
+                },
+            );
+            self.game_task_builder_ui.semantic_status = if result.ok {
+                "Метка удалена и больше не будет предлагаться автоматически".to_string()
+            } else {
+                result.output
+            };
+            self.game_task_builder_ui.semantic_index = Some(load_semantic_index(workspace));
         }
     }
 
@@ -20227,6 +21047,7 @@ impl LeetcodeApp {
         };
         self.game_task_builder_ui.setup_report = Some(unreal_setup_report(&workspace));
         self.game_task_builder_ui.readiness_report = Some(project_map_readiness(&workspace, false));
+        self.game_task_builder_ui.semantic_index = Some(load_semantic_index(&workspace));
         let state = load_game_task_builder_state(&workspace);
         self.game_task_builder_ui.last_scan = state.last_scan.clone();
         if let Some(session) = state
@@ -20269,6 +21090,8 @@ impl LeetcodeApp {
                 self.refresh_project_profiles();
                 self.game_task_builder_ui.setup_report =
                     self.workspace.as_ref().map(unreal_setup_report);
+                self.game_task_builder_ui.semantic_index =
+                    self.workspace.as_ref().map(load_semantic_index);
                 if !self
                     .workspace_mode
                     .panels()
@@ -20393,6 +21216,11 @@ impl LeetcodeApp {
                 },
             )
             .map_err(|error| error.to_string());
+            if result.is_ok() {
+                let graph = load_project_graph(&workspace);
+                let previous = load_semantic_index(&workspace);
+                let _ = analyze_project_semantics(&workspace, &graph, previous, true);
+            }
             let _ = sender.send(result);
         });
     }
@@ -20750,6 +21578,9 @@ impl LeetcodeApp {
         let mut cancel_requested = false;
         let mut confirmed_manifest: Option<TaskManifest> = None;
         let mut analysis_actions = ProjectMapAnalysisActions::default();
+        let mut semantic_refresh_requested = false;
+        let mut semantic_export_requested = false;
+        let mut semantic_decision: Option<(String, bool)> = None;
 
         ui.horizontal_wrapped(|ui| {
             ui.heading("Конструктор игровой задачи");
@@ -20769,13 +21600,164 @@ impl LeetcodeApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                        let builder_available = self.show_unreal_setup_wizard(
+                        let builder_state = load_game_task_builder_state(&workspace);
+                        let scan_running = self.game_task_builder_ui.deep_scan_rx.is_some();
+                        if show_project_map_compact_summary(
                             ui,
-                            &workspace,
                             &readiness,
-                            &mut start_scan,
-                            &mut choose_project,
-                        );
+                            builder_state.last_scan.as_ref(),
+                            scan_running,
+                        ) {
+                            start_scan = true;
+                        }
+                        ui.add_space(8.0);
+                        show_project_map_attention(ui, &readiness);
+
+                        let catalog_available = readiness.health.node_count > 0
+                            && !matches!(
+                                readiness.status,
+                                ProjectMapReadinessStatus::Uninitialized
+                                    | ProjectMapReadinessStatus::Stale
+                            );
+                        let builder_available = readiness.status
+                            == ProjectMapReadinessStatus::Ready
+                            || self.game_task_builder_ui.analysis_only
+                            || catalog_available;
+                        egui::CollapsingHeader::new(
+                            RichText::new("Сведения об анализе и окружении").strong(),
+                        )
+                        .id_salt("game_task_builder_analysis_details")
+                        .default_open(!builder_available || scan_running)
+                        .show(ui, |ui| {
+                            self.show_unreal_setup_wizard(
+                                ui,
+                                &workspace,
+                                &readiness,
+                                &mut start_scan,
+                                &mut choose_project,
+                            );
+                            analysis_actions = show_project_map_analysis_report(
+                                ui,
+                                &readiness,
+                                builder_state.last_scan.as_ref(),
+                            );
+                        });
+                        ui.add_space(8.0);
+
+                        let semantic_index = self
+                            .game_task_builder_ui
+                            .semantic_index
+                            .clone()
+                            .unwrap_or_default();
+                        let pending_semantic = semantic_index
+                            .proposals
+                            .iter()
+                            .filter(|proposal| proposal.status == "pending")
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        let automatic_assignments = semantic_index
+                            .nodes
+                            .iter()
+                            .flat_map(|annotation| annotation.assignments.iter())
+                            .filter(|assignment| !assignment.confirmed_by_user)
+                            .count();
+                        let confirmed_assignments = semantic_index
+                            .nodes
+                            .iter()
+                            .flat_map(|annotation| annotation.assignments.iter())
+                            .filter(|assignment| assignment.confirmed_by_user)
+                            .count();
+                        egui::CollapsingHeader::new(
+                            RichText::new(format!(
+                                "Смысловые метки проекта · {} объектов · {} предложений",
+                                semantic_index.nodes.len(),
+                                pending_semantic.len()
+                            ))
+                            .strong(),
+                        )
+                        .id_salt("game_task_builder_semantic_labels")
+                        .default_open(!pending_semantic.is_empty())
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(
+                                    "Метки объясняют агенту, где главный персонаж, HUD, прицел, NPC и другие игровые сущности. Они хранятся отдельно и не изменяют Unreal-ассеты.",
+                                )
+                                .weak(),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                chip(ui, format!("автоматически: {automatic_assignments}"));
+                                chip(ui, format!("подтверждено: {confirmed_assignments}"));
+                                chip(ui, format!("на проверке: {}", pending_semantic.len()));
+                                if ui.button("Пересобрать метки").clicked() {
+                                    semantic_refresh_requested = true;
+                                }
+                                if ui.button("Экспорт").on_hover_text(
+                                    "Создать .leetcode/semantic-labels.json только по явному запросу",
+                                ).clicked() {
+                                    semantic_export_requested = true;
+                                }
+                            });
+                            if !self.game_task_builder_ui.semantic_status.is_empty() {
+                                ui.label(
+                                    RichText::new(&self.game_task_builder_ui.semantic_status)
+                                        .weak()
+                                        .small(),
+                                );
+                            }
+                            let catalog = semantic_catalog_map();
+                            let labels = semantic_index
+                                .nodes
+                                .iter()
+                                .map(|annotation| {
+                                    (annotation.node_id.as_str(), annotation.label.as_str())
+                                })
+                                .collect::<BTreeMap<_, _>>();
+                            for proposal in pending_semantic.iter().take(8) {
+                                ui.separator();
+                                let node_label = labels
+                                    .get(proposal.node_id.as_str())
+                                    .copied()
+                                    .unwrap_or(proposal.node_id.as_str());
+                                let tag_label = catalog
+                                    .get(&proposal.tag_id)
+                                    .map(|definition| definition.label.as_str())
+                                    .unwrap_or(proposal.tag_id.as_str());
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new(node_label).strong());
+                                    chip(ui, tag_label);
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{:.0}% · {}",
+                                            proposal.confidence * 100.0,
+                                            proposal.source.label()
+                                        ))
+                                        .weak()
+                                        .small(),
+                                    );
+                                });
+                                ui.label(RichText::new(&proposal.reason).weak().small());
+                                ui.horizontal(|ui| {
+                                    if ui.button("Подтвердить").clicked() {
+                                        semantic_decision = Some((proposal.id.clone(), true));
+                                    }
+                                    if ui.button("Не использовать").clicked() {
+                                        semantic_decision = Some((proposal.id.clone(), false));
+                                    }
+                                });
+                            }
+                            if pending_semantic.len() > 8 {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Ещё {} предложений можно проверить после обработки первых.",
+                                        pending_semantic.len() - 8
+                                    ))
+                                    .weak()
+                                    .small(),
+                                );
+                            }
+                        });
+                        ui.add_space(8.0);
+
                         if !builder_available {
                             ui.label(
                                 RichText::new(
@@ -20786,12 +21768,6 @@ impl LeetcodeApp {
                             return;
                         }
 
-                        let builder_state = load_game_task_builder_state(&workspace);
-                        analysis_actions = show_project_map_analysis_report(
-                            ui,
-                            &readiness,
-                            builder_state.last_scan.as_ref(),
-                        );
                         let pending_relations = builder_state
                             .relation_proposals
                             .iter()
@@ -20872,6 +21848,8 @@ impl LeetcodeApp {
                                     self.game_task_builder_ui.domain_id = domain.id.clone();
                                     self.game_task_builder_ui.direction_id.clear();
                                     self.game_task_builder_ui.operation_id.clear();
+                                    self.game_task_builder_ui.target_query.clear();
+                                    self.game_task_builder_ui.selected_target_ids.clear();
                                     self.game_task_builder_ui.target_report = None;
                                     self.game_task_builder_ui.prerequisite_report = None;
                                     self.game_task_builder_ui.session = None;
@@ -20894,6 +21872,8 @@ impl LeetcodeApp {
                                         self.game_task_builder_ui.direction_id =
                                             direction.id.clone();
                                         self.game_task_builder_ui.operation_id.clear();
+                                        self.game_task_builder_ui.target_query.clear();
+                                        self.game_task_builder_ui.selected_target_ids.clear();
                                         self.game_task_builder_ui.target_report = None;
                                         self.game_task_builder_ui.prerequisite_report = None;
                                         self.game_task_builder_ui.session = None;
@@ -20909,6 +21889,7 @@ impl LeetcodeApp {
                             .find(|direction| {
                                 direction.id == self.game_task_builder_ui.direction_id
                             });
+                        let mut operation_changed = false;
                         if let Some(direction) = direction {
                             ui.separator();
                             ui.label(RichText::new("3. Операция").strong());
@@ -20919,9 +21900,12 @@ impl LeetcodeApp {
                                     if ui.selectable_label(selected, &operation.label).clicked() {
                                         self.game_task_builder_ui.operation_id =
                                             operation.id.clone();
+                                        self.game_task_builder_ui.target_query.clear();
+                                        self.game_task_builder_ui.selected_target_ids.clear();
                                         self.game_task_builder_ui.target_report = None;
                                         self.game_task_builder_ui.prerequisite_report = None;
                                         self.game_task_builder_ui.session = None;
+                                        operation_changed = true;
                                     }
                                 }
                             });
@@ -20934,6 +21918,30 @@ impl LeetcodeApp {
                                     .hint_text("Опишите особый результат или ограничение"),
                                 );
                             });
+                        }
+
+                        if operation_changed {
+                            match resolve_game_task_targets(
+                                &workspace,
+                                &ResolveGameTaskTargetsArgs {
+                                    operation_id: self
+                                        .game_task_builder_ui
+                                        .operation_id
+                                        .clone(),
+                                    query: None,
+                                    limit: Some(40),
+                                },
+                            ) {
+                                Ok(report) => {
+                                    self.game_task_builder_ui.status = report.message.clone();
+                                    self.game_task_builder_ui.target_report = Some(report);
+                                    self.game_task_builder_ui.semantic_index =
+                                        Some(load_semantic_index(&workspace));
+                                }
+                                Err(error) => {
+                                    self.game_task_builder_ui.status = error.to_string();
+                                }
+                            }
                         }
 
                         if !self.game_task_builder_ui.operation_id.is_empty() {
@@ -20964,6 +21972,8 @@ impl LeetcodeApp {
                                             self.game_task_builder_ui.status =
                                                 report.message.clone();
                                             self.game_task_builder_ui.target_report = Some(report);
+                                            self.game_task_builder_ui.semantic_index =
+                                                Some(load_semantic_index(&workspace));
                                             self.game_task_builder_ui.prerequisite_report = None;
                                             self.game_task_builder_ui.session = None;
                                         }
@@ -20984,41 +21994,97 @@ impl LeetcodeApp {
                                 ))
                                 .weak(),
                             );
-                            for candidate in report.candidates {
-                                let mut selected = self
-                                    .game_task_builder_ui
-                                    .selected_target_ids
-                                    .contains(&candidate.node_id);
-                                if ui
-                                    .checkbox(
-                                        &mut selected,
-                                        format!(
-                                            "{} · {} · {:.0}%",
-                                            candidate.label,
-                                            candidate.node_kind.as_str(),
-                                            candidate.confidence * 100.0
-                                        ),
-                                    )
-                                    .on_hover_text(format!(
-                                        "node_id: {}\nobject_path: {}\n{}",
-                                        candidate.node_id,
-                                        candidate.object_path.as_deref().unwrap_or("нет"),
-                                        candidate.reason
-                                    ))
-                                    .changed()
-                                {
-                                    if selected {
-                                        self.game_task_builder_ui
-                                            .selected_target_ids
-                                            .insert(candidate.node_id);
-                                    } else {
-                                        self.game_task_builder_ui
-                                            .selected_target_ids
-                                            .remove(&candidate.node_id);
-                                    }
+                            if !report.recommended_candidates.is_empty() {
+                                ui.add_space(6.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new("Рекомендуемые").strong());
+                                    ui.label(
+                                        RichText::new(
+                                            "по роли объекта, подсистеме и связям Project Map",
+                                        )
+                                        .weak(),
+                                    );
+                                });
+                                for suggestion in &report.recommended_candidates {
+                                    show_semantic_task_target_choice(
+                                        ui,
+                                        &mut self
+                                            .game_task_builder_ui
+                                            .selected_target_ids,
+                                        suggestion,
+                                        "Рекомендуем",
+                                    );
                                 }
                             }
-                            for excluded in report.excluded {
+                            if !report.recent_candidates.is_empty() {
+                                ui.add_space(6.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new("Недавние объекты").strong());
+                                    ui.label(
+                                        RichText::new(
+                                            "из успешно завершённых изменяющих задач",
+                                        )
+                                        .weak(),
+                                    );
+                                });
+                                for recent in &report.recent_candidates {
+                                    show_game_task_target_choice(
+                                        ui,
+                                        &mut self
+                                            .game_task_builder_ui
+                                            .selected_target_ids,
+                                        &recent.target,
+                                        Some("Недавнее"),
+                                        Some(&format!(
+                                            "Последняя операция: {}\nКонтекст: {}\nИспользовано в завершённых задачах: {}\n{}",
+                                            recent.operation_label,
+                                            recent.context_label,
+                                            recent.completed_task_count,
+                                            age_label(recent.last_completed_at)
+                                        )),
+                                    );
+                                }
+                            }
+                            if !report.related_candidates.is_empty() {
+                                ui.add_space(6.0);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(RichText::new("Связанные объекты").strong());
+                                    ui.label(
+                                        RichText::new(
+                                            "могут потребоваться вместе с основной целью",
+                                        )
+                                        .weak(),
+                                    );
+                                });
+                                for suggestion in &report.related_candidates {
+                                    show_semantic_task_target_choice(
+                                        ui,
+                                        &mut self
+                                            .game_task_builder_ui
+                                            .selected_target_ids,
+                                        suggestion,
+                                        "Связан",
+                                    );
+                                }
+                            }
+                            if !report.candidates.is_empty()
+                                && (!report.recommended_candidates.is_empty()
+                                    || !report.recent_candidates.is_empty()
+                                    || !report.related_candidates.is_empty())
+                            {
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("Все остальные совместимые").strong());
+                            }
+                            for candidate in &report.candidates {
+                                show_game_task_target_choice(
+                                    ui,
+                                    &mut self.game_task_builder_ui.selected_target_ids,
+                                    candidate,
+                                    None,
+                                    None,
+                                );
+                            }
+                            for excluded in &report.excluded {
                                 ui.label(
                                     RichText::new(format!(
                                         "Исключено: {} — {}",
@@ -21270,6 +22336,52 @@ impl LeetcodeApp {
                 self.game_task_builder_ui.status =
                     "Команда запуска Unreal Editor не найдена в профиле проекта".to_string();
             }
+        }
+        if semantic_refresh_requested {
+            let graph = load_project_graph(&workspace);
+            let previous = load_semantic_index(&workspace);
+            match analyze_project_semantics(&workspace, &graph, previous, true) {
+                Ok((index, report)) => {
+                    self.game_task_builder_ui.semantic_index = Some(index);
+                    self.game_task_builder_ui.semantic_status = format!(
+                        "Метки обновлены: {} объектов, {} предложений за {} мс",
+                        report.annotated_nodes, report.pending_proposals, report.duration_ms
+                    );
+                }
+                Err(error) => {
+                    self.game_task_builder_ui.semantic_status = error.to_string();
+                }
+            }
+        }
+        if semantic_export_requested {
+            match export_semantic_index(&workspace) {
+                Ok(path) => {
+                    self.game_task_builder_ui.semantic_status =
+                        format!("Смысловые метки экспортированы: {path}");
+                }
+                Err(error) => {
+                    self.game_task_builder_ui.semantic_status = error.to_string();
+                }
+            }
+        }
+        if let Some((proposal_id, accept)) = semantic_decision {
+            let result = decide_semantic_proposals(
+                &workspace,
+                DecideSemanticProposalsArgs {
+                    proposal_ids: vec![proposal_id],
+                    accept,
+                },
+            );
+            self.game_task_builder_ui.semantic_status = if result.ok {
+                if accept {
+                    "Метка подтверждена и будет учитываться при выборе целей".to_string()
+                } else {
+                    "Предложение отклонено и не появится после обновления".to_string()
+                }
+            } else {
+                result.output
+            };
+            self.game_task_builder_ui.semantic_index = Some(load_semantic_index(&workspace));
         }
         if cancel_requested {
             self.active_center_tab = CenterTab::Agent;
@@ -21680,6 +22792,189 @@ fn flat_section(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(8.0);
 }
 
+fn project_analysis_freshness(
+    readiness: &ProjectMapReadinessReport,
+    last_scan: Option<&DeepScanRecord>,
+    scan_running: bool,
+) -> ProjectAnalysisFreshness {
+    project_analysis_freshness_from_state(
+        readiness.status,
+        readiness.changes.baseline_available,
+        readiness.changes.total(),
+        last_scan.map(|scan| scan.status),
+        scan_running,
+    )
+}
+
+fn project_analysis_freshness_from_state(
+    readiness_status: ProjectMapReadinessStatus,
+    baseline_available: bool,
+    change_count: usize,
+    last_scan_status: Option<ProjectMapReadinessStatus>,
+    scan_running: bool,
+) -> ProjectAnalysisFreshness {
+    if scan_running
+        || readiness_status == ProjectMapReadinessStatus::Scanning
+        || last_scan_status == Some(ProjectMapReadinessStatus::Scanning)
+    {
+        return ProjectAnalysisFreshness::Running;
+    }
+    if readiness_status == ProjectMapReadinessStatus::Failed
+        || last_scan_status == Some(ProjectMapReadinessStatus::Failed)
+    {
+        return ProjectAnalysisFreshness::Failed;
+    }
+    if baseline_available && change_count > 0 {
+        return ProjectAnalysisFreshness::ChangesDetected;
+    }
+    match readiness_status {
+        ProjectMapReadinessStatus::Ready => ProjectAnalysisFreshness::Current,
+        ProjectMapReadinessStatus::Degraded => ProjectAnalysisFreshness::Partial,
+        ProjectMapReadinessStatus::Stale => ProjectAnalysisFreshness::ChangesDetected,
+        ProjectMapReadinessStatus::Uninitialized => ProjectAnalysisFreshness::Unknown,
+        ProjectMapReadinessStatus::Scanning => ProjectAnalysisFreshness::Running,
+        ProjectMapReadinessStatus::Failed => ProjectAnalysisFreshness::Failed,
+    }
+}
+
+fn project_analysis_freshness_detail(
+    freshness: ProjectAnalysisFreshness,
+    readiness: &ProjectMapReadinessReport,
+) -> String {
+    match freshness {
+        ProjectAnalysisFreshness::Running => {
+            "Leetcode обновляет Asset Registry, связи и полноту Project Map.".to_string()
+        }
+        ProjectAnalysisFreshness::Current => {
+            "После анализа входные данные проекта не менялись.".to_string()
+        }
+        ProjectAnalysisFreshness::ChangesDetected => format!(
+            "После анализа найдено {} изменений: +{} новых, ~{} изменённых, −{} удалённых.",
+            readiness.changes.total(),
+            readiness.changes.added_count,
+            readiness.changes.modified_count,
+            readiness.changes.removed_count
+        ),
+        ProjectAnalysisFreshness::Partial => {
+            "Анализ завершён, но для точных игровых операций получены не все источники данных."
+                .to_string()
+        }
+        ProjectAnalysisFreshness::Failed => {
+            "Последний глубокий проход завершился с ошибкой; сохранённая карта не удалена."
+                .to_string()
+        }
+        ProjectAnalysisFreshness::Unknown => {
+            "Контроль изменений появится после первой полной синхронизации Project Map.".to_string()
+        }
+    }
+}
+
+fn show_project_map_compact_summary(
+    ui: &mut egui::Ui,
+    readiness: &ProjectMapReadinessReport,
+    last_scan: Option<&DeepScanRecord>,
+    scan_running: bool,
+) -> bool {
+    let freshness = project_analysis_freshness(readiness, last_scan, scan_running);
+    let mut refresh_requested = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Project Map").strong());
+        soft_badge(ui, freshness.label(), freshness.color());
+        chip(
+            ui,
+            format!("готовность {}/100", readiness.health.coverage_percent),
+        );
+        if readiness.health.node_count > 0 {
+            chip(ui, format!("{} узлов", readiness.health.node_count));
+            chip(ui, format!("{} связей", readiness.health.edge_count));
+        }
+        if scan_running {
+            ui.spinner();
+        } else if ui
+            .link(RichText::new("Обновить").small())
+            .on_hover_text("Получить свежий Asset Registry и перестроить Project Map")
+            .clicked()
+        {
+            refresh_requested = true;
+        }
+    });
+    ui.label(
+        RichText::new(project_analysis_freshness_detail(freshness, readiness))
+            .small()
+            .weak(),
+    );
+    refresh_requested
+}
+
+fn show_project_map_attention(ui: &mut egui::Ui, readiness: &ProjectMapReadinessReport) {
+    let health = &readiness.health;
+    flat_section(ui, |ui| {
+        ui.label(RichText::new("Требует внимания").strong().size(18.0));
+        ui.add_space(4.0);
+
+        let mut has_attention = false;
+        if !readiness.changes.is_empty() {
+            has_attention = true;
+            ui.label(
+                RichText::new(format!(
+                    "Проект изменился после анализа: +{} новых, ~{} изменённых, −{} удалённых файлов.",
+                    readiness.changes.added_count,
+                    readiness.changes.modified_count,
+                    readiness.changes.removed_count
+                ))
+                .color(egui::Color32::from_rgb(224, 176, 84)),
+            );
+        }
+        for area in health.coverage_areas.iter().filter(|area| !area.ready) {
+            has_attention = true;
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("{}/{}", area.score, area.max_score))
+                        .monospace()
+                        .color(egui::Color32::from_rgb(224, 176, 84)),
+                );
+                ui.label(RichText::new(&area.label).strong());
+            });
+            ui.label(RichText::new(&area.detail).small().weak());
+        }
+        if health.unresolved_nodes > 0 {
+            has_attention = true;
+            ui.label(format!(
+                "{} ссылок внутри /Game пока не имеют цели в текущем Asset Registry.",
+                health.unresolved_nodes
+            ));
+        }
+        if health.ambiguous_labels > 0 {
+            has_attention = true;
+            ui.label(format!(
+                "{} имён повторяются; при работе агент будет использовать точные node_id и object_path.",
+                health.ambiguous_labels
+            ));
+        }
+        if health.dependency_cycles > 0 {
+            has_attention = true;
+            ui.label(format!(
+                "Обнаружено циклов зависимостей: {}.",
+                health.dependency_cycles
+            ));
+        }
+        if health.stale_nodes > 0 {
+            has_attention = true;
+            ui.label(format!(
+                "Узлов с устаревшими исходными данными: {}.",
+                health.stale_nodes
+            ));
+        }
+
+        if !has_attention {
+            ui.label(
+                RichText::new("Критических проблем нет. Можно переходить к выбору задачи.")
+                    .color(egui::Color32::from_rgb(101, 196, 139)),
+            );
+        }
+    });
+}
+
 fn show_project_map_analysis_report(
     ui: &mut egui::Ui,
     readiness: &ProjectMapReadinessReport,
@@ -21864,51 +23159,6 @@ fn show_project_map_analysis_report(
         }
     });
 
-    if health.unresolved_nodes > 0
-        || health.ambiguous_labels > 0
-        || health.dependency_cycles > 0
-        || health.stale_nodes > 0
-    {
-        flat_section(ui, |ui| {
-            ui.label(RichText::new("Что требуют внимания").strong());
-            if health.unresolved_nodes > 0 {
-                ui.label(format!(
-                    "{} ссылок внутри /Game пока не имеют цели в текущем snapshot.",
-                    health.unresolved_nodes
-                ));
-                ui.label(
-                    RichText::new(
-                        "Это только ссылки на ассеты самого проекта. Зависимости Unreal Engine и подключённых плагинов учитываются отдельно и больше не снижают готовность карты.",
-                    )
-                    .small()
-                    .weak(),
-                );
-            }
-            if health.ambiguous_labels > 0 {
-                ui.label(format!(
-                    "{} имён повторяются в разных папках или типах узлов.",
-                    health.ambiguous_labels
-                ));
-                ui.label(
-                    RichText::new(
-                        "Повторы не считаются ошибками. При выполнении Leetcode использует точные node_id и object_path, а при нескольких подходящих объектах попросит выбрать нужный.",
-                    )
-                    .small()
-                    .weak(),
-                );
-            }
-            if health.dependency_cycles > 0 {
-                ui.label(format!(
-                    "Обнаружено циклов зависимостей: {}.",
-                    health.dependency_cycles
-                ));
-            }
-            if health.stale_nodes > 0 {
-                ui.label(format!("Устаревших узлов: {}.", health.stale_nodes));
-            }
-        });
-    }
-
     flat_section(ui, |ui| {
         ui.label(
             RichText::new(if readiness.status == ProjectMapReadinessStatus::Ready {
@@ -21999,13 +23249,26 @@ fn show_project_map_analysis_report(
     });
 
     if let Some(scan) = last_scan {
+        let freshness = project_analysis_freshness(readiness, Some(scan), false);
         ui.label(RichText::new("Последний глубокий анализ").strong());
         ui.horizontal_wrapped(|ui| {
-            chip(ui, scan.status.label());
+            soft_badge(ui, freshness.label(), freshness.color());
             if let Some(duration_ms) = scan.duration_ms {
                 chip(ui, format_history_duration_ms(duration_ms));
             }
+            if let Some(finished_at) = scan.finished_at {
+                ui.label(
+                    RichText::new(format!("проведён {}", age_label(finished_at)))
+                        .small()
+                        .weak(),
+                );
+            }
         });
+        ui.label(
+            RichText::new(project_analysis_freshness_detail(freshness, readiness))
+                .small()
+                .weak(),
+        );
         ui.label(RichText::new(&scan.detail).small().weak());
         if registry_file_missing && scan.status != ProjectMapReadinessStatus::Scanning {
             ui.label(
@@ -22051,6 +23314,67 @@ fn flat_collapsing_section(
     ui.add_space(8.0);
 }
 
+fn right_panel_tab_button(
+    ui: &mut egui::Ui,
+    width: f32,
+    label: &str,
+    selected: bool,
+    tooltip: &str,
+) -> egui::Response {
+    let response = ui
+        .scope(|ui| {
+            let widgets = &mut ui.style_mut().visuals.widgets;
+            let inactive_fill = if selected {
+                egui::Color32::from_rgb(33, 96, 118)
+            } else {
+                egui::Color32::TRANSPARENT
+            };
+            let inactive_stroke = if selected {
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 174, 205))
+            } else {
+                egui::Stroke::NONE
+            };
+            widgets.inactive.weak_bg_fill = inactive_fill;
+            widgets.inactive.bg_stroke = inactive_stroke;
+            widgets.inactive.fg_stroke.color = if selected {
+                text_color()
+            } else {
+                muted_color()
+            };
+            widgets.hovered.weak_bg_fill = if selected {
+                egui::Color32::from_rgb(39, 111, 136)
+            } else {
+                egui::Color32::from_rgb(27, 35, 43)
+            };
+            widgets.hovered.bg_stroke = egui::Stroke::new(
+                1.0,
+                if selected {
+                    egui::Color32::from_rgb(91, 193, 222)
+                } else {
+                    egui::Color32::from_rgb(56, 73, 86)
+                },
+            );
+            widgets.hovered.fg_stroke.color = text_color();
+            widgets.hovered.expansion = 0.0;
+            widgets.active.weak_bg_fill = egui::Color32::from_rgb(30, 83, 102);
+            widgets.active.bg_stroke =
+                egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 174, 205));
+            widgets.active.fg_stroke.color = text_color();
+            widgets.active.expansion = 0.0;
+            ui.add_sized(
+                [width, 30.0],
+                egui::Button::new(RichText::new(label).small().strong())
+                    .rounding(egui::Rounding::same(6.0)),
+            )
+        })
+        .inner
+        .on_hover_text(tooltip);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    response
+}
+
 fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView, views: &[RightPanelView]) {
     let available = safe_available_width(ui, 120.0);
     let columns = if views.len() <= 3 || available >= 460.0 {
@@ -22068,37 +23392,11 @@ fn panel_switcher(ui: &mut egui::Ui, selected: &mut RightPanelView, views: &[Rig
         ui.spacing_mut().item_spacing.y = 6.0;
         for view in views.iter().copied() {
             let is_selected = *selected == view;
-            let text_color = if is_selected {
-                text_color()
-            } else {
-                muted_color()
-            };
-            let fill = if is_selected {
-                egui::Color32::from_rgb(33, 96, 118)
-            } else {
-                egui::Color32::TRANSPARENT
-            };
-            let stroke = if is_selected {
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 174, 205))
-            } else {
-                egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
-            };
-            let response = ui.add_sized(
-                [button_width, 30.0],
-                egui::Button::new(
-                    RichText::new(view.label())
-                        .small()
-                        .strong()
-                        .color(text_color),
-                )
-                .fill(fill)
-                .stroke(stroke)
-                .rounding(egui::Rounding::same(6.0)),
-            );
+            let response =
+                right_panel_tab_button(ui, button_width, view.label(), is_selected, view.tooltip());
             if response.clicked() {
                 *selected = view;
             }
-            response.on_hover_text(view.tooltip());
         }
     });
     ui.add_space(8.0);
@@ -22117,31 +23415,11 @@ fn context_panel_switcher(ui: &mut egui::Ui, selected: &mut ContextPanelTab) {
         ui.spacing_mut().item_spacing.y = 6.0;
         for tab in ContextPanelTab::ALL {
             let is_selected = *selected == tab;
-            let response = ui.add_sized(
-                [button_width, 30.0],
-                egui::Button::new(RichText::new(tab.label()).small().strong().color(
-                    if is_selected {
-                        text_color()
-                    } else {
-                        muted_color()
-                    },
-                ))
-                .fill(if is_selected {
-                    egui::Color32::from_rgb(33, 96, 118)
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
-                .stroke(if is_selected {
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(74, 174, 205))
-                } else {
-                    egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
-                })
-                .rounding(egui::Rounding::same(6.0)),
-            );
+            let response =
+                right_panel_tab_button(ui, button_width, tab.label(), is_selected, tab.tooltip());
             if response.clicked() {
                 *selected = tab;
             }
-            response.on_hover_text(tab.tooltip());
         }
     });
 
@@ -22636,6 +23914,106 @@ fn age_label(timestamp: u64) -> String {
     let now = current_unix_timestamp();
     let elapsed = Duration::from_secs(now.saturating_sub(timestamp));
     format!("{} назад", format_duration(elapsed))
+}
+
+fn show_game_task_target_choice(
+    ui: &mut egui::Ui,
+    selected_target_ids: &mut BTreeSet<String>,
+    candidate: &TaskTargetBinding,
+    badge: Option<&str>,
+    extra_hover: Option<&str>,
+) {
+    let mut selected = selected_target_ids.contains(&candidate.node_id);
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        let mut hover = format!(
+            "node_id: {}\nobject_path: {}\n{}",
+            candidate.node_id,
+            candidate.object_path.as_deref().unwrap_or("нет"),
+            candidate.reason
+        );
+        if let Some(extra_hover) = extra_hover {
+            hover.push('\n');
+            hover.push_str(extra_hover);
+        }
+        changed = ui
+            .checkbox(
+                &mut selected,
+                format!(
+                    "{} · {} · {:.0}%",
+                    candidate.label,
+                    candidate.node_kind.as_str(),
+                    candidate.confidence * 100.0
+                ),
+            )
+            .on_hover_text(hover)
+            .changed();
+        if let Some(badge) = badge {
+            ui.label(
+                RichText::new(badge)
+                    .small()
+                    .color(egui::Color32::from_rgb(82, 190, 218)),
+            );
+        }
+    });
+    if changed {
+        if selected {
+            selected_target_ids.insert(candidate.node_id.clone());
+        } else {
+            selected_target_ids.remove(&candidate.node_id);
+        }
+    }
+}
+
+fn show_semantic_task_target_choice(
+    ui: &mut egui::Ui,
+    selected_target_ids: &mut BTreeSet<String>,
+    suggestion: &SemanticTargetSuggestion,
+    badge: &str,
+) {
+    let mut details = Vec::new();
+    if !suggestion.tag_labels.is_empty() {
+        details.push(format!("Метки: {}", suggestion.tag_labels.join(", ")));
+    }
+    if !suggestion.reasons.is_empty() {
+        details.push(format!(
+            "Почему предложен: {}",
+            suggestion.reasons.join("; ")
+        ));
+    }
+    if !suggestion.relation_labels.is_empty() {
+        details.push(format!("Связи: {}", suggestion.relation_labels.join(", ")));
+    }
+    details.push(format!(
+        "Семантическое соответствие: {:.0}%",
+        suggestion.semantic_score * 100.0
+    ));
+    show_game_task_target_choice(
+        ui,
+        selected_target_ids,
+        &suggestion.target,
+        Some(badge),
+        Some(&details.join("\n")),
+    );
+    if !suggestion.tag_labels.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(24.0);
+            for label in suggestion.tag_labels.iter().take(4) {
+                ui.label(
+                    RichText::new(label)
+                        .small()
+                        .color(egui::Color32::from_rgb(124, 176, 194)),
+                );
+            }
+            if suggestion.tag_labels.len() > 4 {
+                ui.label(
+                    RichText::new(format!("+{}", suggestion.tag_labels.len() - 4))
+                        .weak()
+                        .small(),
+                );
+            }
+        });
+    }
 }
 
 fn roadmap_entry_visible(filter: RoadmapFilter, state: RoadmapEntryState) -> bool {
@@ -25713,6 +27091,424 @@ fn project_map_overview_positions() -> BTreeMap<ProjectMapGroup, egui::Pos2> {
         .collect()
 }
 
+const PROJECT_MAP_OVERVIEW_DETAIL_NODE_LIMIT: usize = 30;
+const PROJECT_MAP_OVERVIEW_DETAIL_SEED_LIMIT: usize = 12;
+const PROJECT_MAP_OVERVIEW_DETAIL_NEIGHBOURS_PER_SEED: usize = 2;
+const PROJECT_MAP_OVERVIEW_DETAIL_EDGE_LIMIT: usize = 96;
+
+fn project_map_node_relevance_score(
+    graph: &ProjectGraphState,
+    node_indices: &HashMap<String, usize>,
+    incoming_edge_indices_by_node: &HashMap<String, Vec<usize>>,
+    outgoing_edge_indices_by_node: &HashMap<String, Vec<usize>>,
+    node_id: &str,
+) -> (usize, usize, usize) {
+    let edge_indices = incoming_edge_indices_by_node
+        .get(node_id)
+        .into_iter()
+        .flatten()
+        .chain(
+            outgoing_edge_indices_by_node
+                .get(node_id)
+                .into_iter()
+                .flatten(),
+        );
+    let mut semantic_edges = 0usize;
+    let mut total_edges = 0usize;
+    for edge_index in edge_indices {
+        let Some(edge) = graph.edges.get(*edge_index) else {
+            continue;
+        };
+        total_edges += 1;
+        if !is_project_map_structural_edge(edge.kind) {
+            semantic_edges += 1;
+        }
+    }
+    let object_priority = node_indices
+        .get(node_id)
+        .and_then(|index| graph.nodes.get(*index))
+        .map(|node| match node.kind {
+            ProjectGraphNodeKind::UnrealBlueprint
+            | ProjectGraphNodeKind::UnrealAnimation
+            | ProjectGraphNodeKind::UnrealSkeleton
+            | ProjectGraphNodeKind::UnrealSkeletalMesh
+            | ProjectGraphNodeKind::UnrealStaticMesh
+            | ProjectGraphNodeKind::UnrealAnimationBlueprint
+            | ProjectGraphNodeKind::UnrealAnimationMontage
+            | ProjectGraphNodeKind::UnrealControlRig
+            | ProjectGraphNodeKind::UnrealPhysicsAsset
+            | ProjectGraphNodeKind::UnrealSound
+            | ProjectGraphNodeKind::UnrealWidget
+            | ProjectGraphNodeKind::UnrealInputAsset
+            | ProjectGraphNodeKind::UnrealMap
+            | ProjectGraphNodeKind::UnrealDataAsset
+            | ProjectGraphNodeKind::UnrealMaterial
+            | ProjectGraphNodeKind::UnrealNiagara => 3,
+            ProjectGraphNodeKind::Asset
+            | ProjectGraphNodeKind::ThreeDAsset
+            | ProjectGraphNodeKind::UnrealAsset => 2,
+            ProjectGraphNodeKind::Module
+            | ProjectGraphNodeKind::UnrealModule
+            | ProjectGraphNodeKind::UnrealSource
+            | ProjectGraphNodeKind::Symbol => 1,
+            _ => 0,
+        })
+        .unwrap_or_default();
+    (semantic_edges, object_priority, total_edges)
+}
+
+fn project_map_ranked_incident_edge_indices(
+    cache: &ProjectMapGraphCache,
+    node_id: &str,
+) -> Vec<usize> {
+    let mut indices = cache
+        .incoming_edge_indices_by_node
+        .get(node_id)
+        .into_iter()
+        .flatten()
+        .chain(
+            cache
+                .outgoing_edge_indices_by_node
+                .get(node_id)
+                .into_iter()
+                .flatten(),
+        )
+        .copied()
+        .collect::<Vec<_>>();
+    indices.sort_unstable();
+    indices.dedup();
+    indices.sort_by(|left_index, right_index| {
+        let Some(left) = cache.graph.edges.get(*left_index) else {
+            return std::cmp::Ordering::Greater;
+        };
+        let Some(right) = cache.graph.edges.get(*right_index) else {
+            return std::cmp::Ordering::Less;
+        };
+        is_project_map_structural_edge(left.kind)
+            .cmp(&is_project_map_structural_edge(right.kind))
+            .then_with(|| right.confidence.total_cmp(&left.confidence))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    indices
+}
+
+fn project_map_other_endpoint<'a>(edge: &'a ProjectGraphEdge, node_id: &str) -> Option<&'a str> {
+    if edge.from == node_id {
+        Some(edge.to.as_str())
+    } else if edge.to == node_id {
+        Some(edge.from.as_str())
+    } else {
+        None
+    }
+}
+
+fn project_map_sort_node_ids(cache: &ProjectMapGraphCache, node_ids: &mut [String]) {
+    node_ids.sort_by(|left_id, right_id| {
+        let left = cache
+            .node_indices
+            .get(left_id)
+            .and_then(|index| cache.graph.nodes.get(*index));
+        let right = cache
+            .node_indices
+            .get(right_id)
+            .and_then(|index| cache.graph.nodes.get(*index));
+        match (left, right) {
+            (Some(left), Some(right)) => project_graph_kind_sort_key(left.kind)
+                .cmp(&project_graph_kind_sort_key(right.kind))
+                .then_with(|| left.label.cmp(&right.label)),
+            _ => left_id.cmp(right_id),
+        }
+    });
+}
+
+fn place_project_map_ring(
+    positions: &mut BTreeMap<String, egui::Pos2>,
+    node_ids: &[String],
+    radius: f32,
+    angle_offset: f32,
+) {
+    if node_ids.is_empty() {
+        return;
+    }
+    if node_ids.len() == 1 && radius < 1.0 {
+        positions.insert(node_ids[0].clone(), egui::Pos2::ZERO);
+        return;
+    }
+    let step = std::f32::consts::TAU / node_ids.len() as f32;
+    for (index, node_id) in node_ids.iter().enumerate() {
+        let angle = angle_offset + index as f32 * step;
+        positions.insert(
+            node_id.clone(),
+            egui::pos2(angle.cos() * radius, angle.sin() * radius),
+        );
+    }
+}
+
+fn project_map_overview_detail_layout(
+    cache: &ProjectMapGraphCache,
+    group: ProjectMapGroup,
+    focus_node_id: Option<&str>,
+    hidden_node_ids: &BTreeSet<String>,
+) -> ProjectMapLayout {
+    let focus_node_id = focus_node_id
+        .filter(|id| cache.node_indices.contains_key(*id) && !hidden_node_ids.contains(*id));
+    let mut selected_ids = Vec::<String>::new();
+    let mut selected = BTreeSet::<String>::new();
+    let mut depths = HashMap::<String, usize>::new();
+
+    if let Some(focus_id) = focus_node_id {
+        selected.insert(focus_id.to_string());
+        selected_ids.push(focus_id.to_string());
+        depths.insert(focus_id.to_string(), 0);
+        let mut queue = VecDeque::from([(focus_id.to_string(), 0usize)]);
+        while let Some((node_id, depth)) = queue.pop_front() {
+            if depth >= 2 || selected_ids.len() >= PROJECT_MAP_OVERVIEW_DETAIL_NODE_LIMIT {
+                continue;
+            }
+            for edge_index in project_map_ranked_incident_edge_indices(cache, &node_id) {
+                let Some(edge) = cache.graph.edges.get(edge_index) else {
+                    continue;
+                };
+                let Some(neighbour_id) = project_map_other_endpoint(edge, &node_id) else {
+                    continue;
+                };
+                if hidden_node_ids.contains(neighbour_id)
+                    || !cache.node_indices.contains_key(neighbour_id)
+                {
+                    continue;
+                }
+                if selected.insert(neighbour_id.to_string()) {
+                    selected_ids.push(neighbour_id.to_string());
+                    depths.insert(neighbour_id.to_string(), depth + 1);
+                    queue.push_back((neighbour_id.to_string(), depth + 1));
+                }
+                if selected_ids.len() >= PROJECT_MAP_OVERVIEW_DETAIL_NODE_LIMIT {
+                    break;
+                }
+            }
+        }
+    } else {
+        let seeds = cache
+            .group_node_ids
+            .get(&group)
+            .into_iter()
+            .flatten()
+            .filter(|node_id| !hidden_node_ids.contains(*node_id))
+            .take(PROJECT_MAP_OVERVIEW_DETAIL_SEED_LIMIT)
+            .cloned()
+            .collect::<Vec<_>>();
+        for node_id in &seeds {
+            if selected.insert(node_id.clone()) {
+                selected_ids.push(node_id.clone());
+            }
+        }
+        for seed_id in &seeds {
+            let mut neighbours_added = 0usize;
+            let ranked_edges = project_map_ranked_incident_edge_indices(cache, seed_id);
+            for edge_index in ranked_edges.iter().copied().filter(|edge_index| {
+                cache
+                    .graph
+                    .edges
+                    .get(*edge_index)
+                    .is_some_and(|edge| !is_project_map_structural_edge(edge.kind))
+            }) {
+                let Some(edge) = cache.graph.edges.get(edge_index) else {
+                    continue;
+                };
+                let Some(neighbour_id) = project_map_other_endpoint(edge, seed_id) else {
+                    continue;
+                };
+                if hidden_node_ids.contains(neighbour_id)
+                    || !cache.node_indices.contains_key(neighbour_id)
+                {
+                    continue;
+                }
+                if selected.insert(neighbour_id.to_string()) {
+                    selected_ids.push(neighbour_id.to_string());
+                    neighbours_added += 1;
+                }
+                if neighbours_added >= PROJECT_MAP_OVERVIEW_DETAIL_NEIGHBOURS_PER_SEED
+                    || selected_ids.len() >= PROJECT_MAP_OVERVIEW_DETAIL_NODE_LIMIT
+                {
+                    break;
+                }
+            }
+            if neighbours_added == 0 {
+                for edge_index in ranked_edges {
+                    let Some(edge) = cache.graph.edges.get(edge_index) else {
+                        continue;
+                    };
+                    let Some(neighbour_id) = project_map_other_endpoint(edge, seed_id) else {
+                        continue;
+                    };
+                    if hidden_node_ids.contains(neighbour_id)
+                        || !cache.node_indices.contains_key(neighbour_id)
+                    {
+                        continue;
+                    }
+                    if selected.insert(neighbour_id.to_string()) {
+                        selected_ids.push(neighbour_id.to_string());
+                        break;
+                    }
+                }
+            }
+            if selected_ids.len() >= PROJECT_MAP_OVERVIEW_DETAIL_NODE_LIMIT {
+                break;
+            }
+        }
+    }
+
+    selected_ids.truncate(PROJECT_MAP_OVERVIEW_DETAIL_NODE_LIMIT);
+    selected = selected_ids.iter().cloned().collect();
+
+    let mut edge_indices = BTreeSet::new();
+    for node_id in &selected_ids {
+        for edge_index in project_map_ranked_incident_edge_indices(cache, node_id) {
+            let Some(edge) = cache.graph.edges.get(edge_index) else {
+                continue;
+            };
+            if selected.contains(&edge.from) && selected.contains(&edge.to) {
+                edge_indices.insert(edge_index);
+            }
+        }
+    }
+    let mut edge_indices = edge_indices.into_iter().collect::<Vec<_>>();
+    edge_indices.sort_by(|left_index, right_index| {
+        let left = &cache.graph.edges[*left_index];
+        let right = &cache.graph.edges[*right_index];
+        is_project_map_structural_edge(left.kind)
+            .cmp(&is_project_map_structural_edge(right.kind))
+            .then_with(|| right.confidence.total_cmp(&left.confidence))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    edge_indices.truncate(PROJECT_MAP_OVERVIEW_DETAIL_EDGE_LIMIT);
+    let edges = edge_indices
+        .into_iter()
+        .filter_map(|index| cache.graph.edges.get(index).cloned())
+        .collect::<Vec<_>>();
+
+    let mut positions = BTreeMap::new();
+    if let Some(focus_id) = focus_node_id {
+        positions.insert(focus_id.to_string(), egui::Pos2::ZERO);
+        let mut first_ring = selected_ids
+            .iter()
+            .filter(|node_id| depths.get(*node_id).copied() == Some(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut second_ring = selected_ids
+            .iter()
+            .filter(|node_id| depths.get(*node_id).copied().unwrap_or(2) >= 2)
+            .cloned()
+            .collect::<Vec<_>>();
+        project_map_sort_node_ids(cache, &mut first_ring);
+        project_map_sort_node_ids(cache, &mut second_ring);
+        place_project_map_ring(
+            &mut positions,
+            &first_ring,
+            270.0,
+            -std::f32::consts::FRAC_PI_2,
+        );
+        place_project_map_ring(
+            &mut positions,
+            &second_ring,
+            500.0,
+            -std::f32::consts::FRAC_PI_2 + 0.14,
+        );
+    } else if selected_ids.len() == 1 {
+        positions.insert(selected_ids[0].clone(), egui::Pos2::ZERO);
+    } else {
+        let mut primary = selected_ids
+            .iter()
+            .filter(|node_id| cache.node_groups.get(*node_id).copied() == Some(group))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut related = selected_ids
+            .iter()
+            .filter(|node_id| cache.node_groups.get(*node_id).copied() != Some(group))
+            .cloned()
+            .collect::<Vec<_>>();
+        project_map_sort_node_ids(cache, &mut primary);
+        project_map_sort_node_ids(cache, &mut related);
+        if primary.len() > PROJECT_MAP_OVERVIEW_DETAIL_SEED_LIMIT {
+            related.extend(primary.drain(PROJECT_MAP_OVERVIEW_DETAIL_SEED_LIMIT..));
+        }
+        place_project_map_ring(
+            &mut positions,
+            &primary,
+            270.0,
+            -std::f32::consts::FRAC_PI_2,
+        );
+        place_project_map_ring(
+            &mut positions,
+            &related,
+            500.0,
+            -std::f32::consts::FRAC_PI_2 + 0.14,
+        );
+    }
+
+    let mut roles = BTreeMap::new();
+    if let Some(focus_id) = focus_node_id {
+        roles.insert(focus_id.to_string(), ProjectMapNodeRole::Focus);
+        for edge in &edges {
+            if edge.to == focus_id {
+                roles
+                    .entry(edge.from.clone())
+                    .or_insert(ProjectMapNodeRole::Incoming);
+            }
+            if edge.from == focus_id {
+                roles
+                    .entry(edge.to.clone())
+                    .or_insert(ProjectMapNodeRole::Outgoing);
+            }
+        }
+    }
+
+    let visible_neighbours = selected_ids
+        .iter()
+        .map(|node_id| {
+            let neighbours = edges
+                .iter()
+                .filter_map(|edge| project_map_other_endpoint(edge, node_id))
+                .collect::<BTreeSet<_>>()
+                .len();
+            (node_id.clone(), neighbours)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let hidden_neighbours = selected_ids
+        .iter()
+        .filter_map(|node_id| {
+            let total = project_map_ranked_incident_edge_indices(cache, node_id)
+                .into_iter()
+                .filter_map(|index| cache.graph.edges.get(index))
+                .filter_map(|edge| project_map_other_endpoint(edge, node_id))
+                .collect::<BTreeSet<_>>()
+                .len();
+            let hidden =
+                total.saturating_sub(visible_neighbours.get(node_id).copied().unwrap_or_default());
+            (hidden > 0).then(|| (node_id.clone(), hidden))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let nodes = selected_ids
+        .iter()
+        .filter_map(|node_id| {
+            cache
+                .node_indices
+                .get(node_id)
+                .and_then(|index| cache.graph.nodes.get(*index))
+                .cloned()
+        })
+        .collect();
+    ProjectMapLayout {
+        nodes,
+        edges,
+        positions,
+        roles,
+        hidden_neighbours,
+        reversed_edge_ids: BTreeSet::new(),
+    }
+}
+
 fn project_map_root_id(graph: &ProjectGraphState) -> &str {
     graph
         .nodes
@@ -25809,6 +27605,7 @@ fn project_map_visible_structural_children(
     node_id: &str,
     hidden_node_ids: &BTreeSet<String>,
     filter: ProjectMapFilter,
+    group: Option<ProjectMapGroup>,
 ) -> Vec<(String, usize)> {
     cache
         .structural_children_by_node
@@ -25823,6 +27620,17 @@ fn project_map_visible_structural_children(
                 .node_indices
                 .get(child_id)
                 .and_then(|index| cache.graph.nodes.get(*index))?;
+            if group.is_some_and(|group| {
+                cache
+                    .subtree_group_counts_by_node
+                    .get(child_id)
+                    .and_then(|counts| counts.get(&group))
+                    .copied()
+                    .unwrap_or_default()
+                    == 0
+            }) {
+                return None;
+            }
             if matches!(
                 child.kind,
                 ProjectGraphNodeKind::Project | ProjectGraphNodeKind::Folder
@@ -25841,8 +27649,35 @@ fn project_map_structural_child_count(
     node_id: &str,
     hidden_node_ids: &BTreeSet<String>,
     filter: ProjectMapFilter,
+    group: Option<ProjectMapGroup>,
 ) -> usize {
-    project_map_visible_structural_children(cache, node_id, hidden_node_ids, filter).len()
+    project_map_visible_structural_children(cache, node_id, hidden_node_ids, filter, group).len()
+}
+
+fn project_map_structure_anchor_target(
+    cache: &ProjectMapGraphCache,
+    node_id: &str,
+    hidden_node_ids: &BTreeSet<String>,
+    filter: ProjectMapFilter,
+    group: Option<ProjectMapGroup>,
+) -> (String, usize) {
+    if !project_map_visible_structural_children(cache, node_id, hidden_node_ids, filter, group)
+        .is_empty()
+    {
+        return (node_id.to_string(), 0);
+    }
+    let anchor_id = cache
+        .structural_parent_by_node
+        .get(node_id)
+        .cloned()
+        .unwrap_or_else(|| project_map_root_id(&cache.graph).to_string());
+    let page =
+        project_map_visible_structural_children(cache, &anchor_id, hidden_node_ids, filter, group)
+            .iter()
+            .position(|(child_id, _)| child_id == node_id)
+            .map(|index| index / PROJECT_MAP_STRUCTURE_PAGE_SIZE)
+            .unwrap_or_default();
+    (anchor_id, page)
 }
 
 fn project_map_structural_edge<'a>(
@@ -25872,44 +27707,38 @@ fn insert_project_map_layout_node(
     positions.insert(node_id.to_string(), position);
 }
 
-fn project_map_overview_anchor_for_group(
+fn project_map_overview_entry_for_group(
     cache: &ProjectMapGraphCache,
     group: ProjectMapGroup,
-) -> String {
-    if group == ProjectMapGroup::Structure {
-        return project_map_root_id(&cache.graph).to_string();
-    }
-    cache
-        .graph
-        .nodes
-        .iter()
-        .filter(|node| project_map_group_for_node(node) == group)
-        .filter_map(|node| {
-            let child_count = cache
-                .structural_children_by_node
-                .get(&node.id)
-                .map(Vec::len)
-                .unwrap_or_default();
-            let relation_count = cache
-                .incoming_edge_indices_by_node
-                .get(&node.id)
-                .map(Vec::len)
-                .unwrap_or_default()
-                + cache
-                    .outgoing_edge_indices_by_node
-                    .get(&node.id)
-                    .map(Vec::len)
-                    .unwrap_or_default();
-            (child_count > 0).then_some((child_count, relation_count, node.id.clone()))
-        })
-        .max_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then_with(|| left.1.cmp(&right.1))
-                .then_with(|| right.2.cmp(&left.2))
-        })
-        .map(|(_, _, id)| id)
-        .unwrap_or_else(|| project_map_root_id(&cache.graph).to_string())
+) -> (String, Option<String>) {
+    let root_id = project_map_root_id(&cache.graph).to_string();
+    let selected_id = project_map_visible_structural_children(
+        cache,
+        &root_id,
+        &BTreeSet::new(),
+        ProjectMapFilter::All,
+        Some(group),
+    )
+    .into_iter()
+    .max_by(|(left_id, _), (right_id, _)| {
+        let left_count = cache
+            .subtree_group_counts_by_node
+            .get(left_id)
+            .and_then(|counts| counts.get(&group))
+            .copied()
+            .unwrap_or_default();
+        let right_count = cache
+            .subtree_group_counts_by_node
+            .get(right_id)
+            .and_then(|counts| counts.get(&group))
+            .copied()
+            .unwrap_or_default();
+        left_count
+            .cmp(&right_count)
+            .then_with(|| right_id.cmp(left_id))
+    })
+    .map(|(node_id, _)| node_id);
+    (root_id, selected_id)
 }
 
 const PROJECT_MAP_STRUCTURE_PAGE_SIZE: usize = 12;
@@ -25921,6 +27750,7 @@ fn project_map_structure_layout(
     selected_node_id: Option<&str>,
     hidden_node_ids: &BTreeSet<String>,
     filter: ProjectMapFilter,
+    group: Option<ProjectMapGroup>,
     page: usize,
 ) -> ProjectMapLayout {
     let anchor_id = if cache.node_indices.contains_key(anchor_id) {
@@ -25929,7 +27759,7 @@ fn project_map_structure_layout(
         project_map_root_id(&cache.graph)
     };
     let children =
-        project_map_visible_structural_children(cache, anchor_id, hidden_node_ids, filter);
+        project_map_visible_structural_children(cache, anchor_id, hidden_node_ids, filter, group);
     let page_count = children
         .len()
         .div_ceil(PROJECT_MAP_STRUCTURE_PAGE_SIZE)
@@ -26003,8 +27833,13 @@ fn project_map_structure_layout(
             .is_some_and(|parent_id| parent_id == anchor_id)
     });
     if let Some(preview_id) = preview_id {
-        let preview_children =
-            project_map_visible_structural_children(cache, preview_id, hidden_node_ids, filter);
+        let preview_children = project_map_visible_structural_children(
+            cache,
+            preview_id,
+            hidden_node_ids,
+            filter,
+            group,
+        );
         let selected_y = positions.get(preview_id).map_or(0.0, |position| position.y);
         let visible_preview = preview_children
             .iter()
@@ -26412,13 +28247,6 @@ fn is_project_map_structural_edge(kind: ProjectGraphEdgeKind) -> bool {
     )
 }
 
-fn project_map_has_structural_children(cache: &ProjectMapGraphCache, node_id: &str) -> bool {
-    cache
-        .structural_children_by_node
-        .get(node_id)
-        .is_some_and(|children| !children.is_empty())
-}
-
 fn project_map_node_rect(center: egui::Pos2, zoom: f32) -> egui::Rect {
     let scale = zoom.clamp(0.72, 1.18);
     egui::Rect::from_center_size(center, egui::vec2(184.0 * scale, 46.0 * scale))
@@ -26437,6 +28265,61 @@ fn project_map_edge_route(from: egui::Rect, to: egui::Rect) -> [egui::Pos2; 4] {
         egui::pos2(middle_x, end.y),
         end,
     ]
+}
+
+fn project_map_circle_edge_route(
+    from: egui::Pos2,
+    to: egui::Pos2,
+    from_radius: f32,
+    to_radius: f32,
+) -> [egui::Pos2; 4] {
+    let delta = to - from;
+    if delta.length_sq() <= f32::EPSILON {
+        return [from, from, to, to];
+    }
+    let direction = delta.normalized();
+    let start = from + direction * from_radius;
+    let end = to - direction * to_radius;
+    let route = end - start;
+    [start, start + route * 0.33, start + route * 0.66, end]
+}
+
+fn project_map_circle_badge(kind: ProjectGraphNodeKind) -> &'static str {
+    match kind {
+        ProjectGraphNodeKind::Project | ProjectGraphNodeKind::UnrealProject => "PR",
+        ProjectGraphNodeKind::Folder => "DIR",
+        ProjectGraphNodeKind::File | ProjectGraphNodeKind::UnrealSource => "FILE",
+        ProjectGraphNodeKind::Module | ProjectGraphNodeKind::UnrealModule => "MOD",
+        ProjectGraphNodeKind::Symbol => "SYM",
+        ProjectGraphNodeKind::Command => "CMD",
+        ProjectGraphNodeKind::UnrealBlueprint => "BP",
+        ProjectGraphNodeKind::UnrealAnimation => "AN",
+        ProjectGraphNodeKind::UnrealSkeleton => "SKL",
+        ProjectGraphNodeKind::UnrealSkeletalMesh => "SK",
+        ProjectGraphNodeKind::UnrealStaticMesh => "SM",
+        ProjectGraphNodeKind::UnrealAnimationBlueprint => "ABP",
+        ProjectGraphNodeKind::UnrealAnimationMontage => "MTG",
+        ProjectGraphNodeKind::UnrealControlRig => "RIG",
+        ProjectGraphNodeKind::UnrealPhysicsAsset => "PHY",
+        ProjectGraphNodeKind::UnrealMap => "MAP",
+        ProjectGraphNodeKind::UnrealMaterial => "MAT",
+        ProjectGraphNodeKind::UnrealNiagara => "VFX",
+        ProjectGraphNodeKind::UnrealSound => "SND",
+        ProjectGraphNodeKind::UnrealWidget => "UI",
+        ProjectGraphNodeKind::UnrealInputAsset => "IN",
+        ProjectGraphNodeKind::UnrealDataAsset => "DA",
+        ProjectGraphNodeKind::UnrealPlugin => "PLG",
+        ProjectGraphNodeKind::UnrealTarget => "TGT",
+        ProjectGraphNodeKind::UnrealConfig => "CFG",
+        ProjectGraphNodeKind::Memory => "MEM",
+        ProjectGraphNodeKind::RoadmapItem => "RM",
+        ProjectGraphNodeKind::GameplayPlan | ProjectGraphNodeKind::GameProductionPlan => "PLAN",
+        ProjectGraphNodeKind::GameplayRun | ProjectGraphNodeKind::VerticalSliceRun => "RUN",
+        ProjectGraphNodeKind::ProductionItem | ProjectGraphNodeKind::VerticalSlicePhase => "TASK",
+        ProjectGraphNodeKind::Asset
+        | ProjectGraphNodeKind::ThreeDAsset
+        | ProjectGraphNodeKind::UnrealAsset => "ASSET",
+    }
 }
 
 fn distance_to_segment(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
@@ -26563,7 +28446,7 @@ fn draw_project_map_lane_headers(
         ProjectMapViewMode::Structure => vec![
             (0.16, "РОДИТЕЛЬ".to_string()),
             (0.45, "ТЕКУЩАЯ ВЕТВЬ".to_string()),
-            (0.78, "ДОЧЕРНИЕ УЗЛЫ · ДВОЙНОЙ КЛИК — ВОЙТИ".to_string()),
+            (0.78, "ДОЧЕРНИЕ УЗЛЫ · КЛИК — ВОЙТИ".to_string()),
         ],
         ProjectMapViewMode::Dependencies => vec![
             (0.18, "ВХОДЯЩИЕ СВЯЗИ".to_string()),
@@ -26850,6 +28733,19 @@ fn project_graph_kind_label(kind: ProjectGraphNodeKind) -> &'static str {
         ProjectGraphNodeKind::ProductionItem => "production-задача",
         ProjectGraphNodeKind::VerticalSliceRun => "vertical slice run",
         ProjectGraphNodeKind::VerticalSlicePhase => "vertical slice фаза",
+    }
+}
+
+fn semantic_tag_group_label(group: SemanticTagGroup) -> &'static str {
+    match group {
+        SemanticTagGroup::Domain => "сфера",
+        SemanticTagGroup::System => "подсистема",
+        SemanticTagGroup::Entity => "сущность",
+        SemanticTagGroup::Role => "роль",
+        SemanticTagGroup::Capability => "возможность",
+        SemanticTagGroup::Importance => "важность",
+        SemanticTagGroup::State => "состояние",
+        SemanticTagGroup::Scope => "контур",
     }
 }
 
@@ -27563,6 +29459,48 @@ mod project_diagnostic_tests {
     }
 
     #[test]
+    fn completed_analysis_stays_current_without_project_changes() {
+        let freshness = project_analysis_freshness_from_state(
+            ProjectMapReadinessStatus::Ready,
+            true,
+            0,
+            Some(ProjectMapReadinessStatus::Stale),
+            false,
+        );
+
+        assert_eq!(freshness, ProjectAnalysisFreshness::Current);
+        assert_eq!(freshness.label(), "актуален");
+    }
+
+    #[test]
+    fn analysis_reports_changes_only_when_fingerprint_diff_exists() {
+        let freshness = project_analysis_freshness_from_state(
+            ProjectMapReadinessStatus::Stale,
+            true,
+            3,
+            Some(ProjectMapReadinessStatus::Ready),
+            false,
+        );
+
+        assert_eq!(freshness, ProjectAnalysisFreshness::ChangesDetected);
+        assert_eq!(freshness.label(), "есть изменения");
+    }
+
+    #[test]
+    fn incomplete_analysis_is_not_labeled_as_stale() {
+        let freshness = project_analysis_freshness_from_state(
+            ProjectMapReadinessStatus::Degraded,
+            true,
+            0,
+            Some(ProjectMapReadinessStatus::Degraded),
+            false,
+        );
+
+        assert_eq!(freshness, ProjectAnalysisFreshness::Partial);
+        assert_eq!(freshness.label(), "неполный");
+    }
+
+    #[test]
     fn project_map_exposes_four_distinct_views() {
         assert_eq!(ProjectMapViewMode::ALL.len(), 4);
         assert_eq!(ProjectMapViewMode::Overview.label(), "Обзор");
@@ -27581,6 +29519,7 @@ mod project_diagnostic_tests {
             Some("asset:hero"),
             &BTreeSet::new(),
             ProjectMapFilter::All,
+            None,
             0,
         );
 
@@ -27589,6 +29528,127 @@ mod project_diagnostic_tests {
         let hero = layout.positions["asset:hero"];
         assert!(root.x < content.x && content.x < hero.x);
         assert_eq!(layout.edges.len(), 2);
+        assert_eq!(layout.roles["asset:hero"], ProjectMapNodeRole::Focus);
+    }
+
+    #[test]
+    fn project_map_leaf_selection_stays_in_its_parent_branch() {
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), project_map_test_graph());
+
+        let (anchor_id, page) = project_map_structure_anchor_target(
+            &cache,
+            "asset:hero",
+            &BTreeSet::new(),
+            ProjectMapFilter::All,
+            None,
+        );
+
+        assert_eq!(anchor_id, "folder:Content");
+        assert_eq!(page, 0);
+    }
+
+    #[test]
+    fn project_map_overview_groups_open_distinct_semantic_branches() {
+        let mut graph = project_map_test_graph();
+        graph.nodes.extend([
+            project_map_test_node("folder:Source", "Source", ProjectGraphNodeKind::Folder),
+            project_map_test_node(
+                "source:game-mode",
+                "GameMode.cpp",
+                ProjectGraphNodeKind::UnrealSource,
+            ),
+            project_map_test_node(
+                "folder:Characters",
+                "Characters",
+                ProjectGraphNodeKind::Folder,
+            ),
+        ]);
+        graph.edges.extend([
+            project_map_test_edge(
+                "contains-source",
+                "project:root",
+                "folder:Source",
+                ProjectGraphEdgeKind::Contains,
+            ),
+            project_map_test_edge(
+                "contains-game-mode",
+                "folder:Source",
+                "source:game-mode",
+                ProjectGraphEdgeKind::Contains,
+            ),
+            project_map_test_edge(
+                "contains-characters",
+                "project:root",
+                "folder:Characters",
+                ProjectGraphEdgeKind::Contains,
+            ),
+            project_map_test_edge(
+                "contains-skeleton",
+                "folder:Characters",
+                "asset:skeleton",
+                ProjectGraphEdgeKind::Contains,
+            ),
+        ]);
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), graph);
+
+        let (_, world_entry) =
+            project_map_overview_entry_for_group(&cache, ProjectMapGroup::WorldGameplay);
+        let (_, code_entry) = project_map_overview_entry_for_group(&cache, ProjectMapGroup::Code);
+        let (_, character_entry) =
+            project_map_overview_entry_for_group(&cache, ProjectMapGroup::CharactersAnimation);
+
+        assert_eq!(world_entry.as_deref(), Some("folder:Content"));
+        assert_eq!(code_entry.as_deref(), Some("folder:Source"));
+        assert_eq!(character_entry.as_deref(), Some("folder:Characters"));
+
+        let code_layout = project_map_structure_layout(
+            &cache,
+            "project:root",
+            code_entry.as_deref(),
+            &BTreeSet::new(),
+            ProjectMapFilter::All,
+            Some(ProjectMapGroup::Code),
+            0,
+        );
+        assert!(code_layout.positions.contains_key("folder:Source"));
+        assert!(!code_layout.positions.contains_key("folder:Content"));
+        assert!(!code_layout.positions.contains_key("folder:Characters"));
+    }
+
+    #[test]
+    fn project_map_overview_drilldown_shows_semantic_objects_instead_of_file_tree() {
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), project_map_test_graph());
+
+        let layout = project_map_overview_detail_layout(
+            &cache,
+            ProjectMapGroup::CharactersAnimation,
+            None,
+            &BTreeSet::new(),
+        );
+
+        assert!(layout.positions.contains_key("asset:mesh"));
+        assert!(layout.positions.contains_key("asset:skeleton"));
+        assert!(layout.positions.contains_key("asset:hero"));
+        assert!(!layout.positions.contains_key("project:root"));
+        assert!(layout.edges.iter().any(|edge| edge.id == "hero-mesh"));
+        assert!(layout.edges.iter().any(|edge| edge.id == "mesh-skeleton"));
+    }
+
+    #[test]
+    fn project_map_overview_node_focus_expands_two_levels_of_relations() {
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), project_map_test_graph());
+
+        let layout = project_map_overview_detail_layout(
+            &cache,
+            ProjectMapGroup::CharactersAnimation,
+            Some("asset:hero"),
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(layout.positions["asset:hero"], egui::Pos2::ZERO);
+        assert!(layout.positions.contains_key("asset:controller"));
+        assert!(layout.positions.contains_key("asset:mesh"));
+        assert!(layout.positions.contains_key("asset:skeleton"));
         assert_eq!(layout.roles["asset:hero"], ProjectMapNodeRole::Focus);
     }
 
@@ -27663,6 +29723,7 @@ mod project_diagnostic_tests {
             None,
             &BTreeSet::new(),
             ProjectMapFilter::All,
+            None,
             1,
         );
 

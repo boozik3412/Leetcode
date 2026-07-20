@@ -1790,6 +1790,79 @@ fn game_task_builder_schema_variants() -> Vec<Value> {
             &["from_node_id", "to_node_id", "kind", "reason"],
         ),
         strict_act_variant("game_task_snapshot", Vec::new(), &[]),
+        strict_act_variant(
+            "semantic_catalog_snapshot",
+            vec![(
+                "group",
+                json!({ "type": "string", "enum": ["domain", "system", "entity", "role", "capability", "importance", "state", "scope"] }),
+            )],
+            &[],
+        ),
+        strict_act_variant(
+            "analyze_project_semantics",
+            vec![("force", json!({ "type": "boolean" }))],
+            &[],
+        ),
+        strict_act_variant(
+            "semantic_node_snapshot",
+            vec![("node_id", json!({ "type": "string" }))],
+            &["node_id"],
+        ),
+        strict_act_variant(
+            "resolve_semantic_targets",
+            vec![
+                ("operation_id", json!({ "type": "string" })),
+                ("query", json!({ "type": "string" })),
+                (
+                    "limit",
+                    json!({ "type": "integer", "minimum": 1, "maximum": 100 }),
+                ),
+            ],
+            &["operation_id"],
+        ),
+        strict_act_variant(
+            "propose_semantic_labels",
+            vec![
+                ("node_id", json!({ "type": "string" })),
+                (
+                    "tag_ids",
+                    json!({ "type": "array", "items": { "type": "string" }, "minItems": 1 }),
+                ),
+                ("reason", json!({ "type": "string" })),
+                (
+                    "confidence",
+                    json!({ "type": "number", "minimum": 0, "maximum": 1 }),
+                ),
+            ],
+            &["node_id", "tag_ids", "reason"],
+        ),
+        strict_act_variant(
+            "decide_semantic_proposals",
+            vec![
+                (
+                    "proposal_ids",
+                    json!({ "type": "array", "items": { "type": "string" }, "minItems": 1 }),
+                ),
+                ("accept", json!({ "type": "boolean" })),
+            ],
+            &["proposal_ids", "accept"],
+        ),
+        strict_act_variant(
+            "update_semantic_labels",
+            vec![
+                ("node_id", json!({ "type": "string" })),
+                (
+                    "add_tag_ids",
+                    json!({ "type": "array", "items": { "type": "string" } }),
+                ),
+                (
+                    "remove_tag_ids",
+                    json!({ "type": "array", "items": { "type": "string" } }),
+                ),
+            ],
+            &["node_id"],
+        ),
+        strict_act_variant("export_semantic_index", Vec::new(), &[]),
     ]
 }
 
@@ -1922,6 +1995,14 @@ pub fn gemini_act_function_declaration() -> Value {
                         "prepare_game_task_proposal",
                         "propose_project_relation",
                         "game_task_snapshot",
+                        "semantic_catalog_snapshot",
+                        "analyze_project_semantics",
+                        "semantic_node_snapshot",
+                        "resolve_semantic_targets",
+                        "propose_semantic_labels",
+                        "decide_semantic_proposals",
+                        "update_semantic_labels",
+                        "export_semantic_index",
                         "roadmap_snapshot",
                         "record_milestone",
                         "update_roadmap_item",
@@ -2051,6 +2132,14 @@ fn act_compatible_parameters_schema() -> Value {
                     "prepare_game_task_proposal",
                     "propose_project_relation",
                     "game_task_snapshot",
+                    "semantic_catalog_snapshot",
+                    "analyze_project_semantics",
+                    "semantic_node_snapshot",
+                    "resolve_semantic_targets",
+                    "propose_semantic_labels",
+                    "decide_semantic_proposals",
+                    "update_semantic_labels",
+                    "export_semantic_index",
                     "roadmap_snapshot",
                     "record_milestone",
                     "update_roadmap_item",

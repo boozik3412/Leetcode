@@ -35,6 +35,11 @@ use crate::memory::{
     UpdateTaskStatusArgs, UpsertTaskArgs,
 };
 use crate::project_graph::ProjectGraphSnapshotArgs;
+use crate::project_semantics::{
+    AnalyzeProjectSemanticsArgs, DecideSemanticProposalsArgs, ExportSemanticIndexArgs,
+    ProposeSemanticLabelsArgs, ResolveSemanticTargetsArgs, SemanticCatalogSnapshotArgs,
+    SemanticNodeSnapshotArgs, UpdateSemanticLabelsArgs,
+};
 use crate::provider_health;
 use crate::roadmap::{
     ExportRoadmapArgs, PlanRoadmapItemArgs, RecordMilestoneArgs, RoadmapSnapshotArgs,
@@ -1321,6 +1326,108 @@ impl ToolDispatcher {
                 };
                 crate::game_task_builder::game_task_snapshot(workspace)
             }
+            ToolAction::SemanticCatalogSnapshot => {
+                match serde_json::from_value::<SemanticCatalogSnapshotArgs>(request.args) {
+                    Ok(args) => crate::project_semantics::semantic_catalog_snapshot(args),
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
+            ToolAction::AnalyzeProjectSemantics => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<AnalyzeProjectSemanticsArgs>(request.args) {
+                    Ok(args) => crate::project_semantics::analyze_semantics(workspace, args),
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
+            ToolAction::SemanticNodeSnapshot => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<SemanticNodeSnapshotArgs>(request.args) {
+                    Ok(args) => crate::project_semantics::semantic_node_snapshot(workspace, args),
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
+            ToolAction::ResolveSemanticTargets => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<ResolveSemanticTargetsArgs>(request.args) {
+                    Ok(args) => crate::project_semantics::resolve_semantic_targets(workspace, args),
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
+            ToolAction::ProposeSemanticLabels => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<ProposeSemanticLabelsArgs>(request.args) {
+                    Ok(args) => crate::project_semantics::propose_semantic_labels(workspace, args),
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
+            ToolAction::DecideSemanticProposals => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<DecideSemanticProposalsArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write(
+                            "Подтвердить смысловые метки проекта",
+                            format!(
+                                "Решение затронет {} предложений; Unreal-ассеты не изменяются",
+                                args.proposal_ids.len()
+                            ),
+                        ) {
+                            return ToolResult::error(
+                                "decide_semantic_proposals отклонён пользователем",
+                            );
+                        }
+                        crate::project_semantics::decide_semantic_proposals(workspace, args)
+                    }
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
+            ToolAction::UpdateSemanticLabels => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<UpdateSemanticLabelsArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write(
+                            "Изменить смысловые метки проекта",
+                            format!("Узел Project Map: {}", args.node_id),
+                        ) {
+                            return ToolResult::error(
+                                "update_semantic_labels отклонён пользователем",
+                            );
+                        }
+                        crate::project_semantics::update_semantic_labels(workspace, args)
+                    }
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
+            ToolAction::ExportSemanticIndex => {
+                let Some(workspace) = &self.workspace else {
+                    return ToolResult::error("Рабочая папка не выбрана");
+                };
+                match serde_json::from_value::<ExportSemanticIndexArgs>(request.args) {
+                    Ok(args) => {
+                        if !self.approve_write(
+                            "Экспортировать смысловые метки",
+                            ".leetcode/semantic-labels.json",
+                        ) {
+                            return ToolResult::error(
+                                "export_semantic_index отклонён пользователем",
+                            );
+                        }
+                        crate::project_semantics::export_semantics(workspace, args)
+                    }
+                    Err(error) => ToolResult::error(error.to_string()),
+                }
+            }
             ToolAction::RoadmapSnapshot => {
                 let Some(workspace) = &self.workspace else {
                     return ToolResult::error("Рабочая папка не выбрана");
@@ -1798,6 +1905,10 @@ fn action_is_blocked_by_active_self_improvement(action: &ToolAction) -> bool {
             | ToolAction::ResolveGameTaskTargets
             | ToolAction::EvaluateGameTaskPrerequisites
             | ToolAction::GameTaskSnapshot
+            | ToolAction::SemanticCatalogSnapshot
+            | ToolAction::AnalyzeProjectSemantics
+            | ToolAction::SemanticNodeSnapshot
+            | ToolAction::ResolveSemanticTargets
             | ToolAction::UnrealSnapshot
             | ToolAction::GameProductionSnapshot
             | ToolAction::EvaluateProductionGate

@@ -5,6 +5,9 @@ use crate::project_graph::{
     ProjectGraphEdge, ProjectGraphEdgeKind, ProjectGraphNode, ProjectGraphNodeKind,
     ProjectGraphState, PROJECT_GRAPH_PATH,
 };
+use crate::project_semantics::{
+    ensure_semantic_index, rank_semantic_candidates, semantic_catalog_map, SemanticCandidateScore,
+};
 use crate::unreal::unreal_snapshot;
 use crate::unreal_intelligence::{
     scan_unreal_project, UnrealProjectInput, GENERATED_ASSET_REGISTRY_PATH,
@@ -26,6 +29,8 @@ pub const GAME_TASK_DEEP_SCAN_SCRIPT_PATH: &str =
 
 const MAX_STATE_BYTES: usize = 4_000_000;
 const MAX_REPORTED_PROJECT_CHANGES: usize = 80;
+const MAX_RECENT_TASK_TARGETS: usize = 64;
+const MAX_RECENT_TARGET_SUGGESTIONS: usize = 6;
 const CATALOG_SCHEMA_VERSION: u32 = 1;
 const STATE_SCHEMA_VERSION: u32 = 1;
 const DEEP_SCAN_SCRIPT: &str = include_str!("../scripts/unreal/export_asset_registry.py");
@@ -189,7 +194,7 @@ impl ProjectMapReadinessStatus {
             Self::Scanning => "сканирование",
             Self::Ready => "готова",
             Self::Degraded => "неполная",
-            Self::Stale => "устарела",
+            Self::Stale => "есть изменения",
             Self::Failed => "ошибка",
         }
     }
@@ -298,9 +303,36 @@ pub struct TaskTargetBinding {
 pub struct TargetResolutionReport {
     pub operation_id: String,
     pub feasibility: TaskFeasibility,
+    #[serde(default)]
+    pub recommended_candidates: Vec<SemanticTargetSuggestion>,
+    #[serde(default)]
+    pub recent_candidates: Vec<RecentTargetSuggestion>,
+    #[serde(default)]
+    pub related_candidates: Vec<SemanticTargetSuggestion>,
     pub candidates: Vec<TaskTargetBinding>,
     pub excluded: Vec<TaskTargetBinding>,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SemanticTargetSuggestion {
+    pub target: TaskTargetBinding,
+    pub semantic_score: f32,
+    #[serde(default)]
+    pub tag_labels: Vec<String>,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub relation_labels: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecentTargetSuggestion {
+    pub target: TaskTargetBinding,
+    pub operation_label: String,
+    pub context_label: String,
+    pub last_completed_at: u64,
+    pub completed_task_count: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -393,6 +425,17 @@ pub struct TaskManifest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecentTaskTarget {
+    pub target: TaskTargetBinding,
+    pub domain_id: String,
+    pub direction_id: String,
+    pub operation_id: String,
+    pub operation_label: String,
+    pub last_completed_at: u64,
+    pub completed_task_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CustomCatalogOption {
     pub id: String,
     pub parent_id: String,
@@ -430,6 +473,8 @@ pub struct GameTaskBuilderState {
     #[serde(default)]
     pub manifests: Vec<TaskManifest>,
     #[serde(default)]
+    pub recent_targets: Vec<RecentTaskTarget>,
+    #[serde(default)]
     pub custom_options: Vec<CustomCatalogOption>,
     #[serde(default)]
     pub relation_proposals: Vec<ProjectRelationProposal>,
@@ -444,6 +489,7 @@ impl Default for GameTaskBuilderState {
             schema_version: STATE_SCHEMA_VERSION,
             sessions: Vec::new(),
             manifests: Vec::new(),
+            recent_targets: Vec::new(),
             custom_options: Vec::new(),
             relation_proposals: Vec::new(),
             active_session_id: None,
@@ -1072,6 +1118,9 @@ pub fn resolve_game_task_targets(
         return Ok(TargetResolutionReport {
             operation_id: operation.id,
             feasibility: TaskFeasibility::StaleContext,
+            recommended_candidates: Vec::new(),
+            recent_candidates: Vec::new(),
+            related_candidates: Vec::new(),
             candidates: Vec::new(),
             excluded: Vec::new(),
             message:
@@ -1080,6 +1129,13 @@ pub fn resolve_game_task_targets(
         });
     }
     let graph = load_project_graph(workspace);
+    let semantic_index = ensure_semantic_index(workspace, &graph)?;
+    let semantic_catalog = semantic_catalog_map();
+    let semantic_annotations = semantic_index
+        .nodes
+        .iter()
+        .map(|annotation| (annotation.node_id.as_str(), annotation))
+        .collect::<BTreeMap<_, _>>();
     let query = args
         .query
         .as_deref()
@@ -1097,6 +1153,18 @@ pub fn resolve_game_task_targets(
                     .metadata
                     .values()
                     .any(|value| value.to_ascii_lowercase().contains(&query))
+                || semantic_annotations
+                    .get(node.id.as_str())
+                    .is_some_and(|annotation| {
+                        annotation.assignments.iter().any(|assignment| {
+                            assignment.tag_id.to_ascii_lowercase().contains(&query)
+                                || semantic_catalog.get(&assignment.tag_id).is_some_and(
+                                    |definition| {
+                                        definition.label.to_ascii_lowercase().contains(&query)
+                                    },
+                                )
+                        })
+                    })
         })
         .map(|node| {
             target_binding(
@@ -1112,7 +1180,113 @@ pub fn resolve_game_task_targets(
             .total_cmp(&left.confidence)
             .then(left.label.cmp(&right.label))
     });
-    candidates.truncate(args.limit.unwrap_or(30).clamp(1, 100));
+    let candidate_count = candidates.len();
+    let state = load_game_task_builder_state(workspace);
+    let mut recent_records = state
+        .recent_targets
+        .iter()
+        .filter(|recent| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.node_id == recent.target.node_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    recent_records.sort_by(|left, right| {
+        recent_context_priority(right, &operation)
+            .cmp(&recent_context_priority(left, &operation))
+            .then(right.last_completed_at.cmp(&left.last_completed_at))
+            .then(right.completed_task_count.cmp(&left.completed_task_count))
+            .then(left.target.label.cmp(&right.target.label))
+    });
+    let mut recent_candidates = Vec::new();
+    for recent in recent_records
+        .into_iter()
+        .take(MAX_RECENT_TARGET_SUGGESTIONS)
+    {
+        let Some(candidate_index) = candidates
+            .iter()
+            .position(|candidate| candidate.node_id == recent.target.node_id)
+        else {
+            continue;
+        };
+        let mut target = candidates.remove(candidate_index);
+        target.reason = format!(
+            "Недавняя цель из успешно завершённой задачи. {}",
+            target.reason
+        );
+        let context_label = recent_context_label(&recent, &operation).to_string();
+        recent_candidates.push(RecentTargetSuggestion {
+            target,
+            operation_label: recent.operation_label,
+            context_label,
+            last_completed_at: recent.last_completed_at,
+            completed_task_count: recent.completed_task_count,
+        });
+    }
+
+    let semantic_candidate_ids = candidates
+        .iter()
+        .map(|candidate| candidate.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    let semantic_scores =
+        rank_semantic_candidates(&semantic_index, &graph, &operation, &semantic_candidate_ids);
+    let mut recommended_candidates = Vec::new();
+    let mut related_candidates = Vec::new();
+    let mut remaining_candidates = Vec::new();
+    for mut candidate in candidates {
+        let Some(score) = semantic_scores.get(&candidate.node_id) else {
+            remaining_candidates.push(candidate);
+            continue;
+        };
+        if score.direct_match && score.score >= 0.24 {
+            candidate.reason = format!(
+                "Семантически подходит к задаче. {}",
+                score.reasons.join("; ")
+            );
+            recommended_candidates.push(semantic_suggestion(candidate, score));
+        } else if score.relation_match && score.score >= 0.12 {
+            candidate.reason = format!(
+                "Связан с объектами выбранной подсистемы. {}",
+                score.reasons.join("; ")
+            );
+            related_candidates.push(semantic_suggestion(candidate, score));
+        } else {
+            remaining_candidates.push(candidate);
+        }
+    }
+    recommended_candidates.sort_by(semantic_suggestion_order);
+    related_candidates.sort_by(semantic_suggestion_order);
+    if recommended_candidates.len() > 8 {
+        remaining_candidates.extend(
+            recommended_candidates
+                .drain(8..)
+                .map(|suggestion| suggestion.target),
+        );
+    }
+    if related_candidates.len() > 8 {
+        remaining_candidates.extend(
+            related_candidates
+                .drain(8..)
+                .map(|suggestion| suggestion.target),
+        );
+    }
+    let recommended_ids = recommended_candidates
+        .iter()
+        .map(|suggestion| suggestion.target.node_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let related_ids = related_candidates
+        .iter()
+        .map(|suggestion| suggestion.target.node_id.as_str())
+        .collect::<BTreeSet<_>>();
+    remaining_candidates.retain(|candidate| {
+        !recommended_ids.contains(candidate.node_id.as_str())
+            && !related_ids.contains(candidate.node_id.as_str())
+    });
+    let limit = args.limit.unwrap_or(30).clamp(1, 100);
+    let reserved =
+        recent_candidates.len() + recommended_candidates.len() + related_candidates.len();
+    remaining_candidates.truncate(limit.saturating_sub(reserved));
 
     let excluded = graph
         .nodes
@@ -1130,7 +1304,7 @@ pub fn resolve_game_task_targets(
             )
         })
         .collect::<Vec<_>>();
-    let feasibility = match candidates.len() {
+    let feasibility = match candidate_count {
         0 => TaskFeasibility::NeedsSetup,
         1 => TaskFeasibility::Ready,
         _ => TaskFeasibility::Ambiguous,
@@ -1145,7 +1319,10 @@ pub fn resolve_game_task_targets(
             }
             _ => "Совместимая цель не найдена; выберите вариант подготовки".to_string(),
         },
-        candidates,
+        recommended_candidates,
+        recent_candidates,
+        related_candidates,
+        candidates: remaining_candidates,
         excluded,
     })
 }
@@ -1567,6 +1744,7 @@ pub fn game_task_snapshot(workspace: &Workspace) -> ToolResult {
             "active_manifest": state.active_manifest_id.as_deref().and_then(|id| state.manifests.iter().find(|manifest| manifest.id == id)),
             "pending_relation_proposals": state.relation_proposals.iter().filter(|proposal| proposal.status == "pending").collect::<Vec<_>>(),
             "custom_options": state.custom_options,
+            "recent_targets": state.recent_targets,
         }))
         .unwrap_or_else(|_| "game task snapshot".to_string()),
     )
@@ -1594,12 +1772,22 @@ pub fn finish_active_task_manifest(workspace: &Workspace, status: &str) -> anyho
     let Some(manifest_id) = state.active_manifest_id.take() else {
         return Ok(());
     };
-    let session_id = state
+    let manifest = state
         .manifests
         .iter()
         .find(|manifest| manifest.id == manifest_id)
-        .map(|manifest| manifest.session_id.clone());
-    if let Some(session_id) = session_id {
+        .cloned();
+    let session = manifest.as_ref().and_then(|manifest| {
+        state
+            .sessions
+            .iter()
+            .find(|session| session.id == manifest.session_id)
+            .cloned()
+    });
+    if let Some(session_id) = manifest
+        .as_ref()
+        .map(|manifest| manifest.session_id.clone())
+    {
         if let Some(session) = state
             .sessions
             .iter_mut()
@@ -1607,6 +1795,11 @@ pub fn finish_active_task_manifest(workspace: &Workspace, status: &str) -> anyho
         {
             session.status = status.to_string();
             session.updated_at = unix_timestamp();
+        }
+    }
+    if status == "completed" {
+        if let Some(manifest) = manifest.as_ref() {
+            record_recent_task_targets(workspace, &mut state, manifest, session.as_ref());
         }
     }
     save_game_task_builder_state(workspace, &state)?;
@@ -2147,6 +2340,30 @@ fn target_binding(node: &ProjectGraphNode, confidence: f32, reason: &str) -> Tas
     }
 }
 
+fn semantic_suggestion(
+    target: TaskTargetBinding,
+    score: &SemanticCandidateScore,
+) -> SemanticTargetSuggestion {
+    SemanticTargetSuggestion {
+        target,
+        semantic_score: score.score,
+        tag_labels: score.tag_labels.clone(),
+        reasons: score.reasons.clone(),
+        relation_labels: score.relation_labels.clone(),
+    }
+}
+
+fn semantic_suggestion_order(
+    left: &SemanticTargetSuggestion,
+    right: &SemanticTargetSuggestion,
+) -> std::cmp::Ordering {
+    right
+        .semantic_score
+        .total_cmp(&left.semantic_score)
+        .then(right.target.confidence.total_cmp(&left.target.confidence))
+        .then(left.target.label.cmp(&right.target.label))
+}
+
 fn target_score(node: &ProjectGraphNode, query: &str) -> f32 {
     let mut score = node.confidence.max(0.4);
     if !query.is_empty() && node.label.to_ascii_lowercase() == query {
@@ -2156,6 +2373,115 @@ fn target_score(node: &ProjectGraphNode, query: &str) -> f32 {
         score += 0.1;
     }
     score.min(1.0)
+}
+
+fn recent_context_priority(recent: &RecentTaskTarget, operation: &TaskOperation) -> u8 {
+    if recent.operation_id == operation.id {
+        3
+    } else if recent.direction_id == operation.direction_id {
+        2
+    } else if recent.domain_id == operation.domain_id {
+        1
+    } else {
+        0
+    }
+}
+
+fn recent_context_label(recent: &RecentTaskTarget, operation: &TaskOperation) -> &'static str {
+    match recent_context_priority(recent, operation) {
+        3 => "та же операция",
+        2 => "то же направление",
+        1 => "та же сфера",
+        _ => "другая задача проекта",
+    }
+}
+
+fn operation_records_recent_targets(operation_id: &str) -> bool {
+    !matches!(
+        operation_id.rsplit('.').next(),
+        Some("validate" | "document")
+    )
+}
+
+fn record_recent_task_targets(
+    workspace: &Workspace,
+    state: &mut GameTaskBuilderState,
+    manifest: &TaskManifest,
+    session: Option<&GameTaskBuilderSession>,
+) {
+    if !operation_records_recent_targets(&manifest.operation_id) {
+        return;
+    }
+    let graph = load_project_graph(workspace);
+    let operation = find_operation(&manifest.operation_id);
+    let domain_id = session
+        .map(|session| session.domain_id.clone())
+        .or_else(|| {
+            operation
+                .as_ref()
+                .map(|operation| operation.domain_id.clone())
+        })
+        .unwrap_or_default();
+    let direction_id = session
+        .map(|session| session.direction_id.clone())
+        .or_else(|| {
+            operation
+                .as_ref()
+                .map(|operation| operation.direction_id.clone())
+        })
+        .unwrap_or_default();
+    let operation_label = operation
+        .as_ref()
+        .map(|operation| operation.label.clone())
+        .unwrap_or_else(|| manifest.operation_id.clone());
+    let proposal_targets = session
+        .and_then(|session| session.proposal.as_ref())
+        .map(|proposal| proposal.exact_targets.as_slice())
+        .unwrap_or_default();
+    let now = unix_timestamp();
+
+    for node_id in &manifest.target_node_ids {
+        let target = graph
+            .nodes
+            .iter()
+            .find(|node| &node.id == node_id)
+            .map(|node| target_binding(node, 1.0, "Цель успешно завершённой задачи конструктора"))
+            .or_else(|| {
+                proposal_targets
+                    .iter()
+                    .find(|target| &target.node_id == node_id)
+                    .cloned()
+            });
+        let Some(target) = target else {
+            continue;
+        };
+        let completed_task_count = state
+            .recent_targets
+            .iter()
+            .find(|recent| recent.target.node_id == *node_id)
+            .map(|recent| recent.completed_task_count.saturating_add(1))
+            .unwrap_or(1);
+        state
+            .recent_targets
+            .retain(|recent| recent.target.node_id != *node_id);
+        state.recent_targets.push(RecentTaskTarget {
+            target,
+            domain_id: domain_id.clone(),
+            direction_id: direction_id.clone(),
+            operation_id: manifest.operation_id.clone(),
+            operation_label: operation_label.clone(),
+            last_completed_at: now,
+            completed_task_count,
+        });
+    }
+    state.recent_targets.sort_by(|left, right| {
+        right
+            .last_completed_at
+            .cmp(&left.last_completed_at)
+            .then(right.completed_task_count.cmp(&left.completed_task_count))
+            .then(left.target.label.cmp(&right.target.label))
+    });
+    state.recent_targets.truncate(MAX_RECENT_TASK_TARGETS);
 }
 
 fn has_related_kind(
@@ -2901,5 +3227,120 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("вне подтверждённого"));
+    }
+
+    #[test]
+    fn completed_manifest_promotes_recent_target_and_deduplicates_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        let mut player = node(
+            "player",
+            "BP_Character_Player",
+            ProjectGraphNodeKind::UnrealBlueprint,
+        );
+        player.metadata.insert(
+            "object_path".to_string(),
+            "/Game/Characters/BP_Character_Player.BP_Character_Player".to_string(),
+        );
+        let hud = node("hud", "WBP_HUD", ProjectGraphNodeKind::UnrealWidget);
+        write_graph(&workspace, vec![player, hud], Vec::new());
+        let graph = load_project_graph(&workspace);
+
+        for index in 1..=2 {
+            let manifest = TaskManifest {
+                id: format!("manifest-{index}"),
+                session_id: format!("session-{index}"),
+                operation_id: "ui_ux_accessibility.hud.modify".to_string(),
+                understood_task: "Изменить HUD персонажа".to_string(),
+                target_node_ids: vec!["player".to_string()],
+                allowed_node_ids: vec!["player".to_string()],
+                object_paths: vec![
+                    "/Game/Characters/BP_Character_Player.BP_Character_Player".to_string()
+                ],
+                selected_improvement_ids: Vec::new(),
+                selected_efficiency_ids: Vec::new(),
+                graph_fingerprint: project_graph_fingerprint(&graph),
+                confirmed_at: unix_timestamp(),
+            };
+            let mut state = load_game_task_builder_state(&workspace);
+            state.active_manifest_id = Some(manifest.id.clone());
+            state.manifests.push(manifest);
+            save_game_task_builder_state(&workspace, &state).unwrap();
+            finish_active_task_manifest(&workspace, "completed").unwrap();
+        }
+
+        let restored = load_game_task_builder_state(&workspace);
+        assert_eq!(restored.recent_targets.len(), 1);
+        assert_eq!(restored.recent_targets[0].target.node_id, "player");
+        assert_eq!(restored.recent_targets[0].completed_task_count, 2);
+
+        let report = resolve_game_task_targets(
+            &workspace,
+            &ResolveGameTaskTargetsArgs {
+                operation_id: "ui_ux_accessibility.hud.modify".to_string(),
+                query: None,
+                limit: Some(40),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.recent_candidates.len(), 1);
+        assert_eq!(report.recent_candidates[0].target.node_id, "player");
+        assert_eq!(report.recent_candidates[0].context_label, "та же операция");
+        assert!(!report
+            .candidates
+            .iter()
+            .any(|candidate| candidate.node_id == "player"));
+    }
+
+    #[test]
+    fn failed_manifest_does_not_enter_recent_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        write_graph(
+            &workspace,
+            vec![node(
+                "player",
+                "BP_Character_Player",
+                ProjectGraphNodeKind::UnrealBlueprint,
+            )],
+            Vec::new(),
+        );
+        let graph = load_project_graph(&workspace);
+        let manifest = TaskManifest {
+            id: "failed-manifest".to_string(),
+            session_id: "failed-session".to_string(),
+            operation_id: "ui_ux_accessibility.hud.modify".to_string(),
+            understood_task: "Изменить HUD персонажа".to_string(),
+            target_node_ids: vec!["player".to_string()],
+            allowed_node_ids: vec!["player".to_string()],
+            object_paths: Vec::new(),
+            selected_improvement_ids: Vec::new(),
+            selected_efficiency_ids: Vec::new(),
+            graph_fingerprint: project_graph_fingerprint(&graph),
+            confirmed_at: unix_timestamp(),
+        };
+        let mut state = GameTaskBuilderState::default();
+        state.active_manifest_id = Some(manifest.id.clone());
+        state.manifests.push(manifest);
+        save_game_task_builder_state(&workspace, &state).unwrap();
+
+        finish_active_task_manifest(&workspace, "failed").unwrap();
+
+        assert!(load_game_task_builder_state(&workspace)
+            .recent_targets
+            .is_empty());
+    }
+
+    #[test]
+    fn read_only_operations_do_not_claim_recent_modifications() {
+        assert!(operation_records_recent_targets(
+            "ui_ux_accessibility.hud.modify"
+        ));
+        assert!(!operation_records_recent_targets(
+            "ui_ux_accessibility.hud.validate"
+        ));
+        assert!(!operation_records_recent_targets(
+            "ui_ux_accessibility.hud.document"
+        ));
     }
 }

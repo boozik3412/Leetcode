@@ -58,16 +58,30 @@ The importer classifies maps, Blueprints, Data Assets, materials, Niagara system
 - manual `ui:project_map` relations survive refresh while both endpoints exist;
 - the current node selection is persisted in `project_graph_selection.json` and restored with the project.
 
+## Semantic Entity Index
+
+После построения Project Map Leetcode автоматически обновляет отдельный смысловой индекс. Он связывает реальные `node_id/object_path` с проектными понятиями: главный персонаж, NPC, HUD, прицел, Skeleton, Input, combat, movement и другими тегами из каталога игровых задач.
+
+Высокоуверенный детерминированный вывод использует Asset Registry, тип узла, путь, имя и связи графа. Неоднозначные метки становятся предложениями. AI также может только предложить метку; пользователь подтверждает, отклоняет или исправляет её в Project Map либо в конструкторе. Пользовательские решения сохраняются отдельно от Unreal и переживают incremental refresh.
+
+Смысловой индекс влияет только на поиск и порядок уже совместимых целей. Он не ослабляет `TargetContract`, не меняет Unreal-ассеты и не расширяет подтверждённый `TaskManifest`. Полный формат и инструменты описаны в `docs/PROJECT_SEMANTICS.md`.
+
 ## Agent And MCP Context
 
 Selecting a Project Map node makes it active task context. The context contains the exact serialized node, up to 40 incident edges, and neighbouring nodes.
 
-The desktop map keeps the parsed graph plus incoming, outgoing and structural `contains/declares` indexes in a workspace-scoped cache. It exposes four coordinated views: aggregate subsystem overview, a paged local hierarchy browser, a focused incoming/outgoing dependency explorer, and a depth-limited causal impact flow. The hierarchy browser renders only the parent, active container, twelve children and an eight-node next-level preview; double-click drills into a container while breadcrumbs, parent, root and history actions keep the route reversible. Impact traversal interprets relation semantics instead of copying the dependency view: dependency-style edges are followed in reverse while producer/configurator edges are followed forward. Only the selected visible subgraph is laid out and rendered. Every visible edge is directed and its hover detail includes the localized relation label, stable technical kind, source and confidence. Pan, cursor-anchored wheel zoom, paging and selection therefore do not trigger JSON parsing, structural index reconstruction or a project rescan.
+The desktop map keeps the parsed graph plus incoming, outgoing, semantic-group, and structural `contains/declares` indexes in a workspace-scoped cache. It exposes four coordinated views: aggregate subsystem overview, a paged local hierarchy browser, a focused incoming/outgoing dependency explorer, and a depth-limited causal impact flow. Clicking an overview subsystem now stays inside the circular semantic map: the subsystem expands into up to thirty high-value objects and their real relationships instead of redirecting to a file tree. Clicking an object rebuilds the same canvas around that object and its two-level neighbourhood; `+N` markers disclose omitted neighbours, and `Открыть как дерево` remains an explicit route to the scoped filesystem hierarchy. The hierarchy browser renders only the parent, active container, twelve children and an eight-node next-level preview; a single click drills into a container while breadcrumbs, parent, root and history actions keep the route reversible. A double click remains reserved for opening a file preview. Impact traversal interprets relation semantics instead of copying the dependency view: dependency-style edges are followed in reverse while producer/configurator edges are followed forward. Only the selected visible subgraph is laid out and rendered. Every visible edge is directed and its hover detail includes the localized relation label, stable technical kind, source and confidence. Pan, cursor-anchored wheel zoom, paging and selection therefore do not trigger JSON parsing, structural index reconstruction or a project rescan.
 
 - The block is included in the next agent prompt and in the current user turn.
 - `mcp_call` accepts an optional `context_node_id`; otherwise it uses the persisted selection.
 - The resolved context is attached to the MCP `tools/call` request as namespaced protocol metadata at `_meta["com.leetcode/projectNodeContext"]`.
 - Tool arguments are not modified, so strict Unreal MCP schemas continue to work.
+
+## Builder Analysis Status
+
+The game task constructor starts with the actionable `Требует внимания` section. Environment checks, coverage metrics, scan output, and plugin diagnostics are kept in the collapsed `Сведения об анализе и окружении` section and remain available for troubleshooting.
+
+Analysis age is informational only. The UI reports `актуален` while the tracked Unreal project inputs still match the Project Map fingerprint, regardless of how long ago the scan ran. It reports `есть изменения` only when added, modified, or removed project inputs are detected. Partial data and scan failures use separate `неполный` and `ошибка` states.
 
 ## Verification
 
