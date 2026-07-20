@@ -8,6 +8,11 @@ use crate::agent_history::{
     append_agent_history, load_agent_history_tail, AgentRunConfirmedPlan, AgentRunHistoryContext,
     AgentRunHistoryRecord, AGENT_HISTORY_PATH,
 };
+use crate::asset_3d::{
+    load_3d_jobs, refresh_3d_asset, submit_3d_asset, three_d_provider_spec, three_d_provider_specs,
+    upsert_3d_job, validate_3d_asset_path, RefreshThreeDAssetArgs, SubmitThreeDAssetArgs,
+    ThreeDAssetJob, ThreeDJobStatus, ThreeDPipelineStage, MESHY_3D_PROVIDER_ID,
+};
 use crate::asset_library::{favorite_asset, load_library, FavoriteAssetArgs};
 use crate::assets::{
     absolute_output_path, asset_provider_env_var, attach_asset_context, audio_provider_name,
@@ -35,11 +40,25 @@ use crate::conversation::{
 };
 use crate::diagnostics::{environment_diagnostics, DiagnosticItem, EnvironmentDiagnostics};
 use crate::evals::{load_results, run_replay_eval, RunReplayEvalArgs};
+use crate::game_production::{
+    evaluate_production_gate, load_game_production_state, update_production_item,
+    EvaluateProductionGateArgs, GameScope, ProductionItemStatus, UpdateProductionItemArgs,
+};
+use crate::game_task_builder::{
+    answer_project_relation_proposal, confirm_game_task_proposal, evaluate_game_task_prerequisites,
+    game_task_catalog_ref, load_game_task_builder_state, prepare_game_task_proposal,
+    project_map_readiness, refresh_project_map_deep, resolve_game_task_targets,
+    save_custom_catalog_option, DeepScanRecord, EvaluateGameTaskPrerequisitesArgs,
+    GameTaskBuilderSession, PrepareGameTaskProposalArgs, PrerequisiteReport,
+    ProjectMapReadinessReport, ProjectMapReadinessStatus, RefreshProjectMapDeepArgs,
+    ResolveGameTaskTargetsArgs, TargetResolutionReport, TaskManifest,
+};
 use crate::game_workflows::{
     parse_workflow_kind, run_game_workflow, workflow_specs, GameWorkflowRequest,
 };
 use crate::governance::{load_governance, save_governance, tool_specs};
 use crate::http::{proxy_status_label, proxy_system_status_label};
+use crate::mcp::McpRegistrySnapshot;
 use crate::memory::{
     import_memory_source_file, load_memory, record_decision, record_memory_source,
     record_project_goal, remove_memory_source, update_task_status, upsert_task, ProjectTask,
@@ -50,9 +69,14 @@ use crate::orchestration::{
     agent_role_specs, create_replay_eval, export_trace, load_orchestration_state,
     orchestration_snapshot, parse_agent_role, record_handoff,
 };
+use crate::production_validation::{
+    load_production_report, production_validation_snapshot, save_production_report,
+    update_project_map_golden, ProductionCheckStatus,
+};
 use crate::project::{detect_project_profiles, ProjectCommand, ProjectProfile};
 use crate::project_graph::{
-    load_project_graph, save_project_graph, scan_project_graph, ProjectGraphEdge,
+    load_project_graph, load_project_graph_selection, refresh_project_graph, save_project_graph,
+    save_project_graph_selection, selected_project_node_context_value, ProjectGraphEdge,
     ProjectGraphEdgeKind, ProjectGraphNode, ProjectGraphNodeKind, ProjectGraphState,
 };
 use crate::provider_health::{
@@ -81,6 +105,15 @@ use crate::roadmap::{
     RoadmapStatus, UpdateRoadmapItemArgs,
 };
 use crate::run_timeline::{RunTimeline, RunTimelineStatus};
+use crate::self_improvement::{
+    cleanup_self_improvement_experiment, decide_self_improvement_experiment, is_active_status,
+    isolated_experiment_status, load_state as load_self_improvement_state,
+    prepare_self_improvement_worktree, promote_self_improvement_experiment,
+    rollback_self_improvement_experiment, CleanupSelfImprovementExperimentArgs,
+    DecideSelfImprovementExperimentArgs, ExperimentDecision, ExperimentStatus,
+    PrepareSelfImprovementWorktreeArgs, PromoteSelfImprovementExperimentArgs,
+    RollbackSelfImprovementExperimentArgs,
+};
 use crate::self_modification::{
     is_leetcode_workspace, prepare_self_modification_guard, run_self_modification_validation,
     SelfModificationGuard,
@@ -92,7 +125,20 @@ use crate::terminal::{
 use crate::tools::desktop::capture_screenshot_file;
 use crate::tools::policy::{ApprovalMap, PolicyConfig};
 use crate::tools::shell::{run_shell, RunShellArgs};
+use crate::unreal::{
+    enable_unreal_project_plugins, unreal_setup_report, UnrealSetupReport, UnrealSetupStatus,
+    UnrealSnapshot, UNREAL_MCP_PLUGIN_ID,
+};
+use crate::unreal_gameplay::{load_gameplay_state, GameplayPlanStatus};
+use crate::unreal_intelligence::GENERATED_ASSET_REGISTRY_PATH;
 use crate::updater::{check_for_update, update_and_restart, UpdateCheck, UpdateEvent};
+use crate::vertical_slice::{
+    evaluate_vertical_slice_readiness, load_vertical_slice_state,
+    EvaluateVerticalSliceReadinessArgs, VerticalSlicePhaseStatus,
+};
+use crate::visual_regression::{
+    compare_visual_snapshot, record_visual_baseline, VisualScenario, VisualSnapshotArgs,
+};
 use crate::workspace::Workspace;
 use eframe::egui::{self, RichText, TextEdit};
 use image::{ColorType, ImageFormat};
@@ -175,6 +221,8 @@ pub struct LeetcodeApp {
     git_commit_dialog_open: bool,
     git_commit_message_input: String,
     project_profiles: Vec<ProjectProfile>,
+    unreal_snapshot: Option<UnrealSnapshot>,
+    mcp_snapshot: Option<McpRegistrySnapshot>,
     project_events_rx: Option<Receiver<AppEvent>>,
     project_is_running: bool,
     project_cancel: Option<Arc<AtomicBool>>,
@@ -252,6 +300,14 @@ pub struct LeetcodeApp {
     asset_aspect_ratio: String,
     asset_image_size: String,
     asset_jobs: Vec<AssetJob>,
+    asset_3d_jobs: Vec<ThreeDAssetJob>,
+    asset_3d_events_rx: Option<Receiver<ThreeDAssetUiEvent>>,
+    asset_3d_source_image_input: String,
+    asset_3d_target_format: String,
+    asset_3d_target_polycount: u32,
+    asset_3d_enable_pbr: bool,
+    asset_3d_license_confirmed: bool,
+    asset_3d_pose_mode: String,
     asset_events_rx: Option<Receiver<AssetEvent>>,
     asset_is_running: bool,
     asset_status: String,
@@ -288,8 +344,78 @@ pub struct LeetcodeApp {
     project_map_zoom: f32,
     project_map_relation_target: String,
     project_map_status: String,
+    project_map_cache: Option<Arc<ProjectMapGraphCache>>,
+    project_map_view_mode: ProjectMapViewMode,
+    project_map_depth: usize,
+    project_map_structure_anchor_id: Option<String>,
+    project_map_structure_page: usize,
+    project_map_navigation_back: Vec<String>,
+    project_map_navigation_forward: Vec<String>,
     active_center_tab: CenterTab,
     file_tabs: Vec<FilePreviewTab>,
+    game_task_builder_ui: GameTaskBuilderUiState,
+    game_task_manifest_run_active: bool,
+    game_task_manifest_run_failed: bool,
+}
+
+struct GameTaskBuilderUiState {
+    open: bool,
+    domain_id: String,
+    direction_id: String,
+    operation_id: String,
+    target_query: String,
+    selected_target_ids: BTreeSet<String>,
+    selected_remediation_ids: BTreeSet<String>,
+    custom_request: String,
+    selected_improvement_ids: BTreeSet<String>,
+    selected_efficiency_ids: BTreeSet<String>,
+    target_report: Option<TargetResolutionReport>,
+    prerequisite_report: Option<PrerequisiteReport>,
+    session: Option<GameTaskBuilderSession>,
+    status: String,
+    deep_scan_rx: Option<Receiver<Result<ProjectMapReadinessReport, String>>>,
+    setup_report: Option<UnrealSetupReport>,
+    readiness_report: Option<ProjectMapReadinessReport>,
+    last_scan: Option<DeepScanRecord>,
+    setup_confirmation: bool,
+    setup_include_mcp: bool,
+    analysis_only: bool,
+}
+
+#[derive(Default)]
+struct ProjectMapAnalysisActions {
+    open_map: bool,
+    retry_scan: bool,
+    import_registry: bool,
+    open_editor: bool,
+}
+
+impl Default for GameTaskBuilderUiState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            domain_id: String::new(),
+            direction_id: String::new(),
+            operation_id: String::new(),
+            target_query: String::new(),
+            selected_target_ids: BTreeSet::new(),
+            selected_remediation_ids: BTreeSet::new(),
+            custom_request: String::new(),
+            selected_improvement_ids: BTreeSet::new(),
+            selected_efficiency_ids: BTreeSet::new(),
+            target_report: None,
+            prerequisite_report: None,
+            session: None,
+            status: String::new(),
+            deep_scan_rx: None,
+            setup_report: None,
+            readiness_report: None,
+            last_scan: None,
+            setup_confirmation: false,
+            setup_include_mcp: true,
+            analysis_only: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -412,6 +538,12 @@ enum InputAttachmentKind {
     File,
     Image,
     Screenshot,
+}
+
+enum ThreeDAssetUiEvent {
+    JobUpdated(ThreeDAssetJob),
+    Error(String),
+    Done,
 }
 
 impl InputAttachmentKind {
@@ -600,6 +732,7 @@ fn command_palette_hash_part(value: &str) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CenterTab {
     Agent,
+    GameTaskBuilder,
     File(String),
 }
 
@@ -626,15 +759,255 @@ enum ProjectMapFilter {
     Commands,
     Planning,
     Assets,
+    Unreal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectMapViewMode {
+    Overview,
+    Structure,
+    Dependencies,
+    Impact,
+}
+
+#[derive(Clone, Debug)]
+enum ProjectMapNavigationAction {
+    Back,
+    Forward,
+    Parent,
+    Root,
+    Select(String),
+}
+
+impl ProjectMapViewMode {
+    const ALL: [Self; 4] = [
+        Self::Overview,
+        Self::Structure,
+        Self::Dependencies,
+        Self::Impact,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "Обзор",
+            Self::Structure => "Структура",
+            Self::Dependencies => "Зависимости",
+            Self::Impact => "Влияние",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Overview => "Подсистемы проекта и количество связей между ними.",
+            Self::Structure => {
+                "Локальная ветвь иерархии: родитель, текущий уровень и предпросмотр следующего."
+            }
+            Self::Dependencies => {
+                "Все входящие и исходящие связи выбранного узла; клик переносит фокус без смены режима."
+            }
+            Self::Impact => {
+                "Направленная цепочка последствий: какие объекты затронет изменение выбранного узла."
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+enum ProjectMapGroup {
+    Structure,
+    Code,
+    CharactersAnimation,
+    WorldGameplay,
+    VisualAssets,
+    AudioUi,
+    PlanningProduction,
+    Other,
+}
+
+impl ProjectMapGroup {
+    const ALL: [Self; 8] = [
+        Self::Structure,
+        Self::Code,
+        Self::CharactersAnimation,
+        Self::WorldGameplay,
+        Self::VisualAssets,
+        Self::AudioUi,
+        Self::PlanningProduction,
+        Self::Other,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Structure => "Структура проекта",
+            Self::Code => "Код и модули",
+            Self::CharactersAnimation => "Персонажи и анимация",
+            Self::WorldGameplay => "Мир и геймплей",
+            Self::VisualAssets => "Графика и ассеты",
+            Self::AudioUi => "Звук и интерфейс",
+            Self::PlanningProduction => "Планы и производство",
+            Self::Other => "Прочее",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Structure => "корень проекта, каталоги, плагины и дескрипторы",
+            Self::Code => "исходники, модули, символы, конфигурация и команды",
+            Self::CharactersAnimation => "скелеты, персонажи, риги и анимационные ассеты",
+            Self::WorldGameplay => "карты, Blueprint, ввод и игровые сценарии",
+            Self::VisualAssets => "меши, материалы, Niagara и производные ассеты",
+            Self::AudioUi => "звуки, виджеты и элементы интерфейса",
+            Self::PlanningProduction => "память, roadmap, задачи и производственные запуски",
+            Self::Other => "узлы, не вошедшие в основные рабочие группы",
+        }
+    }
+
+    fn color(self) -> egui::Color32 {
+        match self {
+            Self::Structure => egui::Color32::from_rgb(72, 145, 201),
+            Self::Code => egui::Color32::from_rgb(80, 173, 188),
+            Self::CharactersAnimation => egui::Color32::from_rgb(171, 120, 205),
+            Self::WorldGameplay => egui::Color32::from_rgb(92, 177, 125),
+            Self::VisualAssets => egui::Color32::from_rgb(205, 139, 82),
+            Self::AudioUi => egui::Color32::from_rgb(198, 104, 139),
+            Self::PlanningProduction => egui::Color32::from_rgb(194, 171, 88),
+            Self::Other => egui::Color32::from_rgb(119, 132, 148),
+        }
+    }
+}
+
+struct ProjectMapGraphCache {
+    workspace_root: PathBuf,
+    graph: ProjectGraphState,
+    group_counts: BTreeMap<ProjectMapGroup, usize>,
+    group_edges: BTreeMap<(ProjectMapGroup, ProjectMapGroup), usize>,
+    node_indices: HashMap<String, usize>,
+    incoming_edge_indices_by_node: HashMap<String, Vec<usize>>,
+    outgoing_edge_indices_by_node: HashMap<String, Vec<usize>>,
+    structural_children_by_node: HashMap<String, Vec<(String, usize)>>,
+    structural_parent_by_node: HashMap<String, String>,
+    group_edge_kinds:
+        BTreeMap<(ProjectMapGroup, ProjectMapGroup), BTreeMap<ProjectGraphEdgeKind, usize>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectMapNodeRole {
+    Normal,
+    Anchor,
+    Focus,
+    Incoming,
+    Outgoing,
+    Impact,
+}
+
+struct ProjectMapLayout {
+    nodes: Vec<ProjectGraphNode>,
+    edges: Vec<ProjectGraphEdge>,
+    positions: BTreeMap<String, egui::Pos2>,
+    roles: BTreeMap<String, ProjectMapNodeRole>,
+    hidden_neighbours: BTreeMap<String, usize>,
+    reversed_edge_ids: BTreeSet<String>,
+}
+
+impl ProjectMapGraphCache {
+    fn new(workspace_root: PathBuf, graph: ProjectGraphState) -> Self {
+        let mut group_counts = BTreeMap::new();
+        let mut node_groups = HashMap::new();
+        let mut node_indices = HashMap::new();
+        for (index, node) in graph.nodes.iter().enumerate() {
+            let group = project_map_group_for_node(node);
+            *group_counts.entry(group).or_default() += 1;
+            node_groups.insert(node.id.clone(), group);
+            node_indices.insert(node.id.clone(), index);
+        }
+
+        let mut group_edges = BTreeMap::new();
+        let mut incoming_edge_indices_by_node = HashMap::<String, Vec<usize>>::new();
+        let mut outgoing_edge_indices_by_node = HashMap::<String, Vec<usize>>::new();
+        let mut structural_children_by_node = HashMap::<String, Vec<(String, usize)>>::new();
+        let mut structural_parent_by_node = HashMap::<String, String>::new();
+        let mut group_edge_kinds = BTreeMap::<
+            (ProjectMapGroup, ProjectMapGroup),
+            BTreeMap<ProjectGraphEdgeKind, usize>,
+        >::new();
+        for (index, edge) in graph.edges.iter().enumerate() {
+            outgoing_edge_indices_by_node
+                .entry(edge.from.clone())
+                .or_default()
+                .push(index);
+            incoming_edge_indices_by_node
+                .entry(edge.to.clone())
+                .or_default()
+                .push(index);
+            if is_project_map_structural_edge(edge.kind) {
+                structural_children_by_node
+                    .entry(edge.from.clone())
+                    .or_default()
+                    .push((edge.to.clone(), index));
+                structural_parent_by_node
+                    .entry(edge.to.clone())
+                    .or_insert_with(|| edge.from.clone());
+            }
+            let (Some(from), Some(to)) = (node_groups.get(&edge.from), node_groups.get(&edge.to))
+            else {
+                continue;
+            };
+            let key = if from <= to {
+                (*from, *to)
+            } else {
+                (*to, *from)
+            };
+            *group_edges.entry(key).or_default() += 1;
+            *group_edge_kinds
+                .entry(key)
+                .or_default()
+                .entry(edge.kind)
+                .or_default() += 1;
+        }
+
+        for children in structural_children_by_node.values_mut() {
+            children.sort_by(|left, right| {
+                let left_node = node_indices
+                    .get(&left.0)
+                    .and_then(|index| graph.nodes.get(*index));
+                let right_node = node_indices
+                    .get(&right.0)
+                    .and_then(|index| graph.nodes.get(*index));
+                match (left_node, right_node) {
+                    (Some(left_node), Some(right_node)) => {
+                        project_graph_kind_sort_key(left_node.kind)
+                            .cmp(&project_graph_kind_sort_key(right_node.kind))
+                            .then_with(|| left_node.label.cmp(&right_node.label))
+                    }
+                    _ => left.0.cmp(&right.0),
+                }
+            });
+            children.dedup_by(|left, right| left.0 == right.0);
+        }
+
+        Self {
+            workspace_root,
+            graph,
+            group_counts,
+            group_edges,
+            node_indices,
+            incoming_edge_indices_by_node,
+            outgoing_edge_indices_by_node,
+            structural_children_by_node,
+            structural_parent_by_node,
+            group_edge_kinds,
+        }
+    }
 }
 
 impl ProjectMapFilter {
-    const ALL: [ProjectMapFilter; 5] = [
+    const ALL: [ProjectMapFilter; 6] = [
         ProjectMapFilter::All,
         ProjectMapFilter::Code,
         ProjectMapFilter::Commands,
         ProjectMapFilter::Planning,
         ProjectMapFilter::Assets,
+        ProjectMapFilter::Unreal,
     ];
 
     fn label(self) -> &'static str {
@@ -644,6 +1017,7 @@ impl ProjectMapFilter {
             ProjectMapFilter::Commands => "Команды",
             ProjectMapFilter::Planning => "План",
             ProjectMapFilter::Assets => "Ассеты",
+            ProjectMapFilter::Unreal => "Unreal",
         }
     }
 
@@ -656,13 +1030,35 @@ impl ProjectMapFilter {
                     | ProjectGraphNodeKind::File
                     | ProjectGraphNodeKind::Module
                     | ProjectGraphNodeKind::Symbol
+                    | ProjectGraphNodeKind::UnrealModule
+                    | ProjectGraphNodeKind::UnrealTarget
+                    | ProjectGraphNodeKind::UnrealConfig
+                    | ProjectGraphNodeKind::UnrealSource
             ),
             ProjectMapFilter::Commands => kind == ProjectGraphNodeKind::Command,
             ProjectMapFilter::Planning => matches!(
                 kind,
-                ProjectGraphNodeKind::Memory | ProjectGraphNodeKind::RoadmapItem
+                ProjectGraphNodeKind::Memory
+                    | ProjectGraphNodeKind::RoadmapItem
+                    | ProjectGraphNodeKind::GameplayPlan
+                    | ProjectGraphNodeKind::GameProductionPlan
+                    | ProjectGraphNodeKind::ProductionItem
+                    | ProjectGraphNodeKind::VerticalSliceRun
+                    | ProjectGraphNodeKind::VerticalSlicePhase
             ),
-            ProjectMapFilter::Assets => kind == ProjectGraphNodeKind::Asset,
+            ProjectMapFilter::Assets => matches!(
+                kind,
+                ProjectGraphNodeKind::Asset
+                    | ProjectGraphNodeKind::ThreeDAsset
+                    | ProjectGraphNodeKind::UnrealMap
+                    | ProjectGraphNodeKind::UnrealBlueprint
+                    | ProjectGraphNodeKind::UnrealDataAsset
+                    | ProjectGraphNodeKind::UnrealMaterial
+                    | ProjectGraphNodeKind::UnrealNiagara
+                    | ProjectGraphNodeKind::UnrealAnimation
+                    | ProjectGraphNodeKind::UnrealAsset
+            ),
+            ProjectMapFilter::Unreal => is_unreal_graph_kind(kind),
         }
     }
 }
@@ -993,7 +1389,7 @@ impl RightPanelView {
                 "Release cockpit: версия, preflight-чеклист, сборки, артефакты и готовность публикации."
             }
             RightPanelView::Project => {
-                "Команды проекта, терминал, preview, рабочий стол и диагностика запусков."
+                "Результат анализа проекта: полнота Project Map, найденные данные, проблемы и следующие действия."
             }
             RightPanelView::Assets => {
                 "Генерация и библиотека ассетов: изображения, варианты, импорт и экспорт."
@@ -1072,6 +1468,7 @@ impl WorkspaceMode {
             WorkspaceMode::Chat => &[
                 RightPanelView::Overview,
                 RightPanelView::Context,
+                RightPanelView::Project,
                 RightPanelView::Roadmap,
                 RightPanelView::Control,
                 RightPanelView::Logs,
@@ -1099,6 +1496,7 @@ impl WorkspaceMode {
             ],
             WorkspaceMode::Project => &[
                 RightPanelView::Overview,
+                RightPanelView::Project,
                 RightPanelView::Release,
                 RightPanelView::Context,
                 RightPanelView::Roadmap,
@@ -1247,10 +1645,22 @@ impl LeetcodeApp {
             .map(git_changed_files_for_workspace)
             .unwrap_or_default();
         let asset_jobs = workspace.as_ref().map(load_jobs).unwrap_or_default();
+        let asset_3d_jobs = workspace.as_ref().map(load_3d_jobs).unwrap_or_default();
         let project_profiles = workspace
             .as_ref()
             .map(detect_project_profiles)
             .unwrap_or_default();
+        let unreal_snapshot = workspace
+            .as_ref()
+            .filter(|_| {
+                project_profiles
+                    .iter()
+                    .any(|profile| profile.kind == "Unreal")
+            })
+            .map(crate::unreal::unreal_snapshot);
+        let mcp_snapshot = workspace
+            .as_ref()
+            .and_then(|workspace| crate::mcp::registry_snapshot(workspace).ok());
         let provider_validation_results = workspace
             .as_ref()
             .map(|workspace| load_provider_validation_history(workspace).runs)
@@ -1409,6 +1819,8 @@ impl LeetcodeApp {
             git_commit_dialog_open: false,
             git_commit_message_input: String::new(),
             project_profiles,
+            unreal_snapshot,
+            mcp_snapshot,
             project_events_rx: None,
             project_is_running: false,
             project_cancel: None,
@@ -1486,6 +1898,14 @@ impl LeetcodeApp {
             asset_aspect_ratio: "1:1".to_string(),
             asset_image_size: "1K".to_string(),
             asset_jobs,
+            asset_3d_jobs,
+            asset_3d_events_rx: None,
+            asset_3d_source_image_input: String::new(),
+            asset_3d_target_format: "glb".to_string(),
+            asset_3d_target_polycount: 20_000,
+            asset_3d_enable_pbr: true,
+            asset_3d_license_confirmed: false,
+            asset_3d_pose_mode: String::new(),
             asset_events_rx: None,
             asset_is_running: false,
             asset_status: String::new(),
@@ -1522,9 +1942,20 @@ impl LeetcodeApp {
             project_map_zoom: 1.0,
             project_map_relation_target: String::new(),
             project_map_status: String::new(),
+            project_map_cache: None,
+            project_map_view_mode: ProjectMapViewMode::Overview,
+            project_map_depth: 2,
+            project_map_structure_anchor_id: None,
+            project_map_structure_page: 0,
+            project_map_navigation_back: Vec::new(),
+            project_map_navigation_forward: Vec::new(),
             active_center_tab: CenterTab::Agent,
             file_tabs: Vec::new(),
+            game_task_builder_ui: GameTaskBuilderUiState::default(),
+            game_task_manifest_run_active: false,
+            game_task_manifest_run_failed: false,
         };
+        app.refresh_unreal_start_state();
         app.start_update_check_on_launch();
         app
     }
@@ -1548,10 +1979,28 @@ impl LeetcodeApp {
                 self.provider_validation_results =
                     load_provider_validation_history(&workspace).runs;
                 self.workspace = Some(workspace);
+                self.invalidate_project_map_cache();
+                self.project_map_view_mode = ProjectMapViewMode::Overview;
+                self.project_map_pan = egui::Vec2::ZERO;
+                self.project_map_zoom = 1.0;
+                self.project_map_structure_anchor_id = None;
+                self.project_map_structure_page = 0;
+                self.project_map_navigation_back.clear();
+                self.project_map_navigation_forward.clear();
+                self.project_map_selected_node_id = self
+                    .workspace
+                    .as_ref()
+                    .and_then(load_project_graph_selection);
                 self.refresh_agent_history();
                 self.refresh_file_rows();
                 self.refresh_project_profiles();
+                self.refresh_unreal_start_state();
                 self.asset_jobs = self.workspace.as_ref().map(load_jobs).unwrap_or_default();
+                self.asset_3d_jobs = self
+                    .workspace
+                    .as_ref()
+                    .map(load_3d_jobs)
+                    .unwrap_or_default();
                 self.asset_compare_paths.clear();
                 self.asset_previews.clear();
                 self.selected_tree_path = None;
@@ -1574,6 +2023,21 @@ impl LeetcodeApp {
                 if let Some(workspace) = &self.workspace {
                     let loaded = load_active_conversation(workspace);
                     self.apply_loaded_conversation(loaded);
+                }
+                if self.game_task_builder_ui.open {
+                    self.game_task_builder_ui.setup_confirmation = false;
+                    self.game_task_builder_ui.analysis_only = false;
+                }
+                let open_unreal_onboarding = self
+                    .game_task_builder_ui
+                    .readiness_report
+                    .as_ref()
+                    .is_some_and(|report| {
+                        report.status
+                            == crate::game_task_builder::ProjectMapReadinessStatus::Uninitialized
+                    });
+                if open_unreal_onboarding {
+                    self.open_game_task_builder();
                 }
                 let _ = self.config.save();
                 true
@@ -3120,6 +3584,7 @@ impl LeetcodeApp {
     fn clear_workspace_selection(&mut self) {
         self.config.last_workspace = None;
         self.workspace = None;
+        self.invalidate_project_map_cache();
         self.file_rows.clear();
         self.selected_tree_path = None;
         self.file_rename_target = None;
@@ -3470,6 +3935,49 @@ impl LeetcodeApp {
             .as_ref()
             .map(detect_project_profiles)
             .unwrap_or_default();
+        self.unreal_snapshot = self
+            .workspace
+            .as_ref()
+            .filter(|_| {
+                self.project_profiles
+                    .iter()
+                    .any(|profile| profile.kind == "Unreal")
+            })
+            .map(crate::unreal::unreal_snapshot);
+        self.mcp_snapshot = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| crate::mcp::registry_snapshot(workspace).ok());
+    }
+
+    fn refresh_unreal_start_state(&mut self) {
+        let is_unreal = self.has_unreal_game_project();
+        self.game_task_builder_ui.last_scan = if is_unreal {
+            self.workspace
+                .as_ref()
+                .and_then(|workspace| load_game_task_builder_state(workspace).last_scan)
+        } else {
+            None
+        };
+        self.game_task_builder_ui.setup_report = if is_unreal {
+            self.workspace.as_ref().map(unreal_setup_report)
+        } else {
+            None
+        };
+        self.game_task_builder_ui.readiness_report = if is_unreal {
+            self.workspace
+                .as_ref()
+                .map(|workspace| project_map_readiness(workspace, false))
+        } else {
+            None
+        };
+    }
+
+    fn has_unreal_game_project(&self) -> bool {
+        self.unreal_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.project.as_ref())
+            .is_some()
     }
 
     fn sync_config_from_inputs(&mut self) {
@@ -3499,6 +4007,9 @@ impl LeetcodeApp {
         let default_model = match self.asset_kind_input.as_str() {
             "audio" => default_audio_model(provider_id),
             "video" => default_video_model(provider_id),
+            "3d" => three_d_provider_spec(provider_id)
+                .map(|spec| spec.default_model)
+                .unwrap_or("latest"),
             _ => default_image_model(provider_id),
         };
         let model = if self.asset_model_input.trim().is_empty() {
@@ -3516,7 +4027,10 @@ impl LeetcodeApp {
 
     fn sync_asset_provider_settings_for(&mut self, provider_id: &str) {
         let model = if self.asset_model_input.trim().is_empty() {
-            default_image_model(provider_id).to_string()
+            three_d_provider_spec(provider_id)
+                .map(|spec| spec.default_model)
+                .unwrap_or_else(|| default_image_model(provider_id))
+                .to_string()
         } else {
             self.asset_model_input.trim().to_string()
         };
@@ -3536,13 +4050,31 @@ impl LeetcodeApp {
 
     fn switch_asset_provider_from_ui(&mut self, provider_id: String) {
         self.asset_provider_input = provider_id;
-        self.asset_api_key_input =
-            image_api_key_from_config(&self.config, &self.asset_provider_input);
-        self.asset_model_input = image_model_from_config(&self.config, &self.asset_provider_input);
+        if let Some(spec) = three_d_provider_spec(&self.asset_provider_input) {
+            self.asset_api_key_input = self.config.api_key_for_provider(&self.asset_provider_input);
+            self.asset_model_input = self
+                .config
+                .providers
+                .get(&self.asset_provider_input)
+                .map(|settings| settings.model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .unwrap_or_else(|| spec.default_model.to_string());
+        } else {
+            self.asset_api_key_input =
+                image_api_key_from_config(&self.config, &self.asset_provider_input);
+            self.asset_model_input =
+                image_model_from_config(&self.config, &self.asset_provider_input);
+        }
     }
 
     fn switch_asset_kind_from_ui(&mut self) {
         match self.asset_kind_input.as_str() {
+            "3d" => {
+                if three_d_provider_spec(&self.asset_provider_input).is_none() {
+                    self.asset_provider_input = MESHY_3D_PROVIDER_ID.to_string();
+                }
+                self.switch_asset_provider_from_ui(self.asset_provider_input.clone());
+            }
             "audio" => {
                 self.asset_api_key_input =
                     media_api_key_from_config(&self.config, OPENAI_AUDIO_PROVIDER_ID);
@@ -3567,6 +4099,9 @@ impl LeetcodeApp {
                 }
             }
             _ => {
+                if three_d_provider_spec(&self.asset_provider_input).is_some() {
+                    self.asset_provider_input = OPENAI_IMAGE_PROVIDER_ID.to_string();
+                }
                 self.asset_api_key_input =
                     image_api_key_from_config(&self.config, &self.asset_provider_input);
                 self.asset_model_input =
@@ -4904,7 +5439,178 @@ impl LeetcodeApp {
         }
     }
 
+    fn start_3d_asset_submit(&mut self) {
+        if self.asset_is_running {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.asset_status = "Сначала выберите проект".to_string();
+            return;
+        };
+        let prompt = self.asset_prompt.trim().to_string();
+        if prompt.is_empty() && self.asset_3d_source_image_input.trim().is_empty() {
+            self.asset_status = "Добавьте текстовое описание или исходное изображение".to_string();
+            return;
+        }
+        if !self.asset_3d_license_confirmed {
+            self.asset_status =
+                "Подтвердите право использования результата и условия провайдера".to_string();
+            return;
+        }
+
+        self.save_settings_from_ui();
+        let args = SubmitThreeDAssetArgs {
+            prompt,
+            image_path: (!self.asset_3d_source_image_input.trim().is_empty())
+                .then(|| self.asset_3d_source_image_input.trim().to_string()),
+            provider: Some(self.asset_provider_input.clone()),
+            model: Some(self.asset_model_input.trim().to_string()),
+            target_format: Some(self.asset_3d_target_format.clone()),
+            target_polycount: Some(self.asset_3d_target_polycount),
+            enable_pbr: Some(self.asset_3d_enable_pbr),
+            pose_mode: (!self.asset_3d_pose_mode.trim().is_empty())
+                .then(|| self.asset_3d_pose_mode.trim().to_string()),
+            license_confirmed: Some(self.asset_3d_license_confirmed),
+        };
+        let config = self.config.clone();
+        let (tx, rx) = mpsc::channel();
+        self.asset_3d_events_rx = Some(rx);
+        self.asset_is_running = true;
+        self.asset_status = "Отправляем 3D-задание провайдеру...".to_string();
+        thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|err| err.to_string())
+                .and_then(|runtime| {
+                    runtime
+                        .block_on(submit_3d_asset(&workspace, args, &config))
+                        .map_err(|err| err.to_string())
+                });
+            match result {
+                Ok(job) => {
+                    let _ = tx.send(ThreeDAssetUiEvent::JobUpdated(job));
+                }
+                Err(err) => {
+                    let _ = tx.send(ThreeDAssetUiEvent::Error(err));
+                }
+            }
+            let _ = tx.send(ThreeDAssetUiEvent::Done);
+        });
+    }
+
+    fn start_3d_asset_refresh(&mut self, job_id: String) {
+        if self.asset_is_running {
+            return;
+        }
+        let Some(workspace) = self.workspace.clone() else {
+            self.asset_status = "Сначала выберите проект".to_string();
+            return;
+        };
+        let config = self.config.clone();
+        let (tx, rx) = mpsc::channel();
+        self.asset_3d_events_rx = Some(rx);
+        self.asset_is_running = true;
+        self.asset_status = format!("Проверяем 3D-задание {job_id}...");
+        thread::spawn(move || {
+            let result = tokio::runtime::Runtime::new()
+                .map_err(|err| err.to_string())
+                .and_then(|runtime| {
+                    runtime
+                        .block_on(refresh_3d_asset(
+                            &workspace,
+                            RefreshThreeDAssetArgs { job_id },
+                            &config,
+                        ))
+                        .map_err(|err| err.to_string())
+                });
+            match result {
+                Ok(job) => {
+                    let _ = tx.send(ThreeDAssetUiEvent::JobUpdated(job));
+                }
+                Err(err) => {
+                    let _ = tx.send(ThreeDAssetUiEvent::Error(err));
+                }
+            }
+            let _ = tx.send(ThreeDAssetUiEvent::Done);
+        });
+    }
+
+    fn validate_3d_job(&mut self, mut job: ThreeDAssetJob) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        let Some(source_path) = job.output_files.first().cloned() else {
+            self.asset_status = "У задания пока нет загруженного 3D-файла".to_string();
+            return;
+        };
+        match validate_3d_asset_path(&workspace, &source_path) {
+            Ok(report) => {
+                let ready = report.import_ready;
+                let errors = report.errors.len();
+                job.validation = Some(report);
+                if let Err(err) = upsert_3d_job(&workspace, &job) {
+                    self.asset_status = format!("Не удалось сохранить проверку: {err}");
+                    return;
+                }
+                self.upsert_3d_asset_job(job);
+                self.asset_status = if ready {
+                    "3D-ассет прошёл проверку и готов к импорту".to_string()
+                } else {
+                    format!("3D-ассет требует доработки: ошибок {errors}")
+                };
+            }
+            Err(err) => self.asset_status = format!("Ошибка проверки 3D-ассета: {err}"),
+        }
+    }
+
+    fn queue_3d_unreal_import(&mut self, job: &ThreeDAssetJob) {
+        let Some(path) = job.output_files.first() else {
+            return;
+        };
+        self.workspace_mode = WorkspaceMode::Chat;
+        self.input = format!(
+            "Импортируй проверенный 3D-ассет `{path}` в Unreal Engine через import_3d_asset_unreal. Сначала проверь validate_3d_asset и используй /Game/Generated/Leetcode как destination_path. Не создавай rig или анимации, если их нет в исходнике."
+        );
+        self.asset_status = "Задача импорта подготовлена в поле чата".to_string();
+    }
+
+    fn upsert_3d_asset_job(&mut self, job: ThreeDAssetJob) {
+        if let Some(existing) = self.asset_3d_jobs.iter_mut().find(|item| item.id == job.id) {
+            *existing = job;
+        } else {
+            self.asset_3d_jobs.push(job);
+        }
+        self.asset_3d_jobs
+            .sort_by_key(|item| (item.created_at, item.updated_at));
+    }
+
+    fn drain_3d_asset_events(&mut self) {
+        let mut events = Vec::new();
+        if let Some(rx) = &self.asset_3d_events_rx {
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            match event {
+                ThreeDAssetUiEvent::JobUpdated(job) => {
+                    self.asset_status =
+                        format!("3D: {} · {}%", three_d_stage_label(job.stage), job.progress);
+                    self.upsert_3d_asset_job(job);
+                    self.refresh_file_rows();
+                    self.refresh_git_summary();
+                }
+                ThreeDAssetUiEvent::Error(err) => {
+                    self.asset_status = format!("Ошибка 3D-пайплайна: {err}");
+                }
+                ThreeDAssetUiEvent::Done => {
+                    self.asset_is_running = false;
+                }
+            }
+        }
+    }
+
     fn drain_asset_events(&mut self) {
+        self.drain_3d_asset_events();
         let mut events = Vec::new();
         if let Some(rx) = &self.asset_events_rx {
             while let Ok(event) = rx.try_recv() {
@@ -5527,49 +6233,8 @@ impl LeetcodeApp {
     fn selected_project_map_context_block(&self) -> Option<String> {
         let workspace = self.workspace.as_ref()?;
         let selected_id = self.project_map_selected_node_id.as_ref()?;
-        let graph = load_project_graph(workspace);
-        let node = graph.nodes.iter().find(|node| &node.id == selected_id)?;
-        let mut lines = vec![
-            format!("id: {}", node.id),
-            format!("тип: {}", project_graph_kind_label(node.kind)),
-            format!("название: {}", node.label),
-        ];
-        if let Some(path) = node.path.as_deref() {
-            lines.push(format!("путь: {path}"));
-        }
-        if !node.summary.trim().is_empty() {
-            lines.push(format!("summary: {}", compact_inline(&node.summary, 360)));
-        }
-        let mut related = graph
-            .edges
-            .iter()
-            .filter(|edge| edge.from == node.id || edge.to == node.id)
-            .take(10)
-            .map(|edge| {
-                let other = if edge.from == node.id {
-                    &edge.to
-                } else {
-                    &edge.from
-                };
-                let direction = if edge.from == node.id {
-                    "исходящая"
-                } else {
-                    "входящая"
-                };
-                format!(
-                    "- {direction}: {} -> {}",
-                    project_graph_edge_label(edge.kind),
-                    project_graph_node_label_by_id(&graph, other)
-                )
-            })
-            .collect::<Vec<_>>();
-        if related.is_empty() {
-            lines.push("связи: нет".to_string());
-        } else {
-            related.insert(0, "связи:".to_string());
-            lines.extend(related);
-        }
-        Some(lines.join("\n"))
+        selected_project_node_context_value(workspace, Some(selected_id))
+            .and_then(|value| serde_json::to_string_pretty(&value).ok())
     }
 
     fn send_current_input(&mut self) {
@@ -5920,6 +6585,20 @@ impl LeetcodeApp {
             return;
         };
 
+        if let Some(experiment_id) = guard.experiment_id.as_deref() {
+            if let Some(status) = isolated_experiment_status(&workspace, experiment_id) {
+                self.self_modification_status =
+                    format!("self-mod candidate: {} · {}", experiment_id, status.label());
+                append_journal(format!(
+                    "self_modification\tisolated\t{}\t{}",
+                    experiment_id,
+                    status.label()
+                ));
+                self.refresh_git_summary();
+                return;
+            }
+        }
+
         self.refresh_git_summary();
         let validation =
             run_self_modification_validation(&workspace, guard, &self.git_changed_files);
@@ -6047,6 +6726,9 @@ impl LeetcodeApp {
                     }
                 }
                 AppEvent::Error(err) => {
+                    if self.game_task_manifest_run_active {
+                        self.game_task_manifest_run_failed = true;
+                    }
                     self.agent_live_status = "Агент получил ошибку".to_string();
                     self.chat.push(ChatLine::system(format!("Ошибка: {err}")));
                     chat_changed = true;
@@ -6055,6 +6737,27 @@ impl LeetcodeApp {
                     }
                 }
                 AppEvent::Done => {
+                    if self.game_task_manifest_run_active {
+                        if let Some(workspace) = &self.workspace {
+                            let status = if self.game_task_manifest_run_failed {
+                                "failed"
+                            } else {
+                                "completed"
+                            };
+                            if let Err(error) =
+                                crate::game_task_builder::finish_active_task_manifest(
+                                    workspace, status,
+                                )
+                            {
+                                append_journal(format!(
+                                    "game_task_builder\tmanifest_finish_error\t{}",
+                                    error
+                                ));
+                            }
+                        }
+                        self.game_task_manifest_run_active = false;
+                        self.game_task_manifest_run_failed = false;
+                    }
                     let final_response = self.latest_agent_response_for_active_run();
                     let elapsed = self
                         .agent_started_at
@@ -10002,6 +10705,153 @@ impl LeetcodeApp {
             if !self.eval_status.is_empty() {
                 ui.label(RichText::new(&self.eval_status).weak());
             }
+
+            ui.separator();
+            let improvement = load_self_improvement_state(&workspace);
+            let active = improvement
+                .experiments
+                .iter()
+                .filter(|experiment| is_active_status(experiment.status))
+                .count();
+            let awaiting_decision = improvement
+                .experiments
+                .iter()
+                .filter(|experiment| experiment.status == ExperimentStatus::Validated)
+                .count();
+            panel_header(
+                ui,
+                "Самоулучшение",
+                "Гипотезы, автоматические проверки и явные решения по изменениям самого Leetcode.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                metric_chip(ui, "эксперименты", improvement.experiments.len());
+                metric_chip(ui, "в работе", active);
+                metric_chip(ui, "ждут решения", awaiting_decision);
+            });
+            if improvement.experiments.is_empty() {
+                empty_state(
+                    ui,
+                    "Экспериментов пока нет",
+                    "Первое изменение самого Leetcode автоматически создаст гипотезу и baseline.",
+                );
+            }
+            for experiment in improvement.experiments.iter().rev().take(6).cloned() {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, experiment.status.label());
+                    ui.label(RichText::new(&experiment.title).strong());
+                });
+                ui.label(RichText::new(compact_inline(&experiment.hypothesis, 140)).weak());
+                if let Some(worktree) = &experiment.worktree {
+                    ui.label(
+                        RichText::new(format!("candidate: {}", compact_inline(&worktree.root, 100)))
+                            .monospace()
+                            .weak(),
+                    );
+                }
+                if experiment.worktree.is_none()
+                    && experiment.status == ExperimentStatus::Running
+                    && ui.button("Создать изолированный candidate").clicked()
+                {
+                    let result = prepare_self_improvement_worktree(
+                        &workspace,
+                        PrepareSelfImprovementWorktreeArgs {
+                            experiment_id: experiment.id.clone(),
+                        },
+                    );
+                    self.eval_status = result.output;
+                }
+                if experiment
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.cleaned_at.is_none())
+                    && matches!(
+                        experiment.status,
+                        ExperimentStatus::WorktreeReady | ExperimentStatus::Failed
+                    )
+                    && ui.button("Сравнить baseline и candidate").clicked()
+                {
+                    self.input = format!(
+                        "Запусти полный набор benchmark-проверок для эксперимента {} и сравни baseline с candidate.",
+                        experiment.id
+                    );
+                    self.eval_status =
+                        "Запрос на benchmark подготовлен в поле чата. Отправьте его агенту."
+                            .to_string();
+                }
+                if experiment.status == ExperimentStatus::Validated {
+                    ui.horizontal(|ui| {
+                        if ui.button("Принять").clicked() {
+                            let result = decide_self_improvement_experiment(
+                                &workspace,
+                                DecideSelfImprovementExperimentArgs {
+                                    experiment_id: experiment.id.clone(),
+                                    decision: ExperimentDecision::Accept,
+                                    rationale: "Принято пользователем после успешной валидации"
+                                        .to_string(),
+                                },
+                            );
+                            self.eval_status = result.output;
+                        }
+                        if ui.button("Отклонить").clicked() {
+                            let result = decide_self_improvement_experiment(
+                                &workspace,
+                                DecideSelfImprovementExperimentArgs {
+                                    experiment_id: experiment.id.clone(),
+                                    decision: ExperimentDecision::Reject,
+                                    rationale: "Отклонено пользователем".to_string(),
+                                },
+                            );
+                            self.eval_status = result.output;
+                        }
+                    });
+                }
+                if experiment.status == ExperimentStatus::Accepted
+                    && experiment.worktree.is_some()
+                    && ui.button("Продвинуть в основную ветку").clicked()
+                {
+                    let result = promote_self_improvement_experiment(
+                        &workspace,
+                        PromoteSelfImprovementExperimentArgs {
+                            experiment_id: experiment.id.clone(),
+                            commit_message: None,
+                        },
+                    );
+                    self.eval_status = result.output;
+                }
+                if experiment.status == ExperimentStatus::Promoted
+                    && ui.button("Создать безопасный откат").clicked()
+                {
+                    let result = rollback_self_improvement_experiment(
+                        &workspace,
+                        RollbackSelfImprovementExperimentArgs {
+                            experiment_id: experiment.id.clone(),
+                        },
+                    );
+                    self.eval_status = result.output;
+                }
+                let can_cleanup = experiment
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|worktree| worktree.cleaned_at.is_none())
+                    && matches!(
+                        experiment.status,
+                        ExperimentStatus::Rejected
+                            | ExperimentStatus::Failed
+                            | ExperimentStatus::NoChanges
+                            | ExperimentStatus::Promoted
+                            | ExperimentStatus::RolledBack
+                    );
+                if can_cleanup && ui.button("Очистить candidate").clicked() {
+                    let result = cleanup_self_improvement_experiment(
+                        &workspace,
+                        CleanupSelfImprovementExperimentArgs {
+                            experiment_id: experiment.id.clone(),
+                        },
+                    );
+                    self.eval_status = result.output;
+                }
+            }
         });
     }
 
@@ -13101,9 +13951,10 @@ impl LeetcodeApp {
                         RightPanelView::Logs => {
                             ("Журнал", "история запусков, инструменты, git и трассировка")
                         }
-                        RightPanelView::Project => {
-                            ("Проект", "команды, терминал, preview и рабочий стол")
-                        }
+                        RightPanelView::Project => (
+                            "Проект",
+                            "результат анализа, полнота данных и следующие действия",
+                        ),
                         RightPanelView::Assets => {
                             ("Ассеты", "генерация, библиотека, экспорт и варианты")
                         }
@@ -13131,10 +13982,17 @@ impl LeetcodeApp {
                             self.refresh_file_rows();
                             self.refresh_git_summary();
                             self.refresh_project_profiles();
+                            if self.right_panel_view == RightPanelView::Project {
+                                self.refresh_unreal_start_state();
+                            }
                         }
-                        refresh_response.on_hover_text(
-                            "Обновляет дерево файлов, Git-сводку и список профилей проекта.",
-                        );
+                        refresh_response.on_hover_text(if self.right_panel_view
+                            == RightPanelView::Project
+                        {
+                            "Проверяет текущие файлы проекта и показывает изменения относительно последней Project Map."
+                        } else {
+                            "Обновляет дерево файлов, Git-сводку и список профилей проекта."
+                        });
                     });
                 });
                 ui.add_space(6.0);
@@ -13156,9 +14014,21 @@ impl LeetcodeApp {
                         RightPanelView::Map => self.show_project_map_side_panel(ui),
                         RightPanelView::Release => self.show_release_cockpit(ui),
                         RightPanelView::Project => {
-                            flat_section(ui, |ui| self.show_project_panel(ui));
-                            flat_section(ui, |ui| self.show_terminal_panel(ui));
-                            flat_section(ui, |ui| self.show_desktop_panel(ui, ctx));
+                            self.show_project_analysis_panel(ui);
+                            flat_collapsing_section(
+                                ui,
+                                "Инструменты проекта",
+                                false,
+                                |ui| {
+                                    self.show_project_panel(ui);
+                                },
+                            );
+                            flat_collapsing_section(ui, "Терминал", false, |ui| {
+                                self.show_terminal_panel(ui);
+                            });
+                            flat_collapsing_section(ui, "Рабочий стол", false, |ui| {
+                                self.show_desktop_panel(ui, ctx);
+                            });
                         }
                         RightPanelView::Assets => {
                             flat_section(ui, |ui| self.show_asset_panel(ui, ctx));
@@ -13584,6 +14454,7 @@ impl LeetcodeApp {
 
     fn show_release_cockpit(&mut self, ui: &mut egui::Ui) {
         let workspace = self.workspace.clone();
+        let production_report = workspace.as_ref().and_then(load_production_report);
         let diagnostics = environment_diagnostics(&self.config, workspace.as_ref());
         let version = workspace
             .as_ref()
@@ -13603,7 +14474,17 @@ impl LeetcodeApp {
                     .is_file()
             })
             .unwrap_or(false);
-        let checklist = release_checklist(
+        let production_preflight_present = workspace
+            .as_ref()
+            .map(|workspace| {
+                workspace
+                    .root()
+                    .join("scripts")
+                    .join("production-preflight.ps1")
+                    .is_file()
+            })
+            .unwrap_or(false);
+        let mut checklist = release_checklist(
             workspace.as_ref(),
             &self.project_profiles,
             &self.git_summary,
@@ -13612,6 +14493,22 @@ impl LeetcodeApp {
             package_script_present,
             !artifacts.is_empty(),
         );
+        checklist.push(ReleaseChecklistItem {
+            title: "Production validation".to_string(),
+            detail: production_report
+                .as_ref()
+                .map(|report| {
+                    format!(
+                        "passed {}, warnings {}, failed {}, skipped {}",
+                        report.passed, report.warnings, report.failed, report.skipped
+                    )
+                })
+                .unwrap_or_else(|| "единый отчёт ещё не собран".to_string()),
+            ok: production_report
+                .as_ref()
+                .map(|report| report.ready)
+                .unwrap_or(false),
+        });
         let passed = checklist.iter().filter(|item| item.ok).count();
         let readiness = if checklist.is_empty() {
             0.0
@@ -13620,6 +14517,23 @@ impl LeetcodeApp {
         };
 
         ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    workspace.is_some()
+                        && production_preflight_present
+                        && !self.project_is_running,
+                    egui::Button::new("Production preflight"),
+                )
+                .on_hover_text(
+                    "Запустить единый Release-проход: fmt, check, тесты, три бинарника, relay smoke, packaging и manifests.",
+                )
+                .clicked()
+            {
+                self.start_release_command_by_ids(
+                    &["production_preflight"],
+                    "production preflight",
+                );
+            }
             if ui
                 .add_enabled(
                     workspace.is_some() && !self.project_is_running,
@@ -13773,6 +14687,139 @@ impl LeetcodeApp {
             );
             roadmap_metric(&mut columns[1], passed, "пунктов ok");
             roadmap_metric(&mut columns[2], artifacts.len(), "артефактов");
+        });
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Production validation",
+                "Единый контроль runtime, manifests, провайдеров, MCP, Unreal, Project Map и визуальных эталонов.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Обновить отчёт").clicked() {
+                    if let Some(workspace) = workspace.as_ref() {
+                        let report = production_validation_snapshot(workspace, &self.config);
+                        match save_production_report(workspace, &report) {
+                            Ok(()) => {
+                                self.project_status = format!(
+                                    "Production validation: passed {}, warnings {}, failed {}",
+                                    report.passed, report.warnings, report.failed
+                                );
+                            }
+                            Err(error) => self.project_status = error.to_string(),
+                        }
+                    }
+                }
+                if ui
+                    .button("Принять Project Map")
+                    .on_hover_text(
+                        "Сохранить текущую структуру Project Map как golden. Нажимайте только после проверки архитектурных изменений.",
+                    )
+                    .clicked()
+                {
+                    if let Some(workspace) = workspace.as_ref() {
+                        match update_project_map_golden(workspace) {
+                            Ok(golden) => {
+                                self.project_status = format!(
+                                    "Golden Project Map обновлён: {} узлов, {} связей",
+                                    golden.node_count, golden.edge_count
+                                );
+                            }
+                            Err(error) => self.project_status = error.to_string(),
+                        }
+                    }
+                }
+                let screenshot_available = self.desktop_last_screenshot.is_some();
+                if ui
+                    .add_enabled(screenshot_available, egui::Button::new("Принять UI-эталон"))
+                    .on_hover_text(
+                        "Сохранить последний снимок как эталон desktop release. Сначала визуально проверьте изображение.",
+                    )
+                    .clicked()
+                {
+                    if let (Some(workspace), Some(path)) =
+                        (workspace.as_ref(), self.desktop_last_screenshot.clone())
+                    {
+                        let args = VisualSnapshotArgs {
+                            scenario: VisualScenario::DesktopRelease,
+                            path,
+                        };
+                        self.project_status = match record_visual_baseline(workspace, &args) {
+                            Ok(baseline) => format!(
+                                "UI-эталон сохранён: {} ({}x{})",
+                                baseline.label, baseline.width, baseline.height
+                            ),
+                            Err(error) => error.to_string(),
+                        };
+                    }
+                }
+                if ui
+                    .add_enabled(screenshot_available, egui::Button::new("Сравнить UI"))
+                    .on_hover_text(
+                        "Сравнить последний снимок desktop release с принятым эталоном.",
+                    )
+                    .clicked()
+                {
+                    if let (Some(workspace), Some(path)) =
+                        (workspace.as_ref(), self.desktop_last_screenshot.clone())
+                    {
+                        let args = VisualSnapshotArgs {
+                            scenario: VisualScenario::DesktopRelease,
+                            path,
+                        };
+                        self.project_status = match compare_visual_snapshot(workspace, &args) {
+                            Ok(result) => format!(
+                                "Visual regression: {} · mean {:.4} · changed {:.1}%",
+                                if result.passed { "ok" } else { "regression" },
+                                result.mean_error,
+                                result.changed_pixel_ratio * 100.0
+                            ),
+                            Err(error) => error.to_string(),
+                        };
+                    }
+                }
+            });
+            if let Some(report) = production_report.as_ref() {
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, format!("passed {}", report.passed));
+                    chip(ui, format!("warnings {}", report.warnings));
+                    chip(ui, format!("failed {}", report.failed));
+                    chip(ui, format!("skipped {}", report.skipped));
+                });
+                ui.add_space(5.0);
+                for check in &report.checks {
+                    ui.horizontal_wrapped(|ui| {
+                        let (marker, color) = match check.status {
+                            ProductionCheckStatus::Passed => {
+                                ("●", egui::Color32::from_rgb(105, 201, 143))
+                            }
+                            ProductionCheckStatus::Warning => {
+                                ("●", egui::Color32::from_rgb(216, 178, 95))
+                            }
+                            ProductionCheckStatus::Failed => {
+                                ("●", egui::Color32::from_rgb(235, 120, 120))
+                            }
+                            ProductionCheckStatus::Skipped => ("○", egui::Color32::GRAY),
+                        };
+                        ui.colored_label(color, marker);
+                        ui.label(RichText::new(&check.label).strong().small());
+                        ui.add(
+                            egui::Label::new(RichText::new(&check.detail).weak().small())
+                                .wrap()
+                                .halign(egui::Align::Min),
+                        );
+                    });
+                }
+            } else {
+                full_width_wrapped_label(
+                    ui,
+                    RichText::new(
+                        "Отчёта пока нет. Нажмите «Обновить отчёт» или запустите Production preflight.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
         });
 
         flat_section(ui, |ui| {
@@ -14230,6 +15277,451 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_project_analysis_panel(&mut self, ui: &mut egui::Ui) {
+        self.drain_game_task_builder_scan();
+
+        let Some(workspace) = self.workspace.clone() else {
+            empty_state(
+                ui,
+                "Проект не выбран",
+                "Откройте рабочую папку, чтобы увидеть результат анализа, полноту Project Map и следующие действия.",
+            );
+            return;
+        };
+
+        let project_name = project_display_name(workspace.root());
+        if !self.has_unreal_game_project() {
+            flat_section(ui, |ui| {
+                panel_header(
+                    ui,
+                    "Проект открыт",
+                    "Для обычных проектов агент использует структуру файлов, код, Git и память проекта.",
+                );
+                ui.add_space(6.0);
+                status_line(ui, "Проект", &project_name);
+                status_line(ui, "Файлы", &self.file_rows.len().to_string());
+                let kinds = self
+                    .project_profiles
+                    .iter()
+                    .map(|profile| profile.kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                status_line(
+                    ui,
+                    "Профиль",
+                    if kinds.is_empty() {
+                        "не определён"
+                    } else {
+                        &kinds
+                    },
+                );
+            });
+            empty_state(
+                ui,
+                "Глубокий Unreal-анализ не требуется",
+                "Project Map с Asset Registry и игровыми связями запускается только для папок с .uproject.",
+            );
+            return;
+        }
+
+        if self.game_task_builder_ui.readiness_report.is_none() {
+            self.game_task_builder_ui.readiness_report =
+                Some(project_map_readiness(&workspace, false));
+        }
+        if self.game_task_builder_ui.last_scan.is_none() {
+            self.game_task_builder_ui.last_scan =
+                load_game_task_builder_state(&workspace).last_scan;
+        }
+
+        let Some(readiness) = self.game_task_builder_ui.readiness_report.clone() else {
+            empty_state(
+                ui,
+                "Результат анализа пока недоступен",
+                "Откройте конструктор игровой задачи и запустите анализ проекта.",
+            );
+            return;
+        };
+        let last_scan = self.game_task_builder_ui.last_scan.clone();
+        let scan_running = self.game_task_builder_ui.deep_scan_rx.is_some();
+        let effective_status = if scan_running {
+            ProjectMapReadinessStatus::Scanning
+        } else {
+            readiness.status
+        };
+        let health = &readiness.health;
+        let (status_title, status_detail, status_color) = match effective_status {
+            ProjectMapReadinessStatus::Ready => (
+                "Анализ завершён",
+                "Project Map готова: агент может выбирать точные Unreal-объекты и проверять их зависимости.".to_string(),
+                egui::Color32::from_rgb(101, 196, 139),
+            ),
+            ProjectMapReadinessStatus::Scanning => (
+                "Анализ выполняется",
+                "Leetcode получает Asset Registry, перестраивает связи и проверяет итоговую полноту.".to_string(),
+                accent_color(),
+            ),
+            ProjectMapReadinessStatus::Degraded => (
+                "Анализ завершён частично",
+                "Базовая структура доступна, но для точных игровых изменений нужны дополнительные данные.".to_string(),
+                egui::Color32::from_rgb(224, 176, 84),
+            ),
+            ProjectMapReadinessStatus::Stale => (
+                "Проект изменён после анализа",
+                if readiness.changes.is_empty() {
+                    "Карта и текущий проект различаются. Синхронизируйте Project Map перед новой изменяющей задачей.".to_string()
+                } else {
+                    format!(
+                        "После анализа найдено {} изменений: +{} новых, ~{} изменённых, −{} удалённых файлов.",
+                        readiness.changes.total(),
+                        readiness.changes.added_count,
+                        readiness.changes.modified_count,
+                        readiness.changes.removed_count
+                    )
+                },
+                egui::Color32::from_rgb(224, 176, 84),
+            ),
+            ProjectMapReadinessStatus::Failed => (
+                "Анализ завершился с ошибкой",
+                "Сохранённые данные не удалены. Ниже показана причина и доступен повторный запуск.".to_string(),
+                egui::Color32::from_rgb(226, 104, 104),
+            ),
+            ProjectMapReadinessStatus::Uninitialized => (
+                "Анализ ещё не запускался",
+                "Запустите автоматический анализ, чтобы построить Project Map и получить связи Unreal-ассетов.".to_string(),
+                muted_color(),
+            ),
+        };
+
+        flat_section(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(status_title)
+                        .strong()
+                        .size(18.0)
+                        .color(status_color),
+                );
+                if scan_running {
+                    ui.spinner();
+                }
+            });
+            ui.label(RichText::new(&status_detail).weak().small());
+            ui.add_space(7.0);
+            ui.add(
+                egui::ProgressBar::new(health.coverage_percent as f32 / 100.0)
+                    .desired_width(safe_available_width(ui, 120.0))
+                    .text(format!(
+                        "Готовность данных: {} из 100",
+                        health.coverage_percent
+                    ))
+                    .animate(scan_running),
+            )
+            .on_hover_text(
+                "Готовность источников Project Map: структура, Unreal Asset Registry, игровые связи и внешние зависимости.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                chip(ui, project_name.clone());
+                chip(
+                    ui,
+                    format!(
+                        "UE: {}",
+                        if readiness.engine_available {
+                            "найден"
+                        } else {
+                            "не найден"
+                        }
+                    ),
+                );
+                chip(ui, format!("MCP: {}", readiness.mcp_server_count));
+            });
+            if readiness.updated_at > 0 {
+                ui.label(
+                    RichText::new(format!(
+                        "Карта обновлена {}",
+                        age_label(readiness.updated_at)
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
+            if readiness.unreal_project && !readiness.changes.baseline_available {
+                ui.label(
+                    RichText::new(
+                        "Контроль изменений включится после ближайшей синхронизации Project Map.",
+                    )
+                    .weak()
+                    .small(),
+                );
+            }
+        });
+
+        if !readiness.changes.is_empty() {
+            flat_collapsing_section(
+                ui,
+                "Изменения после анализа",
+                true,
+                |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(format!("+ {}", readiness.changes.added_count))
+                                .color(egui::Color32::from_rgb(101, 196, 139))
+                                .monospace(),
+                        );
+                        ui.label(
+                            RichText::new(format!("~ {}", readiness.changes.modified_count))
+                                .color(egui::Color32::from_rgb(224, 176, 84))
+                                .monospace(),
+                        );
+                        ui.label(
+                            RichText::new(format!("− {}", readiness.changes.removed_count))
+                                .color(egui::Color32::from_rgb(226, 104, 104))
+                                .monospace(),
+                        );
+                    });
+                    ui.label(
+                    RichText::new(
+                        "Это реальные входные файлы Unreal-проекта, изменившиеся после последней построенной карты.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                    for path in readiness.changes.added_paths.iter().take(8) {
+                        ui.label(
+                            RichText::new(format!("+ {path}"))
+                                .color(egui::Color32::from_rgb(101, 196, 139))
+                                .monospace()
+                                .small(),
+                        );
+                    }
+                    for path in readiness.changes.modified_paths.iter().take(8) {
+                        ui.label(
+                            RichText::new(format!("~ {path}"))
+                                .color(egui::Color32::from_rgb(224, 176, 84))
+                                .monospace()
+                                .small(),
+                        );
+                    }
+                    for path in readiness.changes.removed_paths.iter().take(8) {
+                        ui.label(
+                            RichText::new(format!("− {path}"))
+                                .color(egui::Color32::from_rgb(226, 104, 104))
+                                .monospace()
+                                .small(),
+                        );
+                    }
+                    let visible = readiness.changes.added_paths.len().min(8)
+                        + readiness.changes.modified_paths.len().min(8)
+                        + readiness.changes.removed_paths.len().min(8);
+                    if readiness.changes.total() > visible {
+                        ui.label(
+                            RichText::new(format!(
+                                "Ещё {} изменений будут учтены при синхронизации.",
+                                readiness.changes.total() - visible
+                            ))
+                            .weak()
+                            .small(),
+                        );
+                    }
+                },
+            );
+        }
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Что найдено",
+                "Основной состав построенной Project Map.",
+            );
+            ui.add_space(6.0);
+            ui.columns(2, |columns| {
+                roadmap_metric(&mut columns[0], health.node_count, "узлов");
+                roadmap_metric(&mut columns[1], health.edge_count, "связей");
+            });
+            ui.add_space(8.0);
+            ui.columns(2, |columns| {
+                roadmap_metric(&mut columns[0], health.unreal_asset_nodes, "Unreal-ассетов");
+                roadmap_metric(
+                    &mut columns[1],
+                    health.semantic_edge_count,
+                    "игровых связей",
+                );
+            });
+            ui.add_space(6.0);
+            status_line(ui, "Код", &health.code_nodes.to_string());
+            status_line(ui, "Связанные узлы", &health.linked_nodes.to_string());
+            status_line(
+                ui,
+                "Engine и плагины",
+                &health.external_dependency_nodes.to_string(),
+            );
+        });
+
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Полнота данных",
+                "Из каких источников складывается итоговая готовность.",
+            );
+            ui.add_space(6.0);
+            for area in &health.coverage_areas {
+                ui.horizontal_wrapped(|ui| {
+                    let color = if area.ready {
+                        egui::Color32::from_rgb(101, 196, 139)
+                    } else {
+                        egui::Color32::from_rgb(224, 176, 84)
+                    };
+                    ui.label(RichText::new(&area.label).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{}/{}", area.score, area.max_score))
+                                .monospace()
+                                .color(color),
+                        );
+                    });
+                });
+                ui.add(
+                    egui::ProgressBar::new(if area.max_score == 0 {
+                        0.0
+                    } else {
+                        area.score as f32 / area.max_score as f32
+                    })
+                    .desired_width(safe_available_width(ui, 120.0))
+                    .show_percentage(),
+                );
+                if !area.ready {
+                    ui.label(RichText::new(&area.detail).weak().small());
+                }
+                ui.add_space(5.0);
+            }
+        });
+
+        let attention_count = health.unresolved_nodes
+            + health.ambiguous_labels
+            + health.dependency_cycles
+            + health.stale_nodes;
+        if attention_count > 0 || !health.diagnostics.is_empty() {
+            flat_collapsing_section(ui, "Требует внимания", true, |ui| {
+                if health.unresolved_nodes > 0 {
+                    status_line(
+                        ui,
+                        "Ссылки без цели в /Game",
+                        &health.unresolved_nodes.to_string(),
+                    );
+                }
+                if health.ambiguous_labels > 0 {
+                    status_line(
+                        ui,
+                        "Повторяющиеся имена",
+                        &health.ambiguous_labels.to_string(),
+                    );
+                }
+                if health.dependency_cycles > 0 {
+                    status_line(
+                        ui,
+                        "Циклы зависимостей",
+                        &health.dependency_cycles.to_string(),
+                    );
+                }
+                if health.stale_nodes > 0 {
+                    status_line(ui, "Устаревшие узлы", &health.stale_nodes.to_string());
+                }
+                for diagnostic in health.diagnostics.iter().take(4) {
+                    ui.add(egui::Label::new(RichText::new(diagnostic).weak().small()).wrap());
+                }
+            });
+        }
+
+        if let Some(scan) = last_scan.as_ref() {
+            flat_section(ui, |ui| {
+                panel_header(
+                    ui,
+                    "Последний запуск",
+                    "Сохранённый итог глубокого анализа.",
+                );
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, scan.status.label());
+                    if let Some(duration_ms) = scan.duration_ms {
+                        chip(ui, format_history_duration_ms(duration_ms));
+                    }
+                    if let Some(finished_at) = scan.finished_at {
+                        ui.label(RichText::new(age_label(finished_at)).weak().small());
+                    }
+                });
+                ui.add(egui::Label::new(RichText::new(&scan.detail).weak().small()).wrap());
+            });
+        }
+
+        let mut start_scan = false;
+        let mut open_map = false;
+        let mut open_builder = false;
+        flat_section(ui, |ui| {
+            panel_header(
+                ui,
+                "Следующий шаг",
+                if effective_status == ProjectMapReadinessStatus::Ready {
+                    "Анализ сохранён. Можно изучить карту или сформировать точную игровую задачу."
+                } else if scan_running {
+                    "Дождитесь завершения. Вкладка останется открытой и покажет итог автоматически."
+                } else {
+                    "Повторный запуск обновит недостающие источники и проверит результат."
+                },
+            );
+            ui.add_space(7.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        !scan_running,
+                        egui::Button::new(
+                            if effective_status == ProjectMapReadinessStatus::Ready {
+                                "Обновить анализ"
+                            } else if effective_status == ProjectMapReadinessStatus::Stale
+                                && !readiness.changes.is_empty()
+                            {
+                                "Синхронизировать изменения"
+                            } else {
+                                "Завершить анализ"
+                            },
+                        ),
+                    )
+                    .clicked()
+                {
+                    start_scan = true;
+                }
+                if ui
+                    .add_enabled(health.node_count > 0, egui::Button::new("Открыть карту"))
+                    .clicked()
+                {
+                    open_map = true;
+                }
+                if ui.button("Конструктор задачи").clicked() {
+                    open_builder = true;
+                }
+            });
+            if !readiness.remediation.is_empty()
+                && effective_status != ProjectMapReadinessStatus::Ready
+            {
+                ui.add_space(8.0);
+                for option in readiness.remediation.iter().take(3) {
+                    ui.label(RichText::new(&option.title).strong().small());
+                    ui.add(
+                        egui::Label::new(RichText::new(&option.description).weak().small()).wrap(),
+                    );
+                }
+            }
+        });
+
+        if start_scan {
+            self.start_game_task_builder_scan();
+        }
+        if open_map {
+            self.set_workspace_mode(WorkspaceMode::Map);
+            self.right_panel_view = RightPanelView::Map;
+            self.persist_layout_state();
+        }
+        if open_builder {
+            self.open_game_task_builder();
+        }
+    }
+
     fn show_project_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.heading("Проект");
@@ -14262,6 +15754,9 @@ impl LeetcodeApp {
             ui.label(RichText::new("Рабочая папка не выбрана").weak());
             return;
         }
+
+        self.show_unreal_bridge_summary(ui);
+        self.show_mcp_bridge_summary(ui);
 
         if self.project_profiles.is_empty() {
             ui.label(RichText::new("Профиль проекта не обнаружен").weak());
@@ -14338,6 +15833,164 @@ impl LeetcodeApp {
         }
 
         self.show_game_workflow_buttons(ui);
+    }
+
+    fn show_unreal_bridge_summary(&self, ui: &mut egui::Ui) {
+        let Some(snapshot) = &self.unreal_snapshot else {
+            return;
+        };
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Unreal Bridge").strong());
+            if let Some(engine) = &snapshot.selected_engine {
+                let version = engine.version.as_deref().unwrap_or("версия не определена");
+                ui.label(RichText::new(format!("UE {version}")).color(accent_color()));
+                ui.label(RichText::new(&engine.root).weak())
+                    .on_hover_text(&engine.root);
+            } else {
+                ui.label(
+                    RichText::new("движок не найден").color(egui::Color32::from_rgb(216, 178, 95)),
+                );
+            }
+        });
+        if let Some(project) = &snapshot.project {
+            status_line(
+                ui,
+                "Проект",
+                &format!(
+                    "{} · EngineAssociation {}",
+                    project.name,
+                    project.engine_association.as_deref().unwrap_or("не задан")
+                ),
+            );
+        } else if let Some(plugin) = snapshot.local_plugins.first() {
+            status_line(
+                ui,
+                "Плагин",
+                &format!(
+                    "{} · {}",
+                    plugin.name,
+                    plugin.version_name.as_deref().unwrap_or("без версии")
+                ),
+            );
+        }
+        ui.horizontal_wrapped(|ui| {
+            for component in &snapshot.toolchain {
+                let color = if component.available {
+                    egui::Color32::from_rgb(105, 201, 143)
+                } else {
+                    egui::Color32::from_rgb(216, 178, 95)
+                };
+                let response = ui.label(
+                    RichText::new(format!(
+                        "{} {}",
+                        if component.available { "●" } else { "○" },
+                        component.label
+                    ))
+                    .color(color),
+                );
+                response.on_hover_text(format!(
+                    "{}\n{}",
+                    component.detail,
+                    component.path.as_deref().unwrap_or("путь не найден")
+                ));
+            }
+        });
+        if !snapshot.diagnostics.is_empty() {
+            ui.collapsing(
+                format!("Диагностика · {}", snapshot.diagnostics.len()),
+                |ui| {
+                    for diagnostic in &snapshot.diagnostics {
+                        ui.label(RichText::new(format!("• {diagnostic}")).weak());
+                    }
+                },
+            );
+        }
+        ui.separator();
+    }
+
+    fn show_mcp_bridge_summary(&mut self, ui: &mut egui::Ui) {
+        let Some(snapshot) = self.mcp_snapshot.clone() else {
+            return;
+        };
+        if snapshot.servers.is_empty() {
+            return;
+        }
+
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("MCP Bridge").strong());
+            ui.label(RichText::new(format!("{} серверов", snapshot.servers.len())).weak());
+        });
+        ui.label(
+            RichText::new("Безопасные подключения к Unreal и внешним инструментам проекта.").weak(),
+        )
+        .on_hover_text(&snapshot.security_notice);
+
+        let mut requested_check = None;
+        for server in snapshot.servers {
+            ui.horizontal_wrapped(|ui| {
+                let color = if server.status.connected {
+                    egui::Color32::from_rgb(105, 201, 143)
+                } else if server.status.last_error.is_some() {
+                    egui::Color32::from_rgb(216, 178, 95)
+                } else {
+                    ui.visuals().weak_text_color()
+                };
+                ui.label(RichText::new("●").color(color));
+                ui.label(RichText::new(&server.config.label).strong());
+                ui.label(
+                    RichText::new(server.config.transport.label())
+                        .small()
+                        .weak(),
+                );
+                let state = if server.status.connected {
+                    "подключён"
+                } else if server.status.last_error.is_some() {
+                    "ошибка"
+                } else {
+                    "не проверен"
+                };
+                ui.label(RichText::new(state).color(color));
+                if ui
+                    .small_button("Проверить")
+                    .on_hover_text(
+                        "Добавить в чат задачу безопасно подключиться к серверу и прочитать список доступных инструментов.",
+                    )
+                    .clicked()
+                {
+                    requested_check = Some(server.config.id.clone());
+                }
+            });
+            let allowed = server.config.allowed_tools.len();
+            let advertised = server.status.tools.len();
+            status_line(
+                ui,
+                "Allowlist",
+                &format!("{allowed} разрешено · {advertised} объявлено сервером"),
+            );
+            if let Some(error) = server.status.last_error.as_deref() {
+                ui.label(
+                    RichText::new(compact_inline(error, 180))
+                        .small()
+                        .color(egui::Color32::from_rgb(216, 178, 95)),
+                )
+                .on_hover_text(error);
+            }
+        }
+        ui.label(
+            RichText::new(format!("Реестр: {}", snapshot.registry_path))
+                .small()
+                .weak(),
+        )
+        .on_hover_text("JSON хранится внутри проекта. Секреты в нём не сохраняются: для stdio указываются только имена переменных окружения.");
+        if let Some(server_id) = requested_check {
+            self.input = format!(
+                "Проверь MCP-сервер {server_id}: сначала покажи mcp_snapshot, затем выполни mcp_discover. Ничего не изменяй через сервер без отдельного подтверждения."
+            );
+        }
+        ui.separator();
     }
 
     fn show_desktop_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -14487,6 +16140,106 @@ impl LeetcodeApp {
                     }
                 }
             });
+        });
+
+        let is_unreal = self
+            .project_profiles
+            .iter()
+            .any(|profile| profile.kind.eq_ignore_ascii_case("unreal"));
+        if !is_unreal {
+            return;
+        }
+
+        let gameplay_state = self.workspace.as_ref().map(load_gameplay_state);
+        let latest_plan = gameplay_state
+            .as_ref()
+            .and_then(|state| state.plans.last())
+            .cloned();
+        let latest_run = gameplay_state
+            .as_ref()
+            .and_then(|state| state.runs.last())
+            .cloned();
+        ui.separator();
+        ui.collapsing("Unreal Gameplay", |ui| {
+            ui.label(
+                RichText::new("Планы уровней, безопасное применение и playtest")
+                    .weak()
+                    .small(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("Новый gameplay-план")
+                    .on_hover_text(
+                        "Подготовить запрос агенту: выбрать recipe, карту, задачи и узел Project Map.",
+                    )
+                    .clicked()
+                {
+                    self.input = "Создай gameplay-план Unreal для текущей задачи. Сначала вызови gameplay_snapshot, учти выбранный узел Project Map, затем предложи подходящий recipe, карту, системы и проверки. Свяжи план с актуальными task и roadmap, если они есть.".to_string();
+                    self.set_workspace_mode(WorkspaceMode::Chat);
+                }
+                if ui
+                    .add_enabled(latest_plan.is_some(), egui::Button::new("Применить план"))
+                    .on_hover_text(
+                        "Попросить агента построить и применить декларативный manifest к уровню Unreal.",
+                    )
+                    .clicked()
+                {
+                    if let Some(plan) = &latest_plan {
+                        self.input = format!(
+                            "Примени gameplay-план {} ({}) к карте {}. Сначала проверь план через gameplay_snapshot, затем используй apply_gameplay_plan только с безопасными декларативными операциями. Для сложных Blueprint/PCG/Niagara-графов используй Unreal MCP. После применения запусти playtest.",
+                            plan.title, plan.id, plan.map_path
+                        );
+                        self.set_workspace_mode(WorkspaceMode::Chat);
+                    }
+                }
+                if ui
+                    .add_enabled(latest_plan.is_some(), egui::Button::new("Playtest"))
+                    .on_hover_text(
+                        "Запустить Automation или map smoke, собрать лог, отчёт и скриншот.",
+                    )
+                    .clicked()
+                {
+                    if let Some(plan) = &latest_plan {
+                        self.input = format!(
+                            "Проверь gameplay-план {} ({}) на карте {}. Выбери run_gameplay_playtest automation, если есть подходящий тест, иначе map_smoke со скриншотом. Проанализируй issues и артефакты и не объявляй задачу готовой при ошибке.",
+                            plan.title, plan.id, plan.map_path
+                        );
+                        self.set_workspace_mode(WorkspaceMode::Chat);
+                    }
+                }
+            });
+
+            if let Some(plan) = latest_plan {
+                ui.horizontal_wrapped(|ui| {
+                    chip(ui, gameplay_plan_status_label(plan.status));
+                    ui.label(RichText::new(plan.title).strong());
+                    ui.label(RichText::new(plan.recipe.label()).weak());
+                    ui.label(RichText::new(plan.map_path).monospace().weak());
+                });
+            } else {
+                ui.label(RichText::new("Gameplay-планов пока нет").weak());
+            }
+            if let Some(run) = latest_run {
+                ui.horizontal_wrapped(|ui| {
+                    chip(
+                        ui,
+                        if run.success {
+                            "playtest: успешно"
+                        } else {
+                            "playtest: ошибка"
+                        },
+                    );
+                    ui.label(RichText::new(format!("{} мс", run.duration_ms)).weak());
+                    ui.label(
+                        RichText::new(format!(
+                            "артефактов: {} · проблем: {}",
+                            run.artifacts.len(),
+                            run.issues.len()
+                        ))
+                        .weak(),
+                    );
+                });
+            }
         });
     }
 
@@ -14761,6 +16514,7 @@ impl LeetcodeApp {
             {
                 if let Some(workspace) = &self.workspace {
                     self.asset_jobs = load_jobs(workspace);
+                    self.asset_3d_jobs = load_3d_jobs(workspace);
                 }
             }
         });
@@ -14774,6 +16528,7 @@ impl LeetcodeApp {
                     "spritesheet" => "Спрайт-лист",
                     "audio" => "Аудио",
                     "video" => "Видео",
+                    "3d" => "3D",
                     _ => "Изображение",
                 })
                 .width(118.0)
@@ -14783,6 +16538,7 @@ impl LeetcodeApp {
                         ("spritesheet", "Спрайт-лист"),
                         ("audio", "Аудио"),
                         ("video", "Видео"),
+                        ("3d", "3D"),
                     ] {
                         ui.selectable_value(&mut self.asset_kind_input, id.to_string(), label);
                     }
@@ -14791,6 +16547,10 @@ impl LeetcodeApp {
         if self.asset_kind_input != old_asset_kind {
             self.sync_asset_provider_settings_for(&old_asset_provider);
             self.switch_asset_kind_from_ui();
+        }
+        if self.asset_kind_input == "3d" {
+            self.show_3d_asset_panel(ui);
+            return;
         }
         if matches!(self.asset_kind_input.as_str(), "image" | "spritesheet") {
             ui.horizontal_wrapped(|ui| {
@@ -14929,6 +16689,272 @@ impl LeetcodeApp {
             });
     }
 
+    fn show_3d_asset_panel(&mut self, ui: &mut egui::Ui) {
+        let old_provider = self.asset_provider_input.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Провайдер 3D");
+            egui::ComboBox::from_id_salt("asset_3d_provider_select")
+                .selected_text(
+                    three_d_provider_spec(&self.asset_provider_input)
+                        .map(|spec| spec.name)
+                        .unwrap_or("Meshy"),
+                )
+                .width(132.0)
+                .show_ui(ui, |ui| {
+                    for provider in three_d_provider_specs() {
+                        ui.selectable_value(
+                            &mut self.asset_provider_input,
+                            provider.id.to_string(),
+                            provider.name,
+                        );
+                    }
+                });
+            if let Some(provider) = three_d_provider_spec(&self.asset_provider_input) {
+                ui.hyperlink_to(provider.env_var, provider.terms_url)
+                    .on_hover_text("Условия использования и лицензирования провайдера");
+            }
+        });
+        if self.asset_provider_input != old_provider {
+            self.sync_asset_provider_settings_for(&old_provider);
+            self.switch_asset_provider_from_ui(self.asset_provider_input.clone());
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Модель");
+            ui.add_sized(
+                [(safe_available_width(ui, 200.0) - 70.0).max(110.0), 24.0],
+                TextEdit::singleline(&mut self.asset_model_input),
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("API-ключ");
+            ui.add_sized(
+                [(safe_available_width(ui, 220.0) - 92.0).max(112.0), 24.0],
+                TextEdit::singleline(&mut self.asset_api_key_input).password(true),
+            );
+            if ui.button("Сохранить").clicked() {
+                self.save_settings_from_ui();
+            }
+        });
+
+        ui.add(
+            TextEdit::multiline(&mut self.asset_prompt)
+                .hint_text("Опишите игровой 3D-ассет, форму, стиль, материалы и ограничения")
+                .desired_width(safe_available_width(ui, 200.0))
+                .desired_rows(3),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Изображение");
+            ui.add_sized(
+                [(safe_available_width(ui, 250.0) - 104.0).max(130.0), 24.0],
+                TextEdit::singleline(&mut self.asset_3d_source_image_input)
+                    .hint_text("необязательно: путь внутри проекта"),
+            );
+            if ui.button("Выбрать").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Изображение", &["png", "jpg", "jpeg", "webp"])
+                    .pick_file()
+                {
+                    let relative = self
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| path.strip_prefix(workspace.root()).ok())
+                        .map(|path| path.to_string_lossy().replace('\\', "/"));
+                    if let Some(relative) = relative {
+                        self.asset_3d_source_image_input = relative;
+                    } else {
+                        match self.attach_external_file(&path, InputAttachmentKind::Image) {
+                            Ok(attachment) => {
+                                self.asset_3d_source_image_input = attachment.path;
+                                self.refresh_file_rows();
+                            }
+                            Err(err) => self.asset_status = err,
+                        }
+                    }
+                }
+            }
+            if !self.asset_3d_source_image_input.is_empty() && ui.small_button("Очистить").clicked()
+            {
+                self.asset_3d_source_image_input.clear();
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Формат");
+            egui::ComboBox::from_id_salt("asset_3d_format")
+                .selected_text(self.asset_3d_target_format.to_uppercase())
+                .width(72.0)
+                .show_ui(ui, |ui| {
+                    for format in ["glb", "gltf", "fbx", "usd"] {
+                        ui.selectable_value(
+                            &mut self.asset_3d_target_format,
+                            format.to_string(),
+                            format.to_uppercase(),
+                        );
+                    }
+                });
+            ui.label("полигоны");
+            ui.add(
+                egui::DragValue::new(&mut self.asset_3d_target_polycount)
+                    .range(48..=500_000)
+                    .speed(500),
+            );
+            ui.checkbox(&mut self.asset_3d_enable_pbr, "PBR")
+                .on_hover_text("Запросить текстуры и материалы физически корректного рендеринга");
+            egui::ComboBox::from_id_salt("asset_3d_pose")
+                .selected_text(if self.asset_3d_pose_mode.is_empty() {
+                    "без позы"
+                } else {
+                    &self.asset_3d_pose_mode
+                })
+                .width(88.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.asset_3d_pose_mode, String::new(), "без позы");
+                    ui.selectable_value(
+                        &mut self.asset_3d_pose_mode,
+                        "a-pose".to_string(),
+                        "A-pose",
+                    );
+                    ui.selectable_value(
+                        &mut self.asset_3d_pose_mode,
+                        "t-pose".to_string(),
+                        "T-pose",
+                    );
+                });
+        });
+        ui.checkbox(
+            &mut self.asset_3d_license_confirmed,
+            "Я подтверждаю право использовать входные данные и результат провайдера",
+        )
+        .on_hover_text(
+            "Подтверждение сохраняется в provenance рядом с ассетом и обязательно для импорта",
+        );
+        if ui
+            .add_enabled(
+                !self.asset_is_running && self.workspace.is_some(),
+                egui::Button::new(if self.asset_3d_source_image_input.is_empty() {
+                    "Создать 3D из текста"
+                } else {
+                    "Создать 3D из изображения"
+                }),
+            )
+            .clicked()
+        {
+            self.start_3d_asset_submit();
+        }
+
+        if !self.asset_status.is_empty() {
+            ui.label(RichText::new(&self.asset_status).weak());
+        }
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(RichText::new("3D-пайплайн").strong());
+        ui.label(
+            RichText::new(
+                "Задания выполняются асинхронно. Обновление статуса скачивает готовый файл, provenance и запускает локальную проверку.",
+            )
+            .weak(),
+        );
+
+        let jobs = self
+            .asset_3d_jobs
+            .iter()
+            .rev()
+            .take(16)
+            .cloned()
+            .collect::<Vec<_>>();
+        if jobs.is_empty() {
+            ui.label(RichText::new("3D-заданий пока нет").weak());
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("asset_3d_jobs_scroll")
+            .max_height(340.0)
+            .show(ui, |ui| {
+                for job in jobs {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(three_d_status_label(job.status)).strong());
+                        chip(ui, three_d_stage_label(job.stage));
+                        chip(ui, &job.provider);
+                        chip(ui, format!("{}%", job.progress));
+                    });
+                    ui.add(
+                        egui::ProgressBar::new(job.progress as f32 / 100.0)
+                            .desired_width(safe_available_width(ui, 180.0))
+                            .show_percentage(),
+                    );
+                    ui.label(compact_inline(&job.prompt, 180));
+                    if let Some(path) = job.output_files.first() {
+                        ui.label(RichText::new(path).monospace());
+                    }
+                    if let Some(validation) = &job.validation {
+                        ui.horizontal_wrapped(|ui| {
+                            chip(
+                                ui,
+                                if validation.import_ready {
+                                    "готов к Unreal"
+                                } else {
+                                    "нужна доработка"
+                                },
+                            );
+                            chip(ui, format!("tri {}", validation.triangle_count));
+                            chip(ui, format!("mat {}", validation.material_count));
+                            chip(ui, format!("anim {}", validation.animation_count));
+                            if validation.nanite_recommended {
+                                chip(ui, "Nanite");
+                            }
+                        });
+                    }
+                    if let Some(error) = &job.error {
+                        ui.label(RichText::new(compact_inline(error, 200)).weak());
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .add_enabled(
+                                !self.asset_is_running
+                                    && !matches!(
+                                        job.status,
+                                        ThreeDJobStatus::Ready | ThreeDJobStatus::Failed
+                                    ),
+                                egui::Button::new("Обновить статус"),
+                            )
+                            .clicked()
+                        {
+                            self.start_3d_asset_refresh(job.id.clone());
+                        }
+                        if ui
+                            .add_enabled(
+                                job.output_files.first().is_some(),
+                                egui::Button::new("Проверить"),
+                            )
+                            .clicked()
+                        {
+                            self.validate_3d_job(job.clone());
+                        }
+                        if ui
+                            .add_enabled(
+                                job.validation
+                                    .as_ref()
+                                    .map(|report| report.import_ready)
+                                    .unwrap_or(false),
+                                egui::Button::new("В Unreal"),
+                            )
+                            .on_hover_text("Подготовить в чате безопасный импорт через Unreal Python/Interchange")
+                            .clicked()
+                        {
+                            self.queue_3d_unreal_import(&job);
+                        }
+                        if let Some(path) = job.output_files.first() {
+                            if ui.button("Папка").clicked() {
+                                self.open_asset_folder(path);
+                            }
+                        }
+                    });
+                }
+            });
+    }
+
     fn show_asset_card(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, job: AssetJob) {
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -15022,6 +17048,21 @@ impl LeetcodeApp {
                 self.active_center_tab = CenterTab::Agent;
             }
 
+            if self.has_unreal_game_project() {
+                let selected = self.active_center_tab == CenterTab::GameTaskBuilder;
+                let (builder_response, _) = center_tab_button(
+                    ui,
+                    "game-task-builder",
+                    "Конструктор игровой задачи",
+                    selected,
+                    false,
+                );
+                if builder_response.clicked() {
+                    self.game_task_builder_ui.open = true;
+                    self.active_center_tab = CenterTab::GameTaskBuilder;
+                }
+            }
+
             let tabs = self
                 .file_tabs
                 .iter()
@@ -15060,6 +17101,7 @@ impl LeetcodeApp {
 
         match self.active_center_tab.clone() {
             CenterTab::Agent => self.show_agent_tab(ui),
+            CenterTab::GameTaskBuilder => self.show_game_task_builder_tab(ui),
             CenterTab::File(path) => self.show_file_preview_tab(ui, &path),
         }
     }
@@ -15327,6 +17369,22 @@ impl LeetcodeApp {
             compact_inline(&self.model_input, 20)
         );
         let chat_title = self.active_conversation_title();
+        let is_unreal_project = self.has_unreal_game_project();
+        let project_type = if is_unreal_project {
+            "Unreal Engine".to_string()
+        } else if self.project_profiles.is_empty() {
+            "Обычная папка".to_string()
+        } else {
+            self.project_profiles
+                .iter()
+                .map(|profile| profile.kind.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .join(" + ")
+        };
+        let unreal_readiness = self.game_task_builder_ui.readiness_report.clone();
+        let unreal_setup = self.game_task_builder_ui.setup_report.clone();
 
         ui.set_min_width(width);
         ui.set_max_width(width);
@@ -15342,6 +17400,7 @@ impl LeetcodeApp {
                 ui,
                 format!("Проект · {}", compact_inline(&project_name, 24)),
             );
+            chip(ui, format!("Тип · {}", compact_inline(&project_type, 24)));
             chip(ui, format!("Чат · {}", compact_inline(&chat_title, 24)));
         });
         ui.add_space(6.0);
@@ -15357,6 +17416,15 @@ impl LeetcodeApp {
         ui.add_space(14.0);
         ui.separator();
         ui.add_space(12.0);
+        if is_unreal_project {
+            self.show_unreal_project_start(
+                ui,
+                &project_name,
+                unreal_readiness.as_ref(),
+                unreal_setup.as_ref(),
+            );
+            return;
+        }
         ui.label(RichText::new("Быстрый старт").strong());
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
@@ -15414,6 +17482,104 @@ impl LeetcodeApp {
             .weak()
             .small(),
         );
+    }
+
+    fn show_unreal_project_start(
+        &mut self,
+        ui: &mut egui::Ui,
+        project_name: &str,
+        readiness: Option<&ProjectMapReadinessReport>,
+        setup: Option<&UnrealSetupReport>,
+    ) {
+        let status = readiness
+            .map(|report| report.status)
+            .unwrap_or(ProjectMapReadinessStatus::Uninitialized);
+        let scan_running = self.game_task_builder_ui.deep_scan_rx.is_some()
+            || status == ProjectMapReadinessStatus::Scanning;
+        let map_ready = status == ProjectMapReadinessStatus::Ready;
+
+        ui.label(RichText::new("Начните отсюда").strong().size(18.0));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(
+                "Leetcode сначала изучит Unreal-проект и построит карту объектов и связей. После этого можно выбрать игровую задачу и точный объект без ручной настройки.",
+            )
+            .weak(),
+        );
+        ui.add_space(12.0);
+
+        ui.horizontal_wrapped(|ui| {
+            unreal_start_step(ui, "1", "Проект открыт", project_name, true);
+            unreal_start_step(ui, "2", "Project Map", status.label(), map_ready);
+            unreal_start_step(
+                ui,
+                "3",
+                "Задача агенту",
+                if map_ready {
+                    "доступна"
+                } else {
+                    "после анализа"
+                },
+                map_ready,
+            );
+        });
+
+        ui.add_space(14.0);
+        let primary_label = match status {
+            ProjectMapReadinessStatus::Ready => "Создать задачу для игры",
+            ProjectMapReadinessStatus::Scanning => "Проект анализируется...",
+            _ => "Начать работу с проектом",
+        };
+        ui.horizontal_wrapped(|ui| {
+            let primary = egui::Button::new(
+                RichText::new(primary_label)
+                    .strong()
+                    .color(egui::Color32::from_rgb(5, 12, 16)),
+            )
+            .fill(accent_color());
+            if ui
+                .add_enabled_ui(!scan_running, |ui| ui.add_sized([280.0, 40.0], primary))
+                .inner
+                .clicked()
+            {
+                self.open_game_task_builder();
+            }
+            let can_open_map = readiness
+                .map(|report| report.health.node_count > 0)
+                .unwrap_or(false);
+            if ui
+                .add_enabled(can_open_map, egui::Button::new("Открыть карту проекта"))
+                .on_hover_text("Показать найденные модули, ассеты, Blueprint и их связи")
+                .clicked()
+            {
+                self.set_workspace_mode(WorkspaceMode::Map);
+            }
+            if scan_running {
+                ui.spinner();
+            }
+        });
+
+        ui.add_space(8.0);
+        let status_text = match readiness {
+            Some(report) if report.status == ProjectMapReadinessStatus::Ready => format!(
+                "Карта готова: {} объектов, {} связей, покрытие {}%.",
+                report.health.node_count, report.health.edge_count, report.health.coverage_percent
+            ),
+            Some(report) if report.status == ProjectMapReadinessStatus::Scanning => {
+                "Leetcode читает Asset Registry, зависимости и семантические связи. Окно можно оставить открытым.".to_string()
+            }
+            Some(report) => format!(
+                "Текущее состояние карты: {}. Нажмите главную кнопку — мастер покажет только необходимые действия.",
+                report.status.label()
+            ),
+            None => "Анализ ещё не запускался. Нажмите главную кнопку; терминал и ручная настройка не потребуются.".to_string(),
+        };
+        ui.label(RichText::new(status_text).weak());
+        if !map_ready {
+            if let Some(setup) = setup {
+                ui.label(RichText::new(&setup.summary).weak().small());
+            }
+        }
     }
 
     fn show_context_note_suggestions(&mut self, ui: &mut egui::Ui) {
@@ -15931,20 +18097,34 @@ impl LeetcodeApp {
             return;
         };
 
-        let mut graph = load_project_graph(&workspace);
+        let mut cache = self.project_map_cache_for(&workspace);
+        let map_root_id = project_map_root_id(&cache.graph).to_string();
+        if self
+            .project_map_structure_anchor_id
+            .as_ref()
+            .is_none_or(|id| !cache.node_indices.contains_key(id))
+        {
+            self.project_map_structure_anchor_id = Some(map_root_id.clone());
+            self.project_map_structure_page = 0;
+        }
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Карта проекта").strong().size(22.0));
-            ui.label(RichText::new(format!("{} узлов", graph.nodes.len())).weak());
-            ui.label(RichText::new(format!("{} связей", graph.edges.len())).weak());
+            ui.label(RichText::new(format!("{} узлов", cache.graph.nodes.len())).weak());
+            ui.label(RichText::new(format!("{} связей", cache.graph.edges.len())).weak());
             if ui.button("Обновить карту").clicked() {
-                graph = scan_project_graph(&workspace);
+                let graph = refresh_project_graph(&workspace);
                 match save_project_graph(&workspace, &graph) {
                     Ok(()) => {
+                        cache = self.replace_project_map_cache(&workspace, graph);
                         self.project_map_status =
                             "карта обновлена и сохранена в project_graph.json".to_string();
                     }
                     Err(err) => self.project_map_status = format!("не удалось сохранить: {err}"),
                 }
+            }
+            if ui.button("Импорт Asset Registry").clicked() {
+                self.import_unreal_asset_registry(&workspace);
+                cache = self.project_map_cache_for(&workspace);
             }
             if ui.button("Сбросить вид").clicked() {
                 self.project_map_pan = egui::Vec2::ZERO;
@@ -15953,7 +18133,7 @@ impl LeetcodeApp {
         });
         ui.label(
             RichText::new(
-                "Перетаскивайте полотно, меняйте масштаб, кликайте по узлам. Двойной клик по файловому узлу откроет предпросмотр.",
+                "Карта показывает только полезный срез графа. Колесо меняет масштаб, drag перемещает полотно, клик выбирает узел.",
             )
             .weak(),
         );
@@ -15961,35 +18141,153 @@ impl LeetcodeApp {
             ui.label(RichText::new(&self.project_map_status).weak());
         }
         ui.add_space(6.0);
+        let mut focus_query_requested = false;
         ui.horizontal_wrapped(|ui| {
-            ui.add_sized(
-                [260.0, 26.0],
-                TextEdit::singleline(&mut self.project_map_query)
-                    .hint_text("поиск по узлам, путям, summary"),
-            );
-            egui::ComboBox::from_id_salt("project_map_filter")
-                .selected_text(self.project_map_filter.label())
-                .show_ui(ui, |ui| {
-                    for filter in ProjectMapFilter::ALL {
-                        ui.selectable_value(&mut self.project_map_filter, filter, filter.label());
+            for mode in ProjectMapViewMode::ALL {
+                if ui
+                    .selectable_label(self.project_map_view_mode == mode, mode.label())
+                    .on_hover_text(mode.description())
+                    .clicked()
+                {
+                    self.project_map_view_mode = mode;
+                    self.project_map_pan = egui::Vec2::ZERO;
+                    self.project_map_zoom = 1.0;
+                    if mode == ProjectMapViewMode::Structure {
+                        self.project_map_structure_page = 0;
+                        if let Some(selected_id) = self.project_map_selected_node_id.clone() {
+                            self.set_project_map_structure_anchor_for_node(&cache, &selected_id);
+                        }
                     }
-                });
-            ui.add(egui::Slider::new(&mut self.project_map_zoom, 0.45..=1.9).text("масштаб"));
-            if ui.button("Показать скрытые").clicked() {
-                self.project_map_hidden_node_ids.clear();
+                    if matches!(
+                        mode,
+                        ProjectMapViewMode::Dependencies | ProjectMapViewMode::Impact
+                    ) && self.project_map_selected_node_id.is_none()
+                    {
+                        let root_id = project_map_root_id(&cache.graph).to_string();
+                        self.project_map_selected_node_id = Some(root_id.clone());
+                        let _ = save_project_graph_selection(&workspace, Some(&root_id));
+                    }
+                }
             }
+            if self.project_map_view_mode != ProjectMapViewMode::Overview {
+                let search_response = ui.add_sized(
+                    [240.0, 26.0],
+                    TextEdit::singleline(&mut self.project_map_query)
+                        .hint_text("найти узел и нажать Enter"),
+                );
+                focus_query_requested = search_response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                egui::ComboBox::from_id_salt("project_map_filter")
+                    .selected_text(self.project_map_filter.label())
+                    .show_ui(ui, |ui| {
+                        for filter in ProjectMapFilter::ALL {
+                            ui.selectable_value(
+                                &mut self.project_map_filter,
+                                filter,
+                                filter.label(),
+                            );
+                        }
+                    });
+                if matches!(
+                    self.project_map_view_mode,
+                    ProjectMapViewMode::Dependencies | ProjectMapViewMode::Impact
+                ) {
+                    ui.label(RichText::new("глубина").small().weak());
+                    ui.add(
+                        egui::DragValue::new(&mut self.project_map_depth)
+                            .range(1..=3)
+                            .speed(0.1),
+                    )
+                    .on_hover_text("Сколько уровней связей показывать от выбранного узла");
+                }
+                if self.project_map_view_mode == ProjectMapViewMode::Structure {
+                    let anchor_id = self
+                        .project_map_structure_anchor_id
+                        .as_deref()
+                        .unwrap_or(&map_root_id);
+                    let child_count = project_map_structural_child_count(
+                        &cache,
+                        anchor_id,
+                        &self.project_map_hidden_node_ids,
+                        self.project_map_filter,
+                    );
+                    let page_count = child_count.div_ceil(PROJECT_MAP_STRUCTURE_PAGE_SIZE).max(1);
+                    if self.project_map_structure_page >= page_count {
+                        self.project_map_structure_page = page_count - 1;
+                    }
+                    let page_start =
+                        self.project_map_structure_page * PROJECT_MAP_STRUCTURE_PAGE_SIZE;
+                    let page_end = (page_start + PROJECT_MAP_STRUCTURE_PAGE_SIZE).min(child_count);
+                    ui.label(
+                        RichText::new(if child_count == 0 {
+                            "ветвь пуста".to_string()
+                        } else {
+                            format!("ветви {}–{} из {child_count}", page_start + 1, page_end)
+                        })
+                        .small()
+                        .weak(),
+                    );
+                    if ui
+                        .add_enabled(self.project_map_structure_page > 0, egui::Button::new("‹"))
+                        .on_hover_text("Предыдущая страница текущей ветви")
+                        .clicked()
+                    {
+                        self.project_map_structure_page -= 1;
+                        self.project_map_pan = egui::Vec2::ZERO;
+                    }
+                    if ui
+                        .add_enabled(
+                            self.project_map_structure_page + 1 < page_count,
+                            egui::Button::new("›"),
+                        )
+                        .on_hover_text("Следующая страница текущей ветви")
+                        .clicked()
+                    {
+                        self.project_map_structure_page += 1;
+                        self.project_map_pan = egui::Vec2::ZERO;
+                    }
+                }
+                if ui.button("Показать скрытые").clicked() {
+                    self.project_map_hidden_node_ids.clear();
+                }
+            } else {
+                ui.label(
+                    RichText::new("клик по подсистеме — открыть её структуру")
+                        .small()
+                        .weak(),
+                );
+            }
+            ui.add(
+                egui::Slider::new(&mut self.project_map_zoom, 0.35..=2.4)
+                    .show_value(false)
+                    .text("масштаб"),
+            )
+            .on_hover_text("Масштаб также меняется колесом мыши над картой");
         });
-        ui.add_space(6.0);
-
-        let visible_nodes = self.filtered_project_map_nodes(&graph);
-        if visible_nodes.is_empty() {
-            empty_state(
-                ui,
-                "Узлы не найдены",
-                "Сбросьте поиск/фильтр или нажмите «Обновить карту».",
-            );
-            return;
+        ui.label(
+            RichText::new(self.project_map_view_mode.description())
+                .small()
+                .weak(),
+        );
+        if self.project_map_view_mode != ProjectMapViewMode::Overview {
+            self.show_project_map_navigation(ui, &workspace, &cache);
         }
+        if focus_query_requested {
+            if let Some(node_id) = project_map_find_node(&cache.graph, &self.project_map_query) {
+                self.select_project_map_node(&workspace, &node_id);
+                if self.project_map_view_mode == ProjectMapViewMode::Structure {
+                    self.set_project_map_structure_anchor_for_node(&cache, &node_id);
+                }
+                self.project_map_pan = egui::Vec2::ZERO;
+                self.project_map_zoom = 1.0;
+            } else {
+                self.project_map_status = format!(
+                    "узел по запросу «{}» не найден",
+                    self.project_map_query.trim()
+                );
+            }
+        }
+        ui.add_space(6.0);
 
         let width = safe_available_width(ui, 520.0);
         let height = ui.available_height().max(360.0);
@@ -15998,23 +18296,478 @@ impl LeetcodeApp {
         let painter = ui.painter_at(rect);
         painter.rect_filled(
             rect,
-            egui::Rounding::same(8.0),
+            egui::Rounding::same(6.0),
             egui::Color32::from_rgb(8, 10, 14),
         );
         painter.rect_stroke(
             rect,
-            egui::Rounding::same(8.0),
+            egui::Rounding::same(6.0),
             egui::Stroke::new(1.0, border_color()),
         );
 
+        self.navigate_project_map_canvas(ui, ctx, rect, &response);
+        match self.project_map_view_mode {
+            ProjectMapViewMode::Overview => {
+                self.draw_project_map_overview(ui, rect, &response, &painter, &workspace, &cache);
+            }
+            ProjectMapViewMode::Structure => {
+                self.draw_project_map_structure(ui, rect, &response, &painter, &workspace, &cache);
+            }
+            ProjectMapViewMode::Dependencies | ProjectMapViewMode::Impact => {
+                self.draw_project_map_focused(ui, rect, &response, &painter, &workspace, &cache);
+            }
+        }
+    }
+
+    fn show_project_map_navigation(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+        cache: &ProjectMapGraphCache,
+    ) {
+        let root_id = project_map_root_id(&cache.graph).to_string();
+        let focus_id = self
+            .project_map_selected_node_id
+            .clone()
+            .or_else(|| self.project_map_structure_anchor_id.clone())
+            .unwrap_or_else(|| root_id.clone());
+        let parent_id = cache.structural_parent_by_node.get(&focus_id).cloned();
+        let breadcrumbs = project_map_breadcrumb_ids(cache, &focus_id);
+        let mut action = None;
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Навигация").small().weak());
+            if ui
+                .add_enabled(
+                    !self.project_map_navigation_back.is_empty(),
+                    egui::Button::new("←"),
+                )
+                .on_hover_text("Вернуться к предыдущему выбранному узлу")
+                .clicked()
+            {
+                action = Some(ProjectMapNavigationAction::Back);
+            }
+            if ui
+                .add_enabled(
+                    !self.project_map_navigation_forward.is_empty(),
+                    egui::Button::new("→"),
+                )
+                .on_hover_text("Перейти вперёд по истории карты")
+                .clicked()
+            {
+                action = Some(ProjectMapNavigationAction::Forward);
+            }
+            if ui
+                .add_enabled(parent_id.is_some(), egui::Button::new("↑"))
+                .on_hover_text("Подняться к родительскому узлу, не меняя режим карты")
+                .clicked()
+            {
+                action = Some(ProjectMapNavigationAction::Parent);
+            }
+            if ui
+                .button("⌂")
+                .on_hover_text("Перейти к корню проекта")
+                .clicked()
+            {
+                action = Some(ProjectMapNavigationAction::Root);
+            }
+            ui.separator();
+            let visible_start = breadcrumbs.len().saturating_sub(6);
+            if visible_start > 0 {
+                ui.label(RichText::new("…").weak());
+            }
+            for (index, node_id) in breadcrumbs.iter().enumerate().skip(visible_start) {
+                if index > visible_start {
+                    ui.label(RichText::new("›").weak());
+                }
+                let label = cache
+                    .node_indices
+                    .get(node_id)
+                    .and_then(|node_index| cache.graph.nodes.get(*node_index))
+                    .map(|node| compact_inline(&node.label, 22))
+                    .unwrap_or_else(|| compact_inline(node_id, 22));
+                let selected = node_id == &focus_id;
+                if ui
+                    .selectable_label(selected, label)
+                    .on_hover_text("Перейти к этому уровню и сохранить текущий режим")
+                    .clicked()
+                {
+                    action = Some(ProjectMapNavigationAction::Select(node_id.clone()));
+                }
+            }
+        });
+
+        if let Some(action) = action {
+            self.apply_project_map_navigation(action, workspace, cache);
+        }
+    }
+
+    fn apply_project_map_navigation(
+        &mut self,
+        action: ProjectMapNavigationAction,
+        workspace: &Workspace,
+        cache: &ProjectMapGraphCache,
+    ) {
+        let root_id = project_map_root_id(&cache.graph).to_string();
+        let target = match action {
+            ProjectMapNavigationAction::Back => {
+                let Some(target) = self.project_map_navigation_back.pop() else {
+                    return;
+                };
+                if let Some(current) = self.project_map_selected_node_id.clone() {
+                    push_project_map_history(&mut self.project_map_navigation_forward, current);
+                }
+                self.apply_project_map_selection(workspace, &target, false);
+                target
+            }
+            ProjectMapNavigationAction::Forward => {
+                let Some(target) = self.project_map_navigation_forward.pop() else {
+                    return;
+                };
+                if let Some(current) = self.project_map_selected_node_id.clone() {
+                    push_project_map_history(&mut self.project_map_navigation_back, current);
+                }
+                self.apply_project_map_selection(workspace, &target, false);
+                target
+            }
+            ProjectMapNavigationAction::Parent => {
+                let focus_id = self
+                    .project_map_selected_node_id
+                    .as_deref()
+                    .or(self.project_map_structure_anchor_id.as_deref())
+                    .unwrap_or(&root_id);
+                let Some(target) = cache.structural_parent_by_node.get(focus_id).cloned() else {
+                    return;
+                };
+                self.apply_project_map_selection(workspace, &target, true);
+                target
+            }
+            ProjectMapNavigationAction::Root => {
+                self.apply_project_map_selection(workspace, &root_id, true);
+                root_id
+            }
+            ProjectMapNavigationAction::Select(target) => {
+                self.apply_project_map_selection(workspace, &target, true);
+                target
+            }
+        };
+
+        if self.project_map_view_mode == ProjectMapViewMode::Structure {
+            self.set_project_map_structure_anchor_for_node(cache, &target);
+        }
+        self.project_map_pan = egui::Vec2::ZERO;
+        self.project_map_zoom = 1.0;
+    }
+
+    fn set_project_map_structure_anchor_for_node(
+        &mut self,
+        cache: &ProjectMapGraphCache,
+        node_id: &str,
+    ) {
+        let (anchor_id, page) = if project_map_has_structural_children(cache, node_id) {
+            (node_id.to_string(), 0)
+        } else {
+            let anchor_id = cache
+                .structural_parent_by_node
+                .get(node_id)
+                .cloned()
+                .unwrap_or_else(|| project_map_root_id(&cache.graph).to_string());
+            let page = project_map_visible_structural_children(
+                cache,
+                &anchor_id,
+                &self.project_map_hidden_node_ids,
+                self.project_map_filter,
+            )
+            .iter()
+            .position(|(child_id, _)| child_id == node_id)
+            .map(|index| index / PROJECT_MAP_STRUCTURE_PAGE_SIZE)
+            .unwrap_or_default();
+            (anchor_id, page)
+        };
+        if self.project_map_structure_anchor_id.as_deref() != Some(&anchor_id)
+            || self.project_map_structure_page != page
+        {
+            self.project_map_structure_anchor_id = Some(anchor_id);
+            self.project_map_structure_page = page;
+        }
+    }
+
+    fn navigate_project_map_canvas(
+        &mut self,
+        ui: &egui::Ui,
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        response: &egui::Response,
+    ) {
         if response.dragged() {
-            let delta = ui.input(|input| input.pointer.delta());
-            self.project_map_pan += delta;
+            self.project_map_pan += ui.input(|input| input.pointer.delta());
             ctx.request_repaint();
         }
+        if !response.hovered() {
+            return;
+        }
+        let scroll = ui.input(|input| input.raw_scroll_delta.y);
+        if scroll.abs() < f32::EPSILON {
+            return;
+        }
+        let old_zoom = self.project_map_zoom;
+        let new_zoom = (old_zoom * (scroll * 0.0015).exp()).clamp(0.35, 2.4);
+        let pointer = response.hover_pos().unwrap_or(rect.center());
+        let world = (pointer - rect.center() - self.project_map_pan) / old_zoom.max(0.01);
+        self.project_map_pan = pointer - rect.center() - world * new_zoom;
+        self.project_map_zoom = new_zoom;
+        ctx.request_repaint();
+    }
 
-        let positions = project_map_positions(&visible_nodes);
+    fn draw_project_map_overview(
+        &mut self,
+        _ui: &egui::Ui,
+        rect: egui::Rect,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        workspace: &Workspace,
+        cache: &ProjectMapGraphCache,
+    ) {
+        let positions = project_map_overview_positions();
         let screen_positions = positions
+            .iter()
+            .map(|(group, pos)| {
+                (
+                    *group,
+                    project_map_to_screen(*pos, rect, self.project_map_pan, self.project_map_zoom),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let pointer = response.hover_pos();
+        let mut hovered_group_edge = None;
+        let mut hovered_group_edge_distance = f32::MAX;
+        for ((from_group, to_group), count) in &cache.group_edges {
+            if from_group == to_group || *count == 0 {
+                continue;
+            }
+            let (Some(from), Some(to)) = (
+                screen_positions.get(from_group),
+                screen_positions.get(to_group),
+            ) else {
+                continue;
+            };
+            let strength = ((*count as f32).ln_1p() / 9.0).clamp(0.2, 1.0);
+            painter.line_segment(
+                [*from, *to],
+                egui::Stroke::new(
+                    0.8 + strength * 2.0,
+                    egui::Color32::from_rgba_unmultiplied(65, 82, 96, 90),
+                ),
+            );
+            if let Some(pointer) = pointer {
+                let distance = distance_to_segment(pointer, *from, *to);
+                if distance <= 8.0 && distance < hovered_group_edge_distance {
+                    hovered_group_edge_distance = distance;
+                    hovered_group_edge = Some((*from_group, *to_group, *count));
+                }
+            }
+        }
+
+        let mut hovered = None;
+        for group in ProjectMapGroup::ALL {
+            let Some(pos) = screen_positions.get(&group) else {
+                continue;
+            };
+            let count = cache.group_counts.get(&group).copied().unwrap_or_default();
+            if count == 0 {
+                continue;
+            }
+            let radius = (38.0 + (count.max(1) as f32).ln_1p() * 4.2)
+                * self.project_map_zoom.clamp(0.7, 1.2);
+            if !rect.expand(radius + 60.0).contains(*pos) {
+                continue;
+            }
+            let is_hovered = pointer.is_some_and(|value| value.distance(*pos) <= radius + 8.0);
+            if is_hovered {
+                hovered = Some(group);
+            }
+            painter.circle_filled(*pos, radius, group.color());
+            painter.circle_stroke(
+                *pos,
+                radius,
+                egui::Stroke::new(
+                    if is_hovered { 2.5 } else { 1.0 },
+                    if is_hovered {
+                        text_color()
+                    } else {
+                        border_color()
+                    },
+                ),
+            );
+            painter.text(
+                *pos + egui::vec2(0.0, -5.0),
+                egui::Align2::CENTER_CENTER,
+                count.to_string(),
+                egui::FontId::proportional(17.0),
+                egui::Color32::WHITE,
+            );
+            painter.text(
+                *pos + egui::vec2(0.0, radius + 8.0),
+                egui::Align2::CENTER_TOP,
+                group.label(),
+                egui::FontId::proportional(13.0),
+                if is_hovered {
+                    text_color()
+                } else {
+                    muted_color()
+                },
+            );
+        }
+
+        if hovered.is_none() {
+            if let Some((from_group, to_group, count)) = hovered_group_edge {
+                let key = if from_group <= to_group {
+                    (from_group, to_group)
+                } else {
+                    (to_group, from_group)
+                };
+                let kinds = cache
+                    .group_edge_kinds
+                    .get(&key)
+                    .map(project_map_group_relation_summary)
+                    .unwrap_or_else(|| "типы связей не определены".to_string());
+                response.clone().on_hover_text(format!(
+                    "{} ↔ {}\n{} связей\n{}",
+                    from_group.label(),
+                    to_group.label(),
+                    count,
+                    kinds
+                ));
+            }
+        }
+
+        if let Some(group) = hovered {
+            response.clone().on_hover_text(format!(
+                "{}\n{} узлов\n{}\nНажмите, чтобы открыть детали",
+                group.label(),
+                cache.group_counts.get(&group).copied().unwrap_or_default(),
+                group.description()
+            ));
+            if response.clicked() {
+                self.project_map_view_mode = ProjectMapViewMode::Structure;
+                self.project_map_pan = egui::Vec2::ZERO;
+                self.project_map_zoom = 1.0;
+                let anchor_id = project_map_overview_anchor_for_group(cache, group);
+                self.project_map_structure_anchor_id = Some(anchor_id.clone());
+                self.project_map_structure_page = 0;
+                self.apply_project_map_selection(workspace, &anchor_id, true);
+            }
+        }
+    }
+
+    fn draw_project_map_structure(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        workspace: &Workspace,
+        cache: &ProjectMapGraphCache,
+    ) {
+        let anchor_id = self
+            .project_map_structure_anchor_id
+            .as_deref()
+            .filter(|id| cache.node_indices.contains_key(*id))
+            .unwrap_or_else(|| project_map_root_id(&cache.graph));
+        let layout = project_map_structure_layout(
+            cache,
+            anchor_id,
+            self.project_map_selected_node_id.as_deref(),
+            &self.project_map_hidden_node_ids,
+            self.project_map_filter,
+            self.project_map_structure_page,
+        );
+        if layout.nodes.is_empty() {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Структурные связи не найдены. Обновите карту или сбросьте фильтр.",
+                egui::FontId::proportional(15.0),
+                muted_color(),
+            );
+            return;
+        }
+        self.draw_project_map_layout(
+            ui,
+            rect,
+            response,
+            painter,
+            workspace,
+            cache,
+            layout,
+            ProjectMapViewMode::Structure,
+        );
+    }
+
+    fn draw_project_map_focused(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        workspace: &Workspace,
+        cache: &ProjectMapGraphCache,
+    ) {
+        let focus_id = self
+            .project_map_selected_node_id
+            .clone()
+            .unwrap_or_else(|| project_map_root_id(&cache.graph).to_string());
+        let impact_only = self.project_map_view_mode == ProjectMapViewMode::Impact;
+        let layout = project_map_focused_layout(
+            cache,
+            &focus_id,
+            self.project_map_depth,
+            impact_only,
+            &self.project_map_hidden_node_ids,
+            self.project_map_filter,
+        );
+        if layout.nodes.is_empty() {
+            let message = if impact_only {
+                "Для выбранного узла не найдено подтверждённых направлений влияния. Попробуйте увеличить глубину или выбрать связанный узел."
+            } else {
+                "Выберите узел, используйте поиск или перейдите по хлебным крошкам."
+            };
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                message,
+                egui::FontId::proportional(15.0),
+                muted_color(),
+            );
+            return;
+        }
+        self.draw_project_map_layout(
+            ui,
+            rect,
+            response,
+            painter,
+            workspace,
+            cache,
+            layout,
+            self.project_map_view_mode,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_project_map_layout(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        response: &egui::Response,
+        painter: &egui::Painter,
+        workspace: &Workspace,
+        cache: &ProjectMapGraphCache,
+        layout: ProjectMapLayout,
+        canvas_mode: ProjectMapViewMode,
+    ) {
+        let screen_positions = layout
+            .positions
             .iter()
             .map(|(id, pos)| {
                 (
@@ -16023,96 +18776,167 @@ impl LeetcodeApp {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-
-        for edge in &graph.edges {
-            let Some(from) = screen_positions.get(&edge.from) else {
-                continue;
-            };
-            let Some(to) = screen_positions.get(&edge.to) else {
-                continue;
-            };
-            let selected_edge = self
-                .project_map_selected_node_id
-                .as_ref()
-                .map(|selected| selected == &edge.from || selected == &edge.to)
-                .unwrap_or(false);
-            let stroke = if selected_edge {
-                egui::Stroke::new(1.5, subtle_accent())
+        let node_rects = layout
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let center = screen_positions.get(&node.id)?;
+                Some((
+                    node.id.clone(),
+                    project_map_node_rect(*center, self.project_map_zoom),
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+        draw_project_map_lane_headers(painter, rect, canvas_mode, self.project_map_depth);
+        let pointer = response.hover_pos();
+        let hovered_node_id = pointer.and_then(|pointer| {
+            layout
+                .nodes
+                .iter()
+                .find(|node| {
+                    node_rects
+                        .get(&node.id)
+                        .is_some_and(|area| area.contains(pointer))
+                })
+                .map(|node| node.id.clone())
+        });
+        let mut routed_edges = Vec::new();
+        let mut hovered_edge = None;
+        let mut hovered_edge_distance = f32::MAX;
+        for edge in &layout.edges {
+            let reversed = layout.reversed_edge_ids.contains(&edge.id);
+            let (visual_from, visual_to) = if reversed {
+                (&edge.to, &edge.from)
             } else {
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(42, 50, 59))
+                (&edge.from, &edge.to)
             };
-            painter.line_segment([*from, *to], stroke);
-        }
-
-        let pointer_pos = response.interact_pointer_pos();
-        let mut hover_node: Option<ProjectGraphNode> = None;
-        let mut clicked_node: Option<ProjectGraphNode> = None;
-        for node in &visible_nodes {
-            let Some(pos) = screen_positions.get(&node.id) else {
+            let (Some(from_rect), Some(to_rect)) =
+                (node_rects.get(visual_from), node_rects.get(visual_to))
+            else {
                 continue;
             };
-            let radius =
-                project_map_node_radius(node.kind) * self.project_map_zoom.clamp(0.7, 1.35);
-            let is_selected = self.project_map_selected_node_id.as_deref() == Some(&node.id);
-            let is_pinned = self.project_map_pinned_node_ids.contains(&node.id);
-            let fill = project_map_node_color(node.kind, is_selected, is_pinned);
-            painter.circle_filled(*pos, radius, fill);
-            painter.circle_stroke(
-                *pos,
-                radius,
-                egui::Stroke::new(
-                    if is_selected { 2.0 } else { 1.0 },
-                    if is_selected {
-                        accent_color()
-                    } else {
-                        border_color()
-                    },
-                ),
-            );
-            let label = compact_inline(&node.label, 28);
-            painter.text(
-                *pos + egui::vec2(0.0, radius + 5.0),
-                egui::Align2::CENTER_TOP,
-                label,
-                egui::FontId::proportional(12.0),
-                if is_selected {
-                    text_color()
-                } else {
-                    muted_color()
-                },
-            );
-            if let Some(pointer) = pointer_pos {
-                if pointer.distance(*pos) <= radius + 8.0 {
-                    hover_node = Some(node.clone());
-                    if response.clicked() {
-                        clicked_node = Some(node.clone());
-                    }
+            let route = project_map_edge_route(*from_rect, *to_rect);
+            if let Some(pointer) = pointer {
+                let distance = distance_to_polyline(pointer, &route);
+                if distance <= 7.0 && distance < hovered_edge_distance {
+                    hovered_edge_distance = distance;
+                    hovered_edge = Some(edge.clone());
                 }
             }
-        }
-
-        let canvas_clicked = response.clicked();
-        let canvas_double_clicked = response.double_clicked();
-
-        if let Some(node) = hover_node {
-            response.on_hover_text(format!(
-                "{}\n{}\n{}",
-                node.label,
-                project_graph_kind_label(node.kind),
-                node.path.as_deref().unwrap_or("без пути")
+            routed_edges.push((
+                edge,
+                route,
+                visual_from.clone(),
+                visual_to.clone(),
+                reversed,
             ));
         }
 
-        if let (true, Some(node)) = (canvas_clicked, clicked_node) {
-            self.project_map_selected_node_id = Some(node.id.clone());
-            self.right_panel_view = RightPanelView::Map;
-            self.persist_layout_state();
-            if canvas_double_clicked {
-                if let Some(path) = node.path.as_deref() {
-                    if matches!(
-                        node.kind,
-                        ProjectGraphNodeKind::File | ProjectGraphNodeKind::Asset
-                    ) {
+        for (edge, route, _, _, _) in &routed_edges {
+            let incident_to_hover = hovered_node_id
+                .as_deref()
+                .is_some_and(|id| edge.from == id || edge.to == id);
+            let incident_to_selection = self
+                .project_map_selected_node_id
+                .as_deref()
+                .is_some_and(|id| edge.from == id || edge.to == id);
+            let is_hovered = hovered_edge.as_ref().is_some_and(|item| item.id == edge.id);
+            let dimmed = hovered_node_id.is_some() && !incident_to_hover && !is_hovered;
+            let color = project_map_edge_color(
+                edge.kind,
+                is_hovered || incident_to_hover || incident_to_selection,
+                dimmed,
+            );
+            let width = if is_hovered {
+                2.8
+            } else if incident_to_hover || incident_to_selection {
+                1.8
+            } else {
+                1.0
+            };
+            draw_project_map_arrow(painter, route, egui::Stroke::new(width, color));
+        }
+
+        if let Some(edge) = &hovered_edge {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Help);
+            let from = project_graph_node_label_by_id(&cache.graph, &edge.from);
+            let to = project_graph_node_label_by_id(&cache.graph, &edge.to);
+            let mut tooltip = project_map_edge_tooltip(edge, &from, &to);
+            if layout.reversed_edge_ids.contains(&edge.id) {
+                tooltip.push_str(&format!("\nНаправление влияния: {to} → {from}",));
+            }
+            response.clone().on_hover_text(tooltip);
+            if let Some(pointer) = pointer {
+                draw_project_map_edge_badge(
+                    painter,
+                    rect,
+                    pointer,
+                    project_graph_edge_label(edge.kind),
+                );
+            }
+        }
+
+        let mut hovered_node = None;
+        for node in &layout.nodes {
+            let Some(node_rect) = node_rects.get(&node.id).copied() else {
+                continue;
+            };
+            if !rect.expand(90.0).intersects(node_rect) {
+                continue;
+            }
+            let is_hovered = hovered_node_id.as_deref() == Some(&node.id);
+            let is_selected = self.project_map_selected_node_id.as_deref() == Some(&node.id);
+            let is_pinned = self.project_map_pinned_node_ids.contains(&node.id);
+            let role = layout
+                .roles
+                .get(&node.id)
+                .copied()
+                .unwrap_or(ProjectMapNodeRole::Normal);
+            draw_project_map_node(
+                painter,
+                node,
+                node_rect,
+                role,
+                is_selected,
+                is_pinned,
+                is_hovered,
+                layout.hidden_neighbours.get(&node.id).copied(),
+                self.project_map_zoom,
+            );
+            if is_hovered {
+                hovered_node = Some(node.clone());
+            }
+        }
+
+        if hovered_edge.is_none() {
+            if let Some(node) = &hovered_node {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                response
+                    .clone()
+                    .on_hover_text(project_map_node_tooltip(cache, node));
+            }
+        }
+
+        if response.clicked() {
+            if let Some(node) = hovered_node.as_ref() {
+                self.select_project_map_node(workspace, &node.id);
+            }
+        }
+        if response.double_clicked() {
+            if let Some(node) = hovered_node {
+                if canvas_mode == ProjectMapViewMode::Structure
+                    && project_map_has_structural_children(cache, &node.id)
+                {
+                    self.project_map_structure_anchor_id = Some(node.id.clone());
+                    self.project_map_structure_page = 0;
+                    self.project_map_pan = egui::Vec2::ZERO;
+                    self.project_map_zoom = 1.0;
+                    self.project_map_status = format!(
+                        "открыта ветвь «{}» · вернуться можно кнопкой ← или по хлебным крошкам",
+                        node.label
+                    );
+                } else if let Some(path) = node.path.as_deref() {
+                    if project_map_node_opens_file(node.kind) {
                         self.load_file_preview(path);
                     }
                 }
@@ -16120,36 +18944,59 @@ impl LeetcodeApp {
         }
     }
 
-    fn filtered_project_map_nodes(&self, graph: &ProjectGraphState) -> Vec<ProjectGraphNode> {
-        let query = self.project_map_query.trim().to_ascii_lowercase();
-        let mut nodes = graph
-            .nodes
-            .iter()
-            .filter(|node| !self.project_map_hidden_node_ids.contains(&node.id))
-            .filter(|node| self.project_map_filter.matches(node.kind))
-            .filter(|node| {
-                if query.is_empty() {
-                    return true;
-                }
-                project_graph_node_search_blob(node).contains(&query)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        nodes.sort_by(|left, right| {
-            let left_pin = self.project_map_pinned_node_ids.contains(&left.id);
-            let right_pin = self.project_map_pinned_node_ids.contains(&right.id);
-            right_pin
-                .cmp(&left_pin)
-                .then(
-                    project_graph_kind_sort_key(left.kind)
-                        .cmp(&project_graph_kind_sort_key(right.kind)),
-                )
-                .then(left.label.cmp(&right.label))
-        });
-        if nodes.len() > 260 {
-            nodes.truncate(260);
+    fn select_project_map_node(&mut self, workspace: &Workspace, node_id: &str) {
+        self.apply_project_map_selection(workspace, node_id, true);
+    }
+
+    fn apply_project_map_selection(
+        &mut self,
+        workspace: &Workspace,
+        node_id: &str,
+        record_history: bool,
+    ) {
+        if self.project_map_selected_node_id.as_deref() == Some(node_id) {
+            self.right_panel_view = RightPanelView::Map;
+            return;
         }
-        nodes
+        if record_history {
+            if let Some(current) = self.project_map_selected_node_id.clone() {
+                push_project_map_history(&mut self.project_map_navigation_back, current);
+            }
+            self.project_map_navigation_forward.clear();
+        }
+        self.project_map_selected_node_id = Some(node_id.to_string());
+        if let Err(err) = save_project_graph_selection(workspace, Some(node_id)) {
+            self.project_map_status = format!("не удалось сохранить выбор узла: {err}");
+        }
+        self.right_panel_view = RightPanelView::Map;
+        self.persist_layout_state();
+    }
+
+    fn project_map_cache_for(&mut self, workspace: &Workspace) -> Arc<ProjectMapGraphCache> {
+        if let Some(cache) = &self.project_map_cache {
+            if cache.workspace_root == workspace.root() {
+                return cache.clone();
+            }
+        }
+        let graph = load_project_graph(workspace);
+        self.replace_project_map_cache(workspace, graph)
+    }
+
+    fn replace_project_map_cache(
+        &mut self,
+        workspace: &Workspace,
+        graph: ProjectGraphState,
+    ) -> Arc<ProjectMapGraphCache> {
+        let cache = Arc::new(ProjectMapGraphCache::new(
+            workspace.root().to_path_buf(),
+            graph,
+        ));
+        self.project_map_cache = Some(cache.clone());
+        cache
+    }
+
+    fn invalidate_project_map_cache(&mut self) {
+        self.project_map_cache = None;
     }
 
     fn show_project_map_side_panel(&mut self, ui: &mut egui::Ui) {
@@ -16162,10 +19009,10 @@ impl LeetcodeApp {
             return;
         };
 
-        let mut graph = load_project_graph(&workspace);
+        let mut cache = self.project_map_cache_for(&workspace);
         ui.horizontal_wrapped(|ui| {
-            metric_chip(ui, "узлы", graph.nodes.len());
-            metric_chip(ui, "связи", graph.edges.len());
+            metric_chip(ui, "узлы", cache.graph.nodes.len());
+            metric_chip(ui, "связи", cache.graph.edges.len());
             metric_chip(ui, "скрыто", self.project_map_hidden_node_ids.len());
         });
         ui.add_space(6.0);
@@ -16175,14 +19022,19 @@ impl LeetcodeApp {
                 self.right_panel_view = RightPanelView::Map;
             }
             if ui.button("Обновить").clicked() {
-                graph = scan_project_graph(&workspace);
+                let graph = refresh_project_graph(&workspace);
                 match save_project_graph(&workspace, &graph) {
                     Ok(()) => {
+                        cache = self.replace_project_map_cache(&workspace, graph);
                         self.project_map_status =
                             "карта обновлена и сохранена в project_graph.json".to_string();
                     }
                     Err(err) => self.project_map_status = format!("не удалось сохранить: {err}"),
                 }
+            }
+            if ui.button("Asset Registry").clicked() {
+                self.import_unreal_asset_registry(&workspace);
+                cache = self.project_map_cache_for(&workspace);
             }
             if ui.button("Сбросить скрытые").clicked() {
                 self.project_map_hidden_node_ids.clear();
@@ -16193,6 +19045,7 @@ impl LeetcodeApp {
         }
 
         ui.separator();
+        let graph = &cache.graph;
         let selected_id = self.project_map_selected_node_id.clone();
         let Some(selected_id) = selected_id else {
             empty_state(
@@ -16203,13 +19056,14 @@ impl LeetcodeApp {
             return;
         };
 
-        let Some(node) = graph
-            .nodes
-            .iter()
-            .find(|candidate| candidate.id == selected_id)
+        let Some(node) = cache
+            .node_indices
+            .get(&selected_id)
+            .and_then(|index| graph.nodes.get(*index))
             .cloned()
         else {
             self.project_map_selected_node_id = None;
+            let _ = save_project_graph_selection(&workspace, None);
             empty_state(
                 ui,
                 "Узел не найден",
@@ -16243,10 +19097,29 @@ impl LeetcodeApp {
             );
         }
 
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            if is_unreal_graph_kind(node.kind) {
+                chip(ui, "контекст Unreal активен");
+                ui.label(
+                    RichText::new("узел попадёт в prompt агента и MCP `_meta`")
+                        .weak()
+                        .small(),
+                );
+            } else {
+                chip(ui, "контекст узла активен");
+            }
+            if ui.button("Снять контекст").clicked() {
+                self.project_map_selected_node_id = None;
+                let _ = save_project_graph_selection(&workspace, None);
+                self.project_map_status = "контекст узла снят".to_string();
+            }
+        });
+
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
             if node.path.is_some()
-                && matches!(node.kind, ProjectGraphNodeKind::File | ProjectGraphNodeKind::Asset)
+                && project_graph_kind_has_file(node.kind)
                 && ui.button("Открыть файл").clicked()
             {
                 if let Some(path) = node.path.as_deref() {
@@ -16265,9 +19138,15 @@ impl LeetcodeApp {
                 }
             }
             if ui.button("Спросить агента").clicked() {
+                let exact_reference = node
+                    .metadata
+                    .get("object_path")
+                    .or_else(|| node.path.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| node.id.clone());
                 self.input = format!(
-                    "Работай с выбранным узлом карты проекта `{}`. Объясни его роль, связи и предложи следующий полезный шаг.",
-                    node.label
+                    "Работай с выбранным узлом карты проекта `{}` (`{}`). Объясни его роль и связи, затем предложи следующий полезный шаг.",
+                    node.label, exact_reference
                 );
                 self.set_workspace_mode(WorkspaceMode::Chat);
                 self.active_center_tab = CenterTab::Agent;
@@ -16275,6 +19154,7 @@ impl LeetcodeApp {
             if ui.button("Скрыть").clicked() {
                 self.project_map_hidden_node_ids.insert(node.id.clone());
                 self.project_map_selected_node_id = None;
+                let _ = save_project_graph_selection(&workspace, None);
             }
         });
 
@@ -16317,7 +19197,7 @@ impl LeetcodeApp {
                     &edge.from
                 };
                 let direction = if edge.from == node.id { "→" } else { "←" };
-                let other_label = project_graph_node_label_by_id(&graph, other_id);
+                let other_label = project_graph_node_label_by_id(graph, other_id);
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(direction).monospace().weak());
                     ui.label(project_graph_edge_label(edge.kind));
@@ -16399,10 +19279,47 @@ impl LeetcodeApp {
         });
         match save_project_graph(workspace, &graph) {
             Ok(()) => {
+                self.replace_project_map_cache(workspace, graph);
                 self.project_map_relation_target.clear();
                 self.project_map_status = format!("связь добавлена: {from_id} → {}", target.id);
             }
             Err(err) => self.project_map_status = format!("не удалось сохранить связь: {err}"),
+        }
+    }
+
+    fn import_unreal_asset_registry(&mut self, workspace: &Workspace) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Unreal Asset Registry JSON", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        let result = (|| -> anyhow::Result<ProjectGraphState> {
+            let metadata = fs::metadata(&path)?;
+            if metadata.len() > 96_000_000 {
+                anyhow::bail!("экспорт больше 96 МБ; выберите JSON только для /Game");
+            }
+            let text = fs::read_to_string(&path)?;
+            let _: serde_json::Value = serde_json::from_str(&text)?;
+            workspace.write_text(GENERATED_ASSET_REGISTRY_PATH, &text)?;
+            let graph = refresh_project_graph(workspace);
+            save_project_graph(workspace, &graph)?;
+            Ok(graph)
+        })();
+        match result {
+            Ok(graph) => {
+                let node_count = graph.nodes.len();
+                let edge_count = graph.edges.len();
+                self.replace_project_map_cache(workspace, graph);
+                self.project_map_status = format!(
+                    "Asset Registry импортирован: {} · {} узлов / {} связей",
+                    GENERATED_ASSET_REGISTRY_PATH, node_count, edge_count
+                );
+                self.refresh_file_rows();
+            }
+            Err(err) => {
+                self.project_map_status = format!("не удалось импортировать Asset Registry: {err}")
+            }
         }
     }
 
@@ -16584,9 +19501,383 @@ impl LeetcodeApp {
         });
     }
 
+    fn show_game_production_director(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Game Production").strong().size(17.0));
+            ui.label(RichText::new("единый производственный план игры").weak());
+        });
+
+        let Some(workspace) = self.workspace.as_ref() else {
+            return;
+        };
+        let state = load_game_production_state(workspace);
+        let active_plan = state
+            .active_plan_id
+            .as_deref()
+            .and_then(|id| state.plans.iter().find(|plan| plan.id == id))
+            .or_else(|| state.plans.last())
+            .cloned();
+
+        let Some(plan) = active_plan else {
+            ui.label(
+                RichText::new(
+                    "Создайте план от быстрого прототипа до полной игры на Unreal Engine 5.8.",
+                )
+                .weak(),
+            );
+            ui.horizontal_wrapped(|ui| {
+                for (label, scope) in [
+                    ("Прототип", "prototype"),
+                    ("Вертикальный срез", "vertical_slice"),
+                    ("Полная игра", "full_game"),
+                ] {
+                    if ui.button(label).clicked() {
+                        self.input = format!(
+                            "Создай production-план игры для текущего проекта с масштабом {scope}. Сначала вызови game_production_snapshot, уточни жанр, целевую платформу и краткое видение, затем используй create_game_production_plan. Свяжи план с активными task, roadmap и выбранным узлом Project Map."
+                        );
+                        self.set_workspace_mode(WorkspaceMode::Chat);
+                    }
+                }
+            });
+            return;
+        };
+
+        let done = plan
+            .items
+            .iter()
+            .filter(|item| item.status == ProductionItemStatus::Done)
+            .count();
+        let total = plan.items.len();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&plan.title).strong());
+            chip(ui, plan.scope.label());
+            chip(ui, plan.current_milestone.label());
+            ui.label(RichText::new(&plan.engine).weak());
+        });
+        ui.add(
+            egui::ProgressBar::new(if total == 0 {
+                0.0
+            } else {
+                done as f32 / total as f32
+            })
+            .text(format!("{done}/{total} задач")),
+        );
+
+        let mut start_item = None;
+        let mut ask_agent_item = None;
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Продолжить с агентом").clicked() {
+                self.input = format!(
+                    "Продолжи production-план {}. Сначала вызови game_production_snapshot, выбери следующую готовую задачу с учётом зависимостей и выполни её. Обновляй production item только после реальной проверки и приложи validation/artifact. После работы оцени gate текущего milestone.",
+                    plan.id
+                );
+                self.set_workspace_mode(WorkspaceMode::Chat);
+            }
+            if ui.button("Проверить gate").clicked() {
+                match self.workspace.as_ref().map(|workspace| {
+                    evaluate_production_gate(
+                        workspace,
+                        EvaluateProductionGateArgs {
+                            plan_id: plan.id.clone(),
+                            milestone: Some(plan.current_milestone),
+                        },
+                    )
+                }) {
+                    Some(Ok(report)) if report.passed => {
+                        self.project_status = format!(
+                            "Gate «{}» пройден: {}/{} задач.",
+                            report.milestone.label(),
+                            report.completed_items,
+                            report.total_items
+                        );
+                    }
+                    Some(Ok(report)) => {
+                        self.project_status = format!(
+                            "Gate «{}» пока не пройден: {}",
+                            report.milestone.label(),
+                            report.blockers.join("; ")
+                        );
+                    }
+                    Some(Err(error)) => self.project_status = error.to_string(),
+                    None => {}
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.label(RichText::new("Текущий производственный поток").strong());
+        let visible_items = plan
+            .items
+            .iter()
+            .filter(|item| {
+                item.milestone == plan.current_milestone
+                    && item.status != ProductionItemStatus::Done
+            })
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>();
+        if visible_items.is_empty() {
+            ui.label(RichText::new("Все задачи текущего этапа выполнены.").weak());
+        }
+        for item in visible_items {
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(&item.title).strong());
+                chip(ui, item.workstream.label());
+                chip(ui, item.status.label());
+                if item.status == ProductionItemStatus::Ready
+                    && ui.small_button("В работу").clicked()
+                {
+                    start_item = Some(item.id.clone());
+                }
+                if matches!(
+                    item.status,
+                    ProductionItemStatus::Ready
+                        | ProductionItemStatus::InProgress
+                        | ProductionItemStatus::Blocked
+                ) && ui.small_button("Агенту").clicked()
+                {
+                    ask_agent_item = Some(item.clone());
+                }
+            });
+            ui.label(RichText::new(&item.description).weak());
+            if !item.depends_on.is_empty() {
+                ui.label(
+                    RichText::new(format!("Зависит от: {}", item.depends_on.join(", ")))
+                        .weak()
+                        .small(),
+                );
+            }
+        }
+
+        if let Some(item_id) = start_item {
+            if let Some(workspace) = self.workspace.as_ref() {
+                match update_production_item(
+                    workspace,
+                    UpdateProductionItemArgs {
+                        plan_id: plan.id.clone(),
+                        item_id,
+                        status: ProductionItemStatus::InProgress,
+                        artifact: None,
+                        validation: None,
+                    },
+                ) {
+                    Ok(_) => self.project_status = "Production-задача взята в работу.".to_string(),
+                    Err(error) => self.project_status = error.to_string(),
+                }
+            }
+        }
+        if let Some(item) = ask_agent_item {
+            self.input = format!(
+                "Выполни production-задачу {} из плана {}: {}. Сначала проверь зависимости через game_production_snapshot. Используй Unreal MCP и asset-инструменты, если они нужны. Не помечай задачу выполненной без реальной проверки; сохрани результат через update_production_item с validation и путём к artifact, затем оцени milestone gate.",
+                item.id, plan.id, item.description
+            );
+            self.set_workspace_mode(WorkspaceMode::Chat);
+        }
+        self.show_vertical_slice_orchestrator(ui, &plan.id, plan.scope);
+    }
+
+    fn show_vertical_slice_orchestrator(
+        &mut self,
+        ui: &mut egui::Ui,
+        production_plan_id: &str,
+        scope: GameScope,
+    ) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new("Vertical Slice Orchestrator")
+                    .strong()
+                    .size(16.0),
+            );
+            ui.label(RichText::new("от плана до проверяемого игрового среза").weak());
+        });
+        let Some(workspace) = self.workspace.as_ref() else {
+            return;
+        };
+        let state = load_vertical_slice_state(workspace);
+        let run = state
+            .active_run_id
+            .as_deref()
+            .and_then(|id| state.runs.iter().find(|run| run.id == id))
+            .filter(|run| run.production_plan_id == production_plan_id)
+            .or_else(|| {
+                state
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| run.production_plan_id == production_plan_id)
+            })
+            .cloned();
+
+        let Some(run) = run else {
+            ui.label(
+                RichText::new(
+                    "Оркестратор свяжет Unreal, gameplay, 3D, интеграцию, UI/audio и playtest.",
+                )
+                .weak(),
+            );
+            let allowed = scope != GameScope::Prototype;
+            if ui
+                .add_enabled(allowed, egui::Button::new("Запустить вертикальный срез"))
+                .on_hover_text(if allowed {
+                    "Создать persistent run для активного production plan."
+                } else {
+                    "Для prototype сначала расширьте scope до vertical_slice или full_game."
+                })
+                .clicked()
+            {
+                self.input = format!(
+                    "Запусти Vertical Slice Orchestrator для production plan {production_plan_id}. Сначала вызови vertical_slice_snapshot, затем start_vertical_slice_run. После запуска изучи readiness и выполни только первую ready-фазу её рекомендованными инструментами."
+                );
+                self.set_workspace_mode(WorkspaceMode::Chat);
+            }
+            return;
+        };
+
+        let report = self.workspace.as_ref().and_then(|workspace| {
+            evaluate_vertical_slice_readiness(
+                workspace,
+                EvaluateVerticalSliceReadinessArgs {
+                    run_id: run.id.clone(),
+                },
+            )
+            .ok()
+        });
+        let completed = run
+            .phases
+            .iter()
+            .filter(|phase| phase.status == VerticalSlicePhaseStatus::Completed)
+            .count();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&run.title).strong());
+            chip(ui, run.status.label());
+            if let Some(next) = report.as_ref().and_then(|report| report.next_phase) {
+                chip(ui, format!("дальше: {}", next.label()));
+            }
+            if report
+                .as_ref()
+                .map(|report| report.ready_phases.len() > 1)
+                .unwrap_or(false)
+            {
+                chip(ui, "можно параллельно");
+            }
+        });
+        ui.add(
+            egui::ProgressBar::new(if run.phases.is_empty() {
+                0.0
+            } else {
+                completed as f32 / run.phases.len() as f32
+            })
+            .text(format!("{completed}/{} фаз", run.phases.len())),
+        );
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Продолжить run").clicked() {
+                self.input = format!(
+                    "Продолжи Vertical Slice run {}. Сначала вызови vertical_slice_snapshot и evaluate_vertical_slice_readiness, затем выполни только следующую ready/in_progress фазу её recommended_tools. После реальной проверки зафиксируй evidence и существующий artifact через advance_vertical_slice_phase. Не обходи зависимости и gates.",
+                    run.id
+                );
+                self.set_workspace_mode(WorkspaceMode::Chat);
+            }
+            if ui.button("Проверить готовность").clicked() {
+                if let Some(report) = &report {
+                    self.project_status = if report.ready {
+                        "Вертикальный срез готов: все orchestration и production gates пройдены."
+                            .to_string()
+                    } else {
+                        format!("Вертикальный срез не готов: {}", report.blockers.join("; "))
+                    };
+                }
+            }
+            if report
+                .as_ref()
+                .map(|report| report.ready_phases.len() > 1)
+                .unwrap_or(false)
+                && ui.button("Распараллелить").clicked()
+            {
+                let phases = report
+                    .as_ref()
+                    .map(|report| {
+                        report
+                            .ready_phases
+                            .iter()
+                            .map(|phase| phase.id())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                self.input = format!(
+                    "Распараллель готовые фазы Vertical Slice run {}: {}. Запусти отдельных ограниченных субагентов по подходящим ролям, не разрешай им обходить approval/governance и не давай им обновлять orchestration state. Проверь их результаты главным агентом, затем сам зафиксируй evidence/artifacts через advance_vertical_slice_phase и пересчитай readiness.",
+                    run.id, phases
+                );
+                self.set_workspace_mode(WorkspaceMode::Chat);
+            }
+        });
+
+        for phase in &run.phases {
+            let is_next = report
+                .as_ref()
+                .and_then(|report| report.next_phase)
+                .map(|next| next == phase.kind)
+                .unwrap_or(false);
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                let title = if is_next {
+                    RichText::new(&phase.title)
+                        .strong()
+                        .color(egui::Color32::from_rgb(78, 190, 220))
+                } else {
+                    RichText::new(&phase.title).strong()
+                };
+                ui.label(title);
+                chip(ui, phase.status.label());
+                if is_next && ui.small_button("Агенту").clicked() {
+                    self.input = format!(
+                        "Выполни фазу {} в Vertical Slice run {}: {}. Используй только рекомендованные инструменты: {}. Сначала проверь зависимости через vertical_slice_snapshot. После реального результата вызови advance_vertical_slice_phase с evidence и существующим artifact, затем evaluate_vertical_slice_readiness.",
+                        phase.kind.id(),
+                        run.id,
+                        phase.description,
+                        phase.kind.recommended_tools().join(", ")
+                    );
+                    self.set_workspace_mode(WorkspaceMode::Chat);
+                }
+            });
+            ui.label(RichText::new(&phase.description).weak());
+            if is_next {
+                ui.label(
+                    RichText::new(format!(
+                        "Инструменты: {}",
+                        phase.kind.recommended_tools().join(", ")
+                    ))
+                    .weak()
+                    .small(),
+                );
+            }
+        }
+    }
+
     fn show_project_command_center(&mut self, ui: &mut egui::Ui) {
+        let unreal_builder_available = self.has_unreal_game_project();
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Project Command Center").strong().size(22.0));
+            if ui
+                .add_enabled(
+                    unreal_builder_available,
+                    egui::Button::new("Конструктор Unreal-задачи"),
+                )
+                .on_hover_text(
+                    if unreal_builder_available {
+                        "Собрать задачу через Unreal Project Map, точную цель, диагностику и подтверждение"
+                    } else {
+                        "Доступно только для рабочей папки с обнаруженным .uproject"
+                    },
+                )
+                .clicked()
+            {
+                self.open_game_task_builder();
+            }
             if self.project_is_running {
                 ui.spinner();
             }
@@ -16658,6 +19949,8 @@ impl LeetcodeApp {
             }
         });
         ui.add_space(8.0);
+        self.show_game_production_director(ui);
+        ui.add_space(10.0);
         self.show_project_task_tree(ui);
         ui.add_space(10.0);
 
@@ -16860,6 +20153,7 @@ impl LeetcodeApp {
             {
                 if let Some(workspace) = &self.workspace {
                     self.asset_jobs = load_jobs(workspace);
+                    self.asset_3d_jobs = load_3d_jobs(workspace);
                 }
             }
             if ui
@@ -16915,6 +20209,1106 @@ impl LeetcodeApp {
         });
     }
 
+    fn open_game_task_builder(&mut self) {
+        if self.workspace.is_some() && !self.has_unreal_game_project() {
+            self.game_task_builder_ui.open = false;
+            self.project_status =
+                "Unreal-конструктор не запущен: в текущей папке не найден .uproject".to_string();
+            return;
+        }
+        self.game_task_builder_ui.open = true;
+        self.set_workspace_mode(WorkspaceMode::Chat);
+        self.active_center_tab = CenterTab::GameTaskBuilder;
+        let Some(workspace) = self.workspace.clone() else {
+            self.game_task_builder_ui.status =
+                "Выберите Unreal-проект — Leetcode настроит остальное автоматически".to_string();
+            self.game_task_builder_ui.setup_report = None;
+            return;
+        };
+        self.game_task_builder_ui.setup_report = Some(unreal_setup_report(&workspace));
+        self.game_task_builder_ui.readiness_report = Some(project_map_readiness(&workspace, false));
+        let state = load_game_task_builder_state(&workspace);
+        self.game_task_builder_ui.last_scan = state.last_scan.clone();
+        if let Some(session) = state
+            .active_session_id
+            .as_deref()
+            .and_then(|id| state.sessions.iter().find(|session| session.id == id))
+            .cloned()
+        {
+            self.game_task_builder_ui.domain_id = session.domain_id.clone();
+            self.game_task_builder_ui.direction_id = session.direction_id.clone();
+            self.game_task_builder_ui.operation_id = session.operation_id.clone();
+            self.game_task_builder_ui.selected_target_ids =
+                session.target_node_ids.iter().cloned().collect();
+            self.game_task_builder_ui.selected_remediation_ids =
+                session.remediation_ids.iter().cloned().collect();
+            self.game_task_builder_ui.custom_request = session.custom_request.clone();
+            self.game_task_builder_ui.session = Some(session);
+        }
+    }
+
+    fn drain_game_task_builder_scan(&mut self) {
+        let Some(receiver) = self.game_task_builder_ui.deep_scan_rx.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(report)) => {
+                self.invalidate_project_map_cache();
+                self.game_task_builder_ui.status = format!(
+                    "Project Map обновлена: {}, {} узлов, {} связей",
+                    report.status.label(),
+                    report.health.node_count,
+                    report.health.edge_count
+                );
+                self.game_task_builder_ui.deep_scan_rx = None;
+                self.game_task_builder_ui.readiness_report = Some(report.clone());
+                self.game_task_builder_ui.last_scan = self
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| load_game_task_builder_state(workspace).last_scan);
+                self.refresh_project_profiles();
+                self.game_task_builder_ui.setup_report =
+                    self.workspace.as_ref().map(unreal_setup_report);
+                if !self
+                    .workspace_mode
+                    .panels()
+                    .contains(&RightPanelView::Project)
+                {
+                    self.workspace_mode = WorkspaceMode::Chat;
+                }
+                self.right_panel_view = RightPanelView::Project;
+                self.persist_layout_state();
+                self.chat.push(ChatLine::system(format!(
+                    "Анализ проекта завершён: {}. Готовность данных: {} из 100, узлов: {}, связей: {}. Полный отчёт открыт справа во вкладке «Проект».",
+                    report.status.label(),
+                    report.health.coverage_percent,
+                    report.health.node_count,
+                    report.health.edge_count
+                )));
+                self.persist_current_conversation();
+            }
+            Ok(Err(error)) => {
+                self.game_task_builder_ui.status = format!("Глубокий scan не выполнен: {error}");
+                self.game_task_builder_ui.deep_scan_rx = None;
+                if let Some(report) = &mut self.game_task_builder_ui.readiness_report {
+                    report.status = ProjectMapReadinessStatus::Failed;
+                }
+                let now = unix_timestamp();
+                self.game_task_builder_ui.last_scan = Some(DeepScanRecord {
+                    status: ProjectMapReadinessStatus::Failed,
+                    started_at: self
+                        .game_task_builder_ui
+                        .last_scan
+                        .as_ref()
+                        .map(|scan| scan.started_at)
+                        .unwrap_or(now),
+                    finished_at: Some(now),
+                    duration_ms: None,
+                    detail: error.clone(),
+                });
+                if !self
+                    .workspace_mode
+                    .panels()
+                    .contains(&RightPanelView::Project)
+                {
+                    self.workspace_mode = WorkspaceMode::Chat;
+                }
+                self.right_panel_view = RightPanelView::Project;
+                self.persist_layout_state();
+                self.chat.push(ChatLine::system(
+                    "Анализ проекта завершился с ошибкой. Причина и повторный запуск доступны справа во вкладке «Проект»."
+                ));
+                self.persist_current_conversation();
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.game_task_builder_ui.status =
+                    "Процесс глубокого scan завершился без результата".to_string();
+                self.game_task_builder_ui.deep_scan_rx = None;
+                if let Some(report) = &mut self.game_task_builder_ui.readiness_report {
+                    report.status = ProjectMapReadinessStatus::Failed;
+                }
+                let now = unix_timestamp();
+                self.game_task_builder_ui.last_scan = Some(DeepScanRecord {
+                    status: ProjectMapReadinessStatus::Failed,
+                    started_at: self
+                        .game_task_builder_ui
+                        .last_scan
+                        .as_ref()
+                        .map(|scan| scan.started_at)
+                        .unwrap_or(now),
+                    finished_at: Some(now),
+                    duration_ms: None,
+                    detail: "Процесс анализа завершился без результата".to_string(),
+                });
+                if !self
+                    .workspace_mode
+                    .panels()
+                    .contains(&RightPanelView::Project)
+                {
+                    self.workspace_mode = WorkspaceMode::Chat;
+                }
+                self.right_panel_view = RightPanelView::Project;
+                self.persist_layout_state();
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn start_game_task_builder_scan(&mut self) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        if self.game_task_builder_ui.deep_scan_rx.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        self.game_task_builder_ui.deep_scan_rx = Some(receiver);
+        let started_at = unix_timestamp();
+        self.game_task_builder_ui.last_scan = Some(DeepScanRecord {
+            status: ProjectMapReadinessStatus::Scanning,
+            started_at,
+            finished_at: None,
+            duration_ms: None,
+            detail: "Получаем Unreal Asset Registry и перестраиваем Project Map".to_string(),
+        });
+        if let Some(report) = &mut self.game_task_builder_ui.readiness_report {
+            report.status = crate::game_task_builder::ProjectMapReadinessStatus::Scanning;
+        }
+        self.game_task_builder_ui.status =
+            "Сканируем проект, Unreal Asset Registry и зависимости...".to_string();
+        if !self
+            .workspace_mode
+            .panels()
+            .contains(&RightPanelView::Project)
+        {
+            self.workspace_mode = WorkspaceMode::Chat;
+        }
+        self.right_panel_view = RightPanelView::Project;
+        self.persist_layout_state();
+        thread::spawn(move || {
+            let result = refresh_project_map_deep(
+                &workspace,
+                RefreshProjectMapDeepArgs {
+                    run_unreal_scan: true,
+                },
+            )
+            .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
+    fn show_game_task_builder_project_picker(&mut self, ctx: &egui::Context) {
+        let mut open = self.game_task_builder_ui.open;
+        let mut selected_path = None;
+        let recent_projects = self
+            .config
+            .projects
+            .iter()
+            .filter(|project| project.path.is_dir())
+            .map(|project| {
+                let name = if project.display_name.trim().is_empty() {
+                    project_display_name(&project.path)
+                } else {
+                    project.display_name.clone()
+                };
+                (name, project.path.clone())
+            })
+            .collect::<Vec<_>>();
+        egui::Window::new("Конструктор игровой задачи")
+            .id(egui::Id::new("game_task_builder_window"))
+            .open(&mut open)
+            .resizable(true)
+            .default_width(680.0)
+            .min_width(520.0)
+            .show(ctx, |ui| {
+                ui.heading("Сначала выберите проект");
+                ui.label(
+                    RichText::new(
+                        "Leetcode сам найдёт .uproject, Unreal Engine 5.8, инструменты, плагины и MCP. Терминал и переменные окружения не нужны.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(12.0);
+                if ui
+                    .add_sized(
+                        [safe_available_width(ui, 240.0), 38.0],
+                        egui::Button::new("Выбрать Unreal-проект"),
+                    )
+                    .clicked()
+                {
+                    selected_path = rfd::FileDialog::new().pick_folder();
+                }
+                if !recent_projects.is_empty() {
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.label(RichText::new("Недавние проекты").strong());
+                    for (name, path) in &recent_projects {
+                        ui.horizontal(|ui| {
+                            if ui.selectable_label(false, name).clicked() {
+                                selected_path = Some(path.clone());
+                            }
+                            ui.label(RichText::new(path.display().to_string()).weak().small());
+                        });
+                    }
+                }
+                if !self.game_task_builder_ui.status.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new(&self.game_task_builder_ui.status).weak());
+                }
+            });
+        self.game_task_builder_ui.open = open;
+        if let Some(path) = selected_path {
+            if self.open_workspace_path(path) {
+                self.game_task_builder_ui.status =
+                    "Проект выбран. Проверяем Unreal-окружение...".to_string();
+                if self.has_unreal_game_project() {
+                    self.active_center_tab = CenterTab::GameTaskBuilder;
+                }
+            }
+        }
+    }
+
+    fn show_unreal_setup_wizard(
+        &mut self,
+        ui: &mut egui::Ui,
+        workspace: &Workspace,
+        readiness: &ProjectMapReadinessReport,
+        start_scan: &mut bool,
+        choose_project: &mut bool,
+    ) -> bool {
+        if self.game_task_builder_ui.setup_report.is_none() {
+            self.game_task_builder_ui.setup_report = Some(unreal_setup_report(workspace));
+        }
+        let report = self
+            .game_task_builder_ui
+            .setup_report
+            .clone()
+            .unwrap_or_else(|| unreal_setup_report(workspace));
+        let scan_running = self.game_task_builder_ui.deep_scan_rx.is_some();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Подготовка проекта");
+            chip(ui, report.status.label());
+            chip(ui, format!("Project Map: {}", readiness.status.label()));
+        });
+        ui.label(RichText::new(&report.summary).weak());
+        ui.add_space(6.0);
+
+        setup_status_row(
+            ui,
+            "Проект",
+            report.project_name.as_deref().unwrap_or("не выбран"),
+            report.project_name.is_some(),
+        );
+        setup_status_row(
+            ui,
+            "Unreal Engine",
+            report.engine_version.as_deref().unwrap_or("не найден"),
+            report.status != UnrealSetupStatus::NeedsEngine
+                && report.status != UnrealSetupStatus::NeedsProject,
+        );
+        setup_status_row(
+            ui,
+            "Инструменты",
+            if report.missing_toolchain.is_empty() {
+                "все компоненты найдены"
+            } else {
+                "требуется установка компонентов"
+            },
+            report.missing_toolchain.is_empty(),
+        );
+        setup_status_row(
+            ui,
+            "MCP",
+            if report.mcp_profile_configured {
+                "профиль создан автоматически"
+            } else {
+                "будет доступен базовый анализ"
+            },
+            report.mcp_profile_configured,
+        );
+
+        ui.add_space(6.0);
+        ui.label(RichText::new("Плагины проекта").strong());
+        for plugin in &report.plugins {
+            let state = if plugin.enabled {
+                "включён"
+            } else if plugin.available {
+                "можно включить"
+            } else {
+                "не найден в установке UE"
+            };
+            let required = if plugin.required_for_deep_scan {
+                " · нужен для анализа"
+            } else {
+                " · дополнительная возможность"
+            };
+            setup_status_row(
+                ui,
+                &plugin.label,
+                &format!("{state}{required}"),
+                plugin.enabled,
+            );
+            ui.label(RichText::new(&plugin.detail).weak().small());
+        }
+
+        if !report.missing_toolchain.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Не найдены: {}",
+                    report.missing_toolchain.join(", ")
+                ))
+                .color(egui::Color32::from_rgb(216, 178, 95)),
+            );
+        }
+
+        let missing_required = report
+            .plugins
+            .iter()
+            .filter(|plugin| plugin.required_for_deep_scan && plugin.available && !plugin.enabled)
+            .map(|plugin| plugin.id.clone())
+            .collect::<Vec<_>>();
+        let mcp_missing = report
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id == UNREAL_MCP_PLUGIN_ID && plugin.available && !plugin.enabled);
+
+        if self.game_task_builder_ui.setup_confirmation {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("Подтверждение настройки").strong());
+            ui.label(
+                "Leetcode изменит только список Plugins в .uproject и сначала сохранит резервную копию внутри проекта.",
+            );
+            for plugin in &missing_required {
+                ui.label(format!("• Включить {plugin}"));
+            }
+            if mcp_missing {
+                ui.checkbox(
+                    &mut self.game_task_builder_ui.setup_include_mcp,
+                    "Также подключить Unreal MCP",
+                )
+                .on_hover_text(
+                    "MCP расширяет интерактивную работу с Blueprint, уровнями и редактором. Его можно оставить выключенным.",
+                );
+            }
+            ui.horizontal_wrapped(|ui| {
+                let has_selected_plugin = !missing_required.is_empty()
+                    || (mcp_missing && self.game_task_builder_ui.setup_include_mcp);
+                if ui
+                    .add_enabled(
+                        has_selected_plugin,
+                        egui::Button::new("Включить и анализировать"),
+                    )
+                    .clicked()
+                {
+                    let mut plugins = missing_required.clone();
+                    if mcp_missing && self.game_task_builder_ui.setup_include_mcp {
+                        plugins.push(UNREAL_MCP_PLUGIN_ID.to_string());
+                    }
+                    match enable_unreal_project_plugins(workspace, &plugins) {
+                        Ok(result) => {
+                            self.game_task_builder_ui.setup_report = Some(result.report);
+                            self.game_task_builder_ui.setup_confirmation = false;
+                            self.game_task_builder_ui.status = if result.changed_plugins.is_empty()
+                            {
+                                "Плагины уже настроены. Начинаем анализ проекта.".to_string()
+                            } else {
+                                format!(
+                                    "Включены: {}. Резервная копия: {}",
+                                    result.changed_plugins.join(", "),
+                                    result.backup_path
+                                )
+                            };
+                            append_journal(format!(
+                                "unreal_setup\tplugins_enabled\tplugins={}\tbackup={}",
+                                result.changed_plugins.join(","),
+                                result.backup_path
+                            ));
+                            self.refresh_project_profiles();
+                            *start_scan = true;
+                        }
+                        Err(error) => {
+                            self.game_task_builder_ui.status =
+                                format!("Не удалось настроить плагины: {error}");
+                        }
+                    }
+                }
+                if ui.button("Назад").clicked() {
+                    self.game_task_builder_ui.setup_confirmation = false;
+                }
+            });
+        } else {
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                if report.can_deep_scan {
+                    let label = if readiness.status
+                        == crate::game_task_builder::ProjectMapReadinessStatus::Ready
+                    {
+                        "Обновить карту проекта"
+                    } else {
+                        "Анализировать проект"
+                    };
+                    if ui
+                        .add_enabled(!scan_running, egui::Button::new(label))
+                        .clicked()
+                    {
+                        *start_scan = true;
+                    }
+                } else if !missing_required.is_empty() {
+                    if ui.button("Настроить автоматически").clicked() {
+                        self.game_task_builder_ui.setup_confirmation = true;
+                    }
+                }
+                if report.can_deep_scan
+                    && mcp_missing
+                    && ui
+                        .button("Подключить MCP")
+                        .on_hover_text(
+                            "Необязательно для Project Map. Расширяет управление Blueprint, уровнями и редактором.",
+                        )
+                        .clicked()
+                {
+                    self.game_task_builder_ui.setup_confirmation = true;
+                    self.game_task_builder_ui.setup_include_mcp = true;
+                }
+                if ui.button("Выбрать другой проект").clicked() {
+                    *choose_project = true;
+                }
+                if ui.button("Проверить снова").clicked() {
+                    self.refresh_project_profiles();
+                    self.game_task_builder_ui.setup_report =
+                        self.workspace.as_ref().map(unreal_setup_report);
+                }
+                if readiness.status
+                    != crate::game_task_builder::ProjectMapReadinessStatus::Ready
+                    && ui.button("Только анализ без изменений").clicked()
+                {
+                    self.game_task_builder_ui.analysis_only = true;
+                    self.game_task_builder_ui.status = "Можно изучать каталог и Project Map. Изменяющие игровые операции останутся заблокированы до полного анализа.".to_string();
+                }
+            });
+        }
+
+        if scan_running {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.vertical(|ui| {
+                    ui.label("Unreal анализирует ассеты, зависимости и семантические связи...");
+                    ui.label(
+                        RichText::new(
+                            "Глубокий анализ может заметно нагружать систему. Конструктор продолжит работу автоматически после завершения.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                });
+            });
+        }
+        let catalog_available = readiness.health.node_count > 0
+            && !matches!(
+                readiness.status,
+                ProjectMapReadinessStatus::Uninitialized | ProjectMapReadinessStatus::Stale
+            );
+        if catalog_available && readiness.status != ProjectMapReadinessStatus::Ready {
+            ui.label(
+                RichText::new(
+                    "Карта построена частично. Можно выбрать сферу, операцию и найденные объекты, но запуск изменений останется заблокирован до успешного полного анализа.",
+                )
+                .color(egui::Color32::from_rgb(216, 178, 95)),
+            );
+        }
+        if !self.game_task_builder_ui.status.is_empty() {
+            ui.label(RichText::new(&self.game_task_builder_ui.status).weak());
+        }
+        ui.separator();
+
+        readiness.status == ProjectMapReadinessStatus::Ready
+            || self.game_task_builder_ui.analysis_only
+            || catalog_available
+    }
+
+    fn show_game_task_builder_tab(&mut self, ui: &mut egui::Ui) {
+        self.drain_game_task_builder_scan();
+        self.game_task_builder_ui.open = true;
+        let Some(workspace) = self.workspace.clone() else {
+            ui.heading("Конструктор игровой задачи");
+            ui.label("Сначала выберите Unreal-проект.");
+            return;
+        };
+        let readiness = match self.game_task_builder_ui.readiness_report.clone() {
+            Some(report) => report,
+            None => {
+                let report = project_map_readiness(&workspace, false);
+                self.game_task_builder_ui.readiness_report = Some(report.clone());
+                report
+            }
+        };
+        let catalog = game_task_catalog_ref();
+        let mut start_scan = false;
+        let mut choose_project = false;
+        let mut cancel_requested = false;
+        let mut confirmed_manifest: Option<TaskManifest> = None;
+        let mut analysis_actions = ProjectMapAnalysisActions::default();
+
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Конструктор игровой задачи");
+            chip(ui, "Unreal Project Map");
+            if self.game_task_builder_ui.deep_scan_rx.is_some() {
+                ui.spinner();
+                ui.label(RichText::new("идёт анализ").weak());
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Выберите сферу, действие и конкретный объект проекта. Агент покажет понимание задачи до начала работы.",
+            )
+            .weak(),
+        );
+        ui.add_space(8.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                        let builder_available = self.show_unreal_setup_wizard(
+                            ui,
+                            &workspace,
+                            &readiness,
+                            &mut start_scan,
+                            &mut choose_project,
+                        );
+                        if !builder_available {
+                            ui.label(
+                                RichText::new(
+                                    "После подготовки проекта здесь появятся сферы, операции и точные объекты Project Map.",
+                                )
+                                .weak(),
+                            );
+                            return;
+                        }
+
+                        let builder_state = load_game_task_builder_state(&workspace);
+                        analysis_actions = show_project_map_analysis_report(
+                            ui,
+                            &readiness,
+                            builder_state.last_scan.as_ref(),
+                        );
+                        let pending_relations = builder_state
+                            .relation_proposals
+                            .iter()
+                            .filter(|proposal| proposal.status == "pending")
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if !pending_relations.is_empty() {
+                            ui.separator();
+                            ui.label(RichText::new("Предложенные связи Project Map").strong());
+                            for proposal in pending_relations {
+                                ui.label(format!(
+                                    "{} → {} · {}",
+                                    proposal.from_node_id, proposal.to_node_id, proposal.label
+                                ))
+                                .on_hover_text(&proposal.reason);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Принять связь").clicked() {
+                                        match answer_project_relation_proposal(
+                                            &workspace,
+                                            &proposal.id,
+                                            true,
+                                        ) {
+                                            Ok(()) => {
+                                                self.game_task_builder_ui.status =
+                                                    "Связь подтверждена и сохранена".to_string()
+                                            }
+                                            Err(error) => {
+                                                self.game_task_builder_ui.status = error.to_string()
+                                            }
+                                        }
+                                    }
+                                    if ui.button("Отклонить").clicked() {
+                                        match answer_project_relation_proposal(
+                                            &workspace,
+                                            &proposal.id,
+                                            false,
+                                        ) {
+                                            Ok(()) => {
+                                                self.game_task_builder_ui.status =
+                                                    "Предложение связи отклонено".to_string()
+                                            }
+                                            Err(error) => {
+                                                self.game_task_builder_ui.status = error.to_string()
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        if builder_state.active_manifest_id.is_some()
+                            && !self.game_task_builder_ui.custom_request.trim().is_empty()
+                        {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(RichText::new("Собственный вариант выполненной задачи").weak());
+                                if ui.button("Сохранить в каталог проекта").clicked() {
+                                    match save_custom_catalog_option(
+                                        &workspace,
+                                        &self.game_task_builder_ui.operation_id,
+                                        &self.game_task_builder_ui.custom_request,
+                                    ) {
+                                        Ok(_) => self.game_task_builder_ui.status =
+                                            "Собственный вариант сохранён после отдельного согласия"
+                                                .to_string(),
+                                        Err(error) => {
+                                            self.game_task_builder_ui.status = error.to_string()
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        ui.separator();
+                        ui.label(RichText::new("1. Сфера").strong());
+                        ui.horizontal_wrapped(|ui| {
+                            for domain in &catalog.domains {
+                                let selected = self.game_task_builder_ui.domain_id == domain.id;
+                                if ui.selectable_label(selected, &domain.label).clicked() {
+                                    self.game_task_builder_ui.domain_id = domain.id.clone();
+                                    self.game_task_builder_ui.direction_id.clear();
+                                    self.game_task_builder_ui.operation_id.clear();
+                                    self.game_task_builder_ui.target_report = None;
+                                    self.game_task_builder_ui.prerequisite_report = None;
+                                    self.game_task_builder_ui.session = None;
+                                }
+                            }
+                        });
+
+                        if let Some(domain) = catalog
+                            .domains
+                            .iter()
+                            .find(|domain| domain.id == self.game_task_builder_ui.domain_id)
+                        {
+                            ui.separator();
+                            ui.label(RichText::new("2. Направление").strong());
+                            ui.horizontal_wrapped(|ui| {
+                                for direction in &domain.directions {
+                                    let selected =
+                                        self.game_task_builder_ui.direction_id == direction.id;
+                                    if ui.selectable_label(selected, &direction.label).clicked() {
+                                        self.game_task_builder_ui.direction_id =
+                                            direction.id.clone();
+                                        self.game_task_builder_ui.operation_id.clear();
+                                        self.game_task_builder_ui.target_report = None;
+                                        self.game_task_builder_ui.prerequisite_report = None;
+                                        self.game_task_builder_ui.session = None;
+                                    }
+                                }
+                            });
+                        }
+
+                        let direction = catalog
+                            .domains
+                            .iter()
+                            .flat_map(|domain| domain.directions.iter())
+                            .find(|direction| {
+                                direction.id == self.game_task_builder_ui.direction_id
+                            });
+                        if let Some(direction) = direction {
+                            ui.separator();
+                            ui.label(RichText::new("3. Операция").strong());
+                            ui.horizontal_wrapped(|ui| {
+                                for operation in &direction.operations {
+                                    let selected =
+                                        self.game_task_builder_ui.operation_id == operation.id;
+                                    if ui.selectable_label(selected, &operation.label).clicked() {
+                                        self.game_task_builder_ui.operation_id =
+                                            operation.id.clone();
+                                        self.game_task_builder_ui.target_report = None;
+                                        self.game_task_builder_ui.prerequisite_report = None;
+                                        self.game_task_builder_ui.session = None;
+                                    }
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Свой вариант");
+                                ui.add(
+                                    TextEdit::singleline(
+                                        &mut self.game_task_builder_ui.custom_request,
+                                    )
+                                    .hint_text("Опишите особый результат или ограничение"),
+                                );
+                            });
+                        }
+
+                        if !self.game_task_builder_ui.operation_id.is_empty() {
+                            ui.separator();
+                            ui.label(RichText::new("4. Точный объект Project Map").strong());
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    TextEdit::singleline(
+                                        &mut self.game_task_builder_ui.target_query,
+                                    )
+                                    .hint_text("Поиск персонажа, ассета или узла"),
+                                );
+                                if ui.button("Найти совместимые цели").clicked() {
+                                    match resolve_game_task_targets(
+                                        &workspace,
+                                        &ResolveGameTaskTargetsArgs {
+                                            operation_id: self
+                                                .game_task_builder_ui
+                                                .operation_id
+                                                .clone(),
+                                            query: Some(
+                                                self.game_task_builder_ui.target_query.clone(),
+                                            ),
+                                            limit: Some(40),
+                                        },
+                                    ) {
+                                        Ok(report) => {
+                                            self.game_task_builder_ui.status =
+                                                report.message.clone();
+                                            self.game_task_builder_ui.target_report = Some(report);
+                                            self.game_task_builder_ui.prerequisite_report = None;
+                                            self.game_task_builder_ui.session = None;
+                                        }
+                                        Err(error) => {
+                                            self.game_task_builder_ui.status = error.to_string();
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        if let Some(report) = self.game_task_builder_ui.target_report.clone() {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {}",
+                                    report.feasibility.label(),
+                                    report.message
+                                ))
+                                .weak(),
+                            );
+                            for candidate in report.candidates {
+                                let mut selected = self
+                                    .game_task_builder_ui
+                                    .selected_target_ids
+                                    .contains(&candidate.node_id);
+                                if ui
+                                    .checkbox(
+                                        &mut selected,
+                                        format!(
+                                            "{} · {} · {:.0}%",
+                                            candidate.label,
+                                            candidate.node_kind.as_str(),
+                                            candidate.confidence * 100.0
+                                        ),
+                                    )
+                                    .on_hover_text(format!(
+                                        "node_id: {}\nobject_path: {}\n{}",
+                                        candidate.node_id,
+                                        candidate.object_path.as_deref().unwrap_or("нет"),
+                                        candidate.reason
+                                    ))
+                                    .changed()
+                                {
+                                    if selected {
+                                        self.game_task_builder_ui
+                                            .selected_target_ids
+                                            .insert(candidate.node_id);
+                                    } else {
+                                        self.game_task_builder_ui
+                                            .selected_target_ids
+                                            .remove(&candidate.node_id);
+                                    }
+                                }
+                            }
+                            for excluded in report.excluded {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Исключено: {} — {}",
+                                        excluded.label, excluded.reason
+                                    ))
+                                    .weak(),
+                                );
+                            }
+                            if ui
+                                .add_enabled(
+                                    !self
+                                        .game_task_builder_ui
+                                        .selected_target_ids
+                                        .is_empty(),
+                                    egui::Button::new("Проверить зависимости"),
+                                )
+                                .clicked()
+                            {
+                                match evaluate_game_task_prerequisites(
+                                    &workspace,
+                                    &EvaluateGameTaskPrerequisitesArgs {
+                                        operation_id: self
+                                            .game_task_builder_ui
+                                            .operation_id
+                                            .clone(),
+                                        target_node_ids: self
+                                            .game_task_builder_ui
+                                            .selected_target_ids
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                    },
+                                ) {
+                                    Ok(report) => {
+                                        self.game_task_builder_ui.prerequisite_report =
+                                            Some(report);
+                                    }
+                                    Err(error) => {
+                                        self.game_task_builder_ui.status = error.to_string();
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(report) =
+                            self.game_task_builder_ui.prerequisite_report.clone()
+                        {
+                            ui.separator();
+                            ui.label(RichText::new("5. Диагностика").strong());
+                            chip(ui, report.feasibility.label());
+                            for issue in report.issues {
+                                ui.label(RichText::new(&issue.title).strong());
+                                ui.label(RichText::new(&issue.detail).weak());
+                                for option in issue.remediation {
+                                    let mut selected = self
+                                        .game_task_builder_ui
+                                        .selected_remediation_ids
+                                        .contains(&option.id);
+                                    if ui
+                                        .checkbox(
+                                            &mut selected,
+                                            format!(
+                                                "{} · {} · риск {}",
+                                                option.title,
+                                                option.estimated_time,
+                                                option.risk
+                                            ),
+                                        )
+                                        .on_hover_text(format!(
+                                            "{}\nИнструменты: {}\nApprovals: {}",
+                                            option.description,
+                                            option.tools.join(", "),
+                                            if option.requires_approval { "нужны" } else { "не нужны" }
+                                        ))
+                                        .changed()
+                                    {
+                                        if selected {
+                                            self.game_task_builder_ui
+                                                .selected_remediation_ids
+                                                .insert(option.id);
+                                        } else {
+                                            self.game_task_builder_ui
+                                                .selected_remediation_ids
+                                                .remove(&option.id);
+                                        }
+                                    }
+                                }
+                            }
+                            if ui.button("Сформировать предложение агента").clicked() {
+                                match prepare_game_task_proposal(
+                                    &workspace,
+                                    PrepareGameTaskProposalArgs {
+                                        operation_id: self
+                                            .game_task_builder_ui
+                                            .operation_id
+                                            .clone(),
+                                        target_node_ids: self
+                                            .game_task_builder_ui
+                                            .selected_target_ids
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        remediation_ids: self
+                                            .game_task_builder_ui
+                                            .selected_remediation_ids
+                                            .iter()
+                                            .cloned()
+                                            .collect(),
+                                        custom_request: Some(
+                                            self.game_task_builder_ui.custom_request.clone(),
+                                        ),
+                                    },
+                                ) {
+                                    Ok(session) => {
+                                        self.game_task_builder_ui.session = Some(session);
+                                    }
+                                    Err(error) => {
+                                        self.game_task_builder_ui.status = error.to_string();
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(session) = self.game_task_builder_ui.session.clone() {
+                            if let Some(proposal) = session.proposal {
+                                ui.separator();
+                                ui.label(RichText::new("6. Как агент понял задачу").strong());
+                                ui.label(RichText::new(&proposal.understood_task).size(17.0));
+                                ui.label(RichText::new("Точные цели").strong());
+                                for target in &proposal.exact_targets {
+                                    ui.label(format!(
+                                        "{} · {} · {}",
+                                        target.label,
+                                        target.node_id,
+                                        target.object_path.as_deref().unwrap_or("без object_path")
+                                    ));
+                                }
+                                if !proposal.excluded_targets.is_empty() {
+                                    ui.label(RichText::new("Исключённые объекты").strong());
+                                    for target in &proposal.excluded_targets {
+                                        ui.label(RichText::new(format!("{} — {}", target.label, target.reason)).weak());
+                                    }
+                                }
+                                ui.label(RichText::new("Этапы выполнения").strong());
+                                for (index, step) in proposal.steps.iter().enumerate() {
+                                    ui.label(format!("{}. {step}", index + 1));
+                                }
+                                for step in &proposal.preparation {
+                                    ui.label(RichText::new(format!("Подготовка: {step}")).weak());
+                                }
+                                ui.label(RichText::new("Артефакты и проверка").strong());
+                                ui.label(format!(
+                                    "Артефакты: {}",
+                                    proposal.expected_artifacts.join(", ")
+                                ));
+                                ui.label(format!("Проверка: {}", proposal.validation.join(", ")));
+                                for risk in &proposal.risks {
+                                    ui.label(RichText::new(format!("Риск: {risk}")).weak());
+                                }
+                                ui.label(RichText::new("Дополнительные улучшения").strong());
+                                ui.label(RichText::new("По умолчанию выключены и не расширяют scope.").weak());
+                                for suggestion in &proposal.improvements {
+                                    let mut selected = self
+                                        .game_task_builder_ui
+                                        .selected_improvement_ids
+                                        .contains(&suggestion.id);
+                                    if ui.checkbox(&mut selected, &suggestion.title).on_hover_text(&suggestion.detail).changed() {
+                                        if selected {
+                                            self.game_task_builder_ui.selected_improvement_ids.insert(suggestion.id.clone());
+                                        } else {
+                                            self.game_task_builder_ui.selected_improvement_ids.remove(&suggestion.id);
+                                        }
+                                    }
+                                }
+                                ui.label(RichText::new("Ускорение и субагенты").strong());
+                                for suggestion in &proposal.efficiency {
+                                    let mut selected = self
+                                        .game_task_builder_ui
+                                        .selected_efficiency_ids
+                                        .contains(&suggestion.id);
+                                    if ui.checkbox(&mut selected, &suggestion.title).on_hover_text(&suggestion.detail).changed() {
+                                        if selected {
+                                            self.game_task_builder_ui.selected_efficiency_ids.insert(suggestion.id.clone());
+                                        } else {
+                                            self.game_task_builder_ui.selected_efficiency_ids.remove(&suggestion.id);
+                                        }
+                                    }
+                                }
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("Подтверждаю").clicked() {
+                                        match confirm_game_task_proposal(
+                                            &workspace,
+                                            &session.id,
+                                            self.game_task_builder_ui
+                                                .selected_improvement_ids
+                                                .iter()
+                                                .cloned()
+                                                .collect(),
+                                            self.game_task_builder_ui
+                                                .selected_efficiency_ids
+                                                .iter()
+                                                .cloned()
+                                                .collect(),
+                                        ) {
+                                            Ok(manifest) => confirmed_manifest = Some(manifest),
+                                            Err(error) => self.game_task_builder_ui.status = error.to_string(),
+                                        }
+                                    }
+                                    if ui.button("Изменить план").clicked() {
+                                        self.game_task_builder_ui.session = None;
+                                    }
+                                    if ui.button("Добавить уточнение").clicked() {
+                                        self.game_task_builder_ui.status = "Добавьте уточнение в поле «Свой вариант» и сформируйте предложение заново".to_string();
+                                    }
+                                    if ui.button("Назад").clicked() {
+                                        self.game_task_builder_ui.prerequisite_report = None;
+                                        self.game_task_builder_ui.session = None;
+                                    }
+                                    if ui.button("Отмена").clicked() {
+                                        cancel_requested = true;
+                                    }
+                                });
+                            }
+                        }
+            });
+
+        if analysis_actions.retry_scan {
+            start_scan = true;
+        }
+        if analysis_actions.open_map {
+            self.set_workspace_mode(WorkspaceMode::Map);
+            self.right_panel_view = RightPanelView::Map;
+        }
+        if analysis_actions.import_registry {
+            self.import_unreal_asset_registry(&workspace);
+            self.game_task_builder_ui.readiness_report =
+                Some(project_map_readiness(&workspace, false));
+        }
+        if analysis_actions.open_editor {
+            if let Some(command) = self
+                .project_profiles
+                .iter()
+                .flat_map(|profile| profile.commands.iter())
+                .find(|command| command.id == "open_editor")
+                .cloned()
+            {
+                self.start_project_command(command);
+            } else {
+                self.game_task_builder_ui.status =
+                    "Команда запуска Unreal Editor не найдена в профиле проекта".to_string();
+            }
+        }
+        if cancel_requested {
+            self.active_center_tab = CenterTab::Agent;
+        }
+        if choose_project {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                if self.open_workspace_path(path) && self.has_unreal_game_project() {
+                    self.open_game_task_builder();
+                }
+            }
+            return;
+        }
+        if start_scan {
+            self.start_game_task_builder_scan();
+        }
+        if let Some(manifest) = confirmed_manifest {
+            self.active_center_tab = CenterTab::Agent;
+            self.game_task_manifest_run_active = true;
+            self.game_task_manifest_run_failed = false;
+            self.input = format!(
+                "[task_manifest:{}]\nВыполни подтверждённую игровую задачу: {}. Используй только target node IDs: {}. Перед завершением выполни проверки из предложения.",
+                manifest.id,
+                manifest.understood_task,
+                manifest.target_node_ids.join(", ")
+            );
+            self.send_current_input();
+        }
+    }
+
+    fn show_game_task_builder_overlay(&mut self, ctx: &egui::Context) {
+        self.drain_game_task_builder_scan();
+        if self.game_task_builder_ui.open && self.workspace.is_none() {
+            self.show_game_task_builder_project_picker(ctx);
+            if !self.game_task_builder_ui.open {
+                self.active_center_tab = CenterTab::Agent;
+            }
+        }
+    }
+
     fn show_input_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("input_bar")
             .exact_height(150.0)
@@ -16937,6 +21331,24 @@ impl LeetcodeApp {
                             |ui| {
                                 ui.menu_button(RichText::new("+").strong().size(21.0), |ui| {
                                     ui.set_min_width(220.0);
+                                    let unreal_builder_available =
+                                        self.workspace.is_none() || self.has_unreal_game_project();
+                                    if ui
+                                        .add_enabled(
+                                            unreal_builder_available,
+                                            egui::Button::new("Конструктор Unreal-задачи"),
+                                        )
+                                        .on_hover_text(if unreal_builder_available {
+                                            "Выбрать точную игровую задачу через Unreal Project Map"
+                                        } else {
+                                            "В текущей папке не найден .uproject"
+                                        })
+                                        .clicked()
+                                    {
+                                        self.open_game_task_builder();
+                                        ui.close_menu();
+                                    }
+                                    ui.separator();
                                     if ui.button("Добавить файл").clicked() {
                                         self.choose_input_files(InputAttachmentKind::File);
                                         ui.close_menu();
@@ -17105,6 +21517,7 @@ impl eframe::App for LeetcodeApp {
         // full window and feels like it sits below/under the tool panels.
         self.show_input_bar(ctx);
         self.show_chat_panel(ctx);
+        self.show_game_task_builder_overlay(ctx);
         self.show_git_commit_dialog(ctx);
         self.show_command_palette(ctx);
         self.show_command_macro_confirmation(ctx);
@@ -17116,6 +21529,7 @@ impl eframe::App for LeetcodeApp {
             || self.update_is_running
             || self.terminal_running
             || self.relay_sync_in_flight
+            || self.game_task_builder_ui.deep_scan_rx.is_some()
             || self.pending_command_macro_run.is_some()
         {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -17264,6 +21678,356 @@ fn flat_section(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(8.0);
+}
+
+fn show_project_map_analysis_report(
+    ui: &mut egui::Ui,
+    readiness: &ProjectMapReadinessReport,
+    last_scan: Option<&DeepScanRecord>,
+) -> ProjectMapAnalysisActions {
+    let mut actions = ProjectMapAnalysisActions::default();
+    let health = &readiness.health;
+    let registry_file_missing = readiness.unreal_project && !readiness.deep_scan_completed;
+    let registry_not_integrated = readiness.unreal_project && !health.asset_registry_integrated;
+
+    let (verdict, explanation, verdict_color) = match readiness.status {
+        ProjectMapReadinessStatus::Ready => (
+            "Карта готова для точных игровых задач",
+            "Leetcode видит структуру Unreal-ассетов и может привязывать изменения к конкретным node_id и object_path.".to_string(),
+            egui::Color32::from_rgb(101, 196, 139),
+        ),
+        ProjectMapReadinessStatus::Scanning => (
+            "Анализ проекта ещё выполняется",
+            "Дождитесь завершения. Каталог можно просматривать, но точные изменяющие операции пока недоступны.".to_string(),
+            accent_color(),
+        ),
+        ProjectMapReadinessStatus::Degraded if registry_file_missing || registry_not_integrated => (
+            "Структура проекта найдена, но данных Unreal пока недостаточно",
+            if registry_file_missing {
+                "Файлы и базовые зависимости просканированы. Asset Registry snapshot ещё не получен, поэтому Leetcode не может надёжно отличить Skeleton, Blueprint, анимации и их точные связи.".to_string()
+            } else {
+                "Asset Registry snapshot уже найден, но ещё не встроен в текущую карту. Завершение анализа перестроит Project Map без дополнительных ручных действий.".to_string()
+            },
+            egui::Color32::from_rgb(224, 176, 84),
+        ),
+        ProjectMapReadinessStatus::Degraded => (
+            "Карта построена частично",
+            "Часть источников данных недоступна. Ниже показано, какой слой отсутствует и как его получить.".to_string(),
+            egui::Color32::from_rgb(224, 176, 84),
+        ),
+        ProjectMapReadinessStatus::Stale => (
+            "Проект изменён после анализа",
+            if readiness.changes.is_empty() {
+                "Перед привязкой новой игровой задачи нужно синхронизировать Project Map.".to_string()
+            } else {
+                format!(
+                    "Найдено {} изменений: +{} новых, ~{} изменённых, −{} удалённых файлов.",
+                    readiness.changes.total(),
+                    readiness.changes.added_count,
+                    readiness.changes.modified_count,
+                    readiness.changes.removed_count
+                )
+            },
+            egui::Color32::from_rgb(224, 176, 84),
+        ),
+        ProjectMapReadinessStatus::Failed => (
+            "Глубокий анализ завершился с ошибкой",
+            "Базовая структура сохранена. Посмотрите причину последнего запуска и выберите подходящий способ получения недостающих данных.".to_string(),
+            egui::Color32::from_rgb(226, 104, 104),
+        ),
+        ProjectMapReadinessStatus::Uninitialized => (
+            "Project Map ещё не построена",
+            "Запустите анализ, чтобы Leetcode определил файлы, Unreal-ассеты и их зависимости.".to_string(),
+            muted_color(),
+        ),
+    };
+
+    flat_section(ui, |ui| {
+        ui.label(RichText::new("Результат анализа").strong().size(18.0));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(verdict)
+                .strong()
+                .size(17.0)
+                .color(verdict_color),
+        );
+        ui.label(RichText::new(&explanation).weak());
+        ui.add_space(8.0);
+        ui.add(
+            egui::ProgressBar::new(health.coverage_percent as f32 / 100.0)
+                .text(format!(
+                    "готовность данных: {} из 100",
+                    health.coverage_percent
+                ))
+                .animate(readiness.status == ProjectMapReadinessStatus::Scanning),
+        )
+        .on_hover_text(
+            "Это техническая готовность источников Project Map, а не процент просканированных файлов или готовности самой игры.",
+        );
+        ui.label(
+            RichText::new(
+                "Показатель складывается из структуры проекта (40), Asset Registry (35), игровых связей (15) и разрешённых внешних ссылок (10).",
+            )
+            .small()
+            .weak(),
+        );
+    });
+
+    if !readiness.changes.is_empty() {
+        flat_section(ui, |ui| {
+            ui.label(RichText::new("Изменения после анализа").strong());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("+ {}", readiness.changes.added_count))
+                        .color(egui::Color32::from_rgb(101, 196, 139))
+                        .monospace(),
+                );
+                ui.label(
+                    RichText::new(format!("~ {}", readiness.changes.modified_count))
+                        .color(egui::Color32::from_rgb(224, 176, 84))
+                        .monospace(),
+                );
+                ui.label(
+                    RichText::new(format!("− {}", readiness.changes.removed_count))
+                        .color(egui::Color32::from_rgb(226, 104, 104))
+                        .monospace(),
+                );
+            });
+            for path in readiness.changes.added_paths.iter().take(5) {
+                ui.label(RichText::new(format!("+ {path}")).monospace().small());
+            }
+            for path in readiness.changes.modified_paths.iter().take(5) {
+                ui.label(RichText::new(format!("~ {path}")).monospace().small());
+            }
+            for path in readiness.changes.removed_paths.iter().take(5) {
+                ui.label(RichText::new(format!("− {path}")).monospace().small());
+            }
+        });
+    }
+
+    flat_section(ui, |ui| {
+        ui.label(RichText::new("Что найдено").strong());
+        ui.label(format!(
+            "{} узлов · {} связей · {} узлов реально связаны между собой",
+            health.node_count, health.edge_count, health.linked_nodes
+        ));
+        ui.horizontal_wrapped(|ui| {
+            chip(ui, format!("код: {}", health.code_nodes));
+            chip(ui, format!("Unreal-ассеты: {}", health.unreal_asset_nodes));
+            chip(ui, format!("задачи и планы: {}", health.planning_nodes));
+            chip(ui, format!("игровые связи: {}", health.semantic_edge_count));
+            if health.external_dependency_nodes > 0 {
+                chip(
+                    ui,
+                    format!(
+                        "зависимости Engine/плагинов: {}",
+                        health.external_dependency_nodes
+                    ),
+                );
+            }
+        });
+        ui.label(
+            RichText::new(
+                "Это граф проекта, а не простой пересчёт файлов: узлы представляют код, конфигурацию, ассеты и планы; связи показывают зависимости между ними.",
+            )
+            .small()
+            .weak(),
+        );
+    });
+
+    flat_section(ui, |ui| {
+        ui.label(RichText::new("Полнота карты").strong());
+        for area in &health.coverage_areas {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(if area.ready {
+                        "Готово"
+                    } else {
+                        "Нужно получить"
+                    })
+                    .strong()
+                    .color(if area.ready {
+                        egui::Color32::from_rgb(101, 196, 139)
+                    } else {
+                        egui::Color32::from_rgb(224, 176, 84)
+                    }),
+                );
+                ui.label(RichText::new(&area.label).strong());
+                ui.label(
+                    RichText::new(format!("{}/{}", area.score, area.max_score))
+                        .monospace()
+                        .weak(),
+                );
+            });
+            ui.label(RichText::new(&area.detail).small().weak());
+            ui.add_space(6.0);
+        }
+    });
+
+    if health.unresolved_nodes > 0
+        || health.ambiguous_labels > 0
+        || health.dependency_cycles > 0
+        || health.stale_nodes > 0
+    {
+        flat_section(ui, |ui| {
+            ui.label(RichText::new("Что требуют внимания").strong());
+            if health.unresolved_nodes > 0 {
+                ui.label(format!(
+                    "{} ссылок внутри /Game пока не имеют цели в текущем snapshot.",
+                    health.unresolved_nodes
+                ));
+                ui.label(
+                    RichText::new(
+                        "Это только ссылки на ассеты самого проекта. Зависимости Unreal Engine и подключённых плагинов учитываются отдельно и больше не снижают готовность карты.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+            if health.ambiguous_labels > 0 {
+                ui.label(format!(
+                    "{} имён повторяются в разных папках или типах узлов.",
+                    health.ambiguous_labels
+                ));
+                ui.label(
+                    RichText::new(
+                        "Повторы не считаются ошибками. При выполнении Leetcode использует точные node_id и object_path, а при нескольких подходящих объектах попросит выбрать нужный.",
+                    )
+                    .small()
+                    .weak(),
+                );
+            }
+            if health.dependency_cycles > 0 {
+                ui.label(format!(
+                    "Обнаружено циклов зависимостей: {}.",
+                    health.dependency_cycles
+                ));
+            }
+            if health.stale_nodes > 0 {
+                ui.label(format!("Устаревших узлов: {}.", health.stale_nodes));
+            }
+        });
+    }
+
+    flat_section(ui, |ui| {
+        ui.label(
+            RichText::new(if readiness.status == ProjectMapReadinessStatus::Ready {
+                "Что можно делать сейчас"
+            } else {
+                "Как завершить анализ"
+            })
+            .strong(),
+        );
+        if readiness.status == ProjectMapReadinessStatus::Ready {
+            ui.label("Можно выбрать сферу, операцию и конкретный объект, проверить зависимости и подтвердить выполнение.");
+        } else if health.node_count > 0 {
+            ui.label("Нажмите одну кнопку ниже. Leetcode сам запустит Unreal в служебном режиме, получит Asset Registry, перестроит связи и проверит итог. Терминал, команды и ручной поиск файлов не нужны.");
+            ui.label(
+                RichText::new(
+                    "Во время анализа интерфейс остаётся доступным; состояние и результат появятся здесь. Изменяющие игровые операции разблокируются после успешной проверки точных объектов.",
+                )
+                .small()
+                .weak(),
+            );
+        } else {
+            ui.label("Сначала нужно построить базовую карту проекта.");
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            if readiness.status != ProjectMapReadinessStatus::Ready
+                && ui
+                    .add_sized(
+                        [260.0, 34.0],
+                        egui::Button::new(
+                            if readiness.status == ProjectMapReadinessStatus::Stale
+                                && !readiness.changes.is_empty()
+                            {
+                                "Синхронизировать изменения"
+                            } else {
+                                "Завершить анализ автоматически"
+                            },
+                        ),
+                    )
+                    .on_hover_text(
+                        "Один автоматический проход: Unreal Asset Registry → связи → проверка Project Map",
+                    )
+                    .clicked()
+            {
+                actions.retry_scan = true;
+            }
+            if ui
+                .add_enabled(health.node_count > 0, egui::Button::new("Открыть Project Map"))
+                .on_hover_text("Открыть визуальную карту узлов и связей проекта")
+                .clicked()
+            {
+                actions.open_map = true;
+            }
+        });
+
+        if readiness.unreal_project && readiness.status != ProjectMapReadinessStatus::Ready {
+            egui::CollapsingHeader::new("Другие способы, если автоматический анализ не сработал")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "Эти действия нужны только для диагностики нестандартной установки Unreal.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if ui
+                            .button("Импортировать Asset Registry JSON")
+                            .on_hover_text("Выбрать готовый JSON export вручную")
+                            .clicked()
+                        {
+                            actions.import_registry = true;
+                        }
+                        if ui
+                            .button("Открыть Unreal Editor")
+                            .on_hover_text(
+                                "Проверить плагины или сохранить ещё не проиндексированные ассеты",
+                            )
+                            .clicked()
+                        {
+                            actions.open_editor = true;
+                        }
+                    });
+                });
+        }
+    });
+
+    if let Some(scan) = last_scan {
+        ui.label(RichText::new("Последний глубокий анализ").strong());
+        ui.horizontal_wrapped(|ui| {
+            chip(ui, scan.status.label());
+            if let Some(duration_ms) = scan.duration_ms {
+                chip(ui, format_history_duration_ms(duration_ms));
+            }
+        });
+        ui.label(RichText::new(&scan.detail).small().weak());
+        if registry_file_missing && scan.status != ProjectMapReadinessStatus::Scanning {
+            ui.label(
+                RichText::new(
+                    "Итог: Unreal-процесс завершался, но Asset Registry snapshot не найден. Повторный анализ теперь проверяет сам файл результата, а не только код выхода процесса.",
+                )
+                .small()
+                .color(egui::Color32::from_rgb(224, 176, 84)),
+            );
+        } else if registry_not_integrated && scan.status != ProjectMapReadinessStatus::Scanning {
+            ui.label(
+                RichText::new(
+                    "Snapshot получен. Следующий автоматический проход встроит его в Project Map и пересчитает готовность.",
+                )
+                .small()
+                .color(egui::Color32::from_rgb(224, 176, 84)),
+            );
+        }
+        ui.add_space(10.0);
+    }
+
+    actions
 }
 
 fn flat_collapsing_section(
@@ -17842,6 +22606,7 @@ fn release_run_detail(
 
 fn release_command_kind(command_id: &str) -> Option<&'static str> {
     match command_id {
+        "production_preflight" => Some("production"),
         "check" | "typecheck" | "lint" => Some("preflight"),
         "test" => Some("test"),
         "build" => Some("build"),
@@ -18606,6 +23371,9 @@ fn timeline_status_color(status: &RunTimelineStatus) -> egui::Color32 {
 
 fn should_require_run_gate(message: &str) -> bool {
     let lower = message.to_lowercase();
+    if lower.trim_start().starts_with("[task_manifest:") {
+        return false;
+    }
     if is_confirmation_text(&lower) {
         return false;
     }
@@ -20482,6 +25250,39 @@ fn chip(ui: &mut egui::Ui, text: impl Into<String>) {
     }
 }
 
+fn unreal_start_step(ui: &mut egui::Ui, number: &str, title: &str, detail: &str, complete: bool) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(210.0, 48.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.horizontal(|ui| {
+                let marker = if complete { "✓" } else { number };
+                ui.label(RichText::new(marker).strong().color(if complete {
+                    egui::Color32::from_rgb(101, 196, 139)
+                } else {
+                    accent_color()
+                }));
+                ui.label(RichText::new(title).strong());
+            });
+            ui.label(RichText::new(compact_inline(detail, 30)).weak().small())
+                .on_hover_text(detail);
+        },
+    );
+}
+
+fn setup_status_row(ui: &mut egui::Ui, label: &str, detail: &str, ready: bool) {
+    ui.horizontal_wrapped(|ui| {
+        let color = if ready {
+            egui::Color32::from_rgb(105, 201, 143)
+        } else {
+            egui::Color32::from_rgb(216, 178, 95)
+        };
+        ui.label(RichText::new(if ready { "●" } else { "○" }).color(color));
+        ui.label(RichText::new(label).strong());
+        ui.label(RichText::new(detail).weak());
+    });
+}
+
 fn empty_state(ui: &mut egui::Ui, title: &str, detail: &str) {
     egui::Frame::none()
         .fill(egui::Color32::from_rgb(18, 21, 26))
@@ -20572,6 +25373,36 @@ fn asset_status_label(status: &AssetStatus) -> &'static str {
         AssetStatus::Running => "выполняется",
         AssetStatus::Done => "готово",
         AssetStatus::Failed => "ошибка",
+    }
+}
+
+fn three_d_status_label(status: ThreeDJobStatus) -> &'static str {
+    match status {
+        ThreeDJobStatus::Pending => "в очереди",
+        ThreeDJobStatus::Running => "выполняется",
+        ThreeDJobStatus::Ready => "готово",
+        ThreeDJobStatus::Failed => "ошибка",
+    }
+}
+
+fn gameplay_plan_status_label(status: GameplayPlanStatus) -> &'static str {
+    match status {
+        GameplayPlanStatus::Planned => "запланировано",
+        GameplayPlanStatus::Applied => "применено",
+        GameplayPlanStatus::Validated => "проверено",
+        GameplayPlanStatus::Failed => "ошибка",
+    }
+}
+
+fn three_d_stage_label(stage: ThreeDPipelineStage) -> &'static str {
+    match stage {
+        ThreeDPipelineStage::Submitted => "отправлено",
+        ThreeDPipelineStage::Geometry => "геометрия",
+        ThreeDPipelineStage::Texturing => "текстуры",
+        ThreeDPipelineStage::Download => "загрузка",
+        ThreeDPipelineStage::Validation => "проверка",
+        ThreeDPipelineStage::Ready => "готово",
+        ThreeDPipelineStage::Failed => "ошибка",
     }
 }
 
@@ -20822,38 +25653,1097 @@ fn compact_inline(text: &str, max_chars: usize) -> String {
     compacted
 }
 
-fn project_map_positions(nodes: &[ProjectGraphNode]) -> BTreeMap<String, egui::Pos2> {
-    let mut grouped: BTreeMap<u8, Vec<&ProjectGraphNode>> = BTreeMap::new();
-    for node in nodes {
-        grouped
-            .entry(project_graph_kind_sort_key(node.kind))
-            .or_default()
-            .push(node);
+fn project_map_group_for_node(node: &ProjectGraphNode) -> ProjectMapGroup {
+    match node.kind {
+        ProjectGraphNodeKind::Project
+        | ProjectGraphNodeKind::Folder
+        | ProjectGraphNodeKind::UnrealProject
+        | ProjectGraphNodeKind::UnrealPlugin => ProjectMapGroup::Structure,
+        ProjectGraphNodeKind::File
+        | ProjectGraphNodeKind::Module
+        | ProjectGraphNodeKind::Symbol
+        | ProjectGraphNodeKind::Command
+        | ProjectGraphNodeKind::UnrealModule
+        | ProjectGraphNodeKind::UnrealTarget
+        | ProjectGraphNodeKind::UnrealConfig
+        | ProjectGraphNodeKind::UnrealSource => ProjectMapGroup::Code,
+        ProjectGraphNodeKind::UnrealAnimation
+        | ProjectGraphNodeKind::UnrealSkeleton
+        | ProjectGraphNodeKind::UnrealSkeletalMesh
+        | ProjectGraphNodeKind::UnrealAnimationBlueprint
+        | ProjectGraphNodeKind::UnrealAnimationMontage
+        | ProjectGraphNodeKind::UnrealControlRig
+        | ProjectGraphNodeKind::UnrealPhysicsAsset => ProjectMapGroup::CharactersAnimation,
+        ProjectGraphNodeKind::UnrealMap
+        | ProjectGraphNodeKind::UnrealBlueprint
+        | ProjectGraphNodeKind::UnrealDataAsset
+        | ProjectGraphNodeKind::UnrealInputAsset
+        | ProjectGraphNodeKind::GameplayPlan
+        | ProjectGraphNodeKind::GameplayRun => ProjectMapGroup::WorldGameplay,
+        ProjectGraphNodeKind::Asset
+        | ProjectGraphNodeKind::ThreeDAsset
+        | ProjectGraphNodeKind::UnrealMaterial
+        | ProjectGraphNodeKind::UnrealNiagara
+        | ProjectGraphNodeKind::UnrealStaticMesh
+        | ProjectGraphNodeKind::UnrealAsset => ProjectMapGroup::VisualAssets,
+        ProjectGraphNodeKind::UnrealSound | ProjectGraphNodeKind::UnrealWidget => {
+            ProjectMapGroup::AudioUi
+        }
+        ProjectGraphNodeKind::Memory
+        | ProjectGraphNodeKind::RoadmapItem
+        | ProjectGraphNodeKind::GameProductionPlan
+        | ProjectGraphNodeKind::ProductionItem
+        | ProjectGraphNodeKind::VerticalSliceRun
+        | ProjectGraphNodeKind::VerticalSlicePhase => ProjectMapGroup::PlanningProduction,
+    }
+}
+
+fn project_map_overview_positions() -> BTreeMap<ProjectMapGroup, egui::Pos2> {
+    ProjectMapGroup::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, group)| {
+            let column = index % 4;
+            let row = index / 4;
+            (
+                group,
+                egui::pos2(-390.0 + column as f32 * 260.0, -145.0 + row as f32 * 290.0),
+            )
+        })
+        .collect()
+}
+
+fn project_map_root_id(graph: &ProjectGraphState) -> &str {
+    graph
+        .nodes
+        .iter()
+        .find(|node| node.id == "project:root")
+        .or_else(|| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == ProjectGraphNodeKind::Project)
+        })
+        .map(|node| node.id.as_str())
+        .unwrap_or("project:root")
+}
+
+fn project_map_find_node(graph: &ProjectGraphState, query: &str) -> Option<String> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    graph
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            let label = node.label.to_ascii_lowercase();
+            let id = node.id.to_ascii_lowercase();
+            let path = node
+                .path
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let score = if id == query || path == query {
+                0
+            } else if label == query {
+                1
+            } else if label.starts_with(&query) {
+                2
+            } else if path.contains(&query) {
+                3
+            } else if project_graph_node_search_blob(node).contains(&query) {
+                4
+            } else {
+                return None;
+            };
+            Some((score, node.label.len(), node.id.clone()))
+        })
+        .min()
+        .map(|(_, _, id)| id)
+}
+
+fn project_map_group_relation_summary(kinds: &BTreeMap<ProjectGraphEdgeKind, usize>) -> String {
+    let mut rows = kinds
+        .iter()
+        .map(|(kind, count)| (*count, project_graph_edge_label(*kind)))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(right.1)));
+    rows.into_iter()
+        .take(5)
+        .map(|(count, label)| format!("{label}: {count}"))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+fn push_project_map_history(history: &mut Vec<String>, node_id: String) {
+    if history.last() == Some(&node_id) {
+        return;
+    }
+    history.push(node_id);
+    if history.len() > 64 {
+        history.remove(0);
+    }
+}
+
+fn project_map_breadcrumb_ids(cache: &ProjectMapGraphCache, node_id: &str) -> Vec<String> {
+    let mut breadcrumbs = vec![node_id.to_string()];
+    let mut cursor = node_id;
+    let mut visited = BTreeSet::from([node_id.to_string()]);
+    for _ in 0..64 {
+        let Some(parent_id) = cache.structural_parent_by_node.get(cursor) else {
+            break;
+        };
+        if !visited.insert(parent_id.clone()) {
+            break;
+        }
+        breadcrumbs.push(parent_id.clone());
+        cursor = parent_id;
+    }
+    breadcrumbs.reverse();
+    breadcrumbs
+}
+
+fn project_map_visible_structural_children(
+    cache: &ProjectMapGraphCache,
+    node_id: &str,
+    hidden_node_ids: &BTreeSet<String>,
+    filter: ProjectMapFilter,
+) -> Vec<(String, usize)> {
+    cache
+        .structural_children_by_node
+        .get(node_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|(child_id, edge_index)| {
+            if hidden_node_ids.contains(child_id) {
+                return None;
+            }
+            let child = cache
+                .node_indices
+                .get(child_id)
+                .and_then(|index| cache.graph.nodes.get(*index))?;
+            if matches!(
+                child.kind,
+                ProjectGraphNodeKind::Project | ProjectGraphNodeKind::Folder
+            ) || filter.matches(child.kind)
+            {
+                Some((child_id.clone(), *edge_index))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn project_map_structural_child_count(
+    cache: &ProjectMapGraphCache,
+    node_id: &str,
+    hidden_node_ids: &BTreeSet<String>,
+    filter: ProjectMapFilter,
+) -> usize {
+    project_map_visible_structural_children(cache, node_id, hidden_node_ids, filter).len()
+}
+
+fn project_map_structural_edge<'a>(
+    cache: &'a ProjectMapGraphCache,
+    parent_id: &str,
+    child_id: &str,
+) -> Option<&'a ProjectGraphEdge> {
+    cache
+        .structural_children_by_node
+        .get(parent_id)
+        .into_iter()
+        .flatten()
+        .find(|(candidate_id, _)| candidate_id == child_id)
+        .and_then(|(_, edge_index)| cache.graph.edges.get(*edge_index))
+}
+
+fn insert_project_map_layout_node(
+    node_id: &str,
+    position: egui::Pos2,
+    node_ids_seen: &mut BTreeSet<String>,
+    node_ids: &mut Vec<String>,
+    positions: &mut BTreeMap<String, egui::Pos2>,
+) {
+    if node_ids_seen.insert(node_id.to_string()) {
+        node_ids.push(node_id.to_string());
+    }
+    positions.insert(node_id.to_string(), position);
+}
+
+fn project_map_overview_anchor_for_group(
+    cache: &ProjectMapGraphCache,
+    group: ProjectMapGroup,
+) -> String {
+    if group == ProjectMapGroup::Structure {
+        return project_map_root_id(&cache.graph).to_string();
+    }
+    cache
+        .graph
+        .nodes
+        .iter()
+        .filter(|node| project_map_group_for_node(node) == group)
+        .filter_map(|node| {
+            let child_count = cache
+                .structural_children_by_node
+                .get(&node.id)
+                .map(Vec::len)
+                .unwrap_or_default();
+            let relation_count = cache
+                .incoming_edge_indices_by_node
+                .get(&node.id)
+                .map(Vec::len)
+                .unwrap_or_default()
+                + cache
+                    .outgoing_edge_indices_by_node
+                    .get(&node.id)
+                    .map(Vec::len)
+                    .unwrap_or_default();
+            (child_count > 0).then_some((child_count, relation_count, node.id.clone()))
+        })
+        .max_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| right.2.cmp(&left.2))
+        })
+        .map(|(_, _, id)| id)
+        .unwrap_or_else(|| project_map_root_id(&cache.graph).to_string())
+}
+
+const PROJECT_MAP_STRUCTURE_PAGE_SIZE: usize = 12;
+const PROJECT_MAP_STRUCTURE_PREVIEW_SIZE: usize = 8;
+
+fn project_map_structure_layout(
+    cache: &ProjectMapGraphCache,
+    anchor_id: &str,
+    selected_node_id: Option<&str>,
+    hidden_node_ids: &BTreeSet<String>,
+    filter: ProjectMapFilter,
+    page: usize,
+) -> ProjectMapLayout {
+    let anchor_id = if cache.node_indices.contains_key(anchor_id) {
+        anchor_id
+    } else {
+        project_map_root_id(&cache.graph)
+    };
+    let children =
+        project_map_visible_structural_children(cache, anchor_id, hidden_node_ids, filter);
+    let page_count = children
+        .len()
+        .div_ceil(PROJECT_MAP_STRUCTURE_PAGE_SIZE)
+        .max(1);
+    let page = page.min(page_count - 1);
+    let start = page * PROJECT_MAP_STRUCTURE_PAGE_SIZE;
+    let visible_children = children
+        .iter()
+        .skip(start)
+        .take(PROJECT_MAP_STRUCTURE_PAGE_SIZE)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut node_ids = Vec::new();
+    let mut node_ids_seen = BTreeSet::new();
+    let mut edges = Vec::new();
+    let mut edge_ids_seen = BTreeSet::new();
+    let mut positions = BTreeMap::new();
+    let mut roles = BTreeMap::new();
+    let mut hidden_neighbours = BTreeMap::new();
+
+    insert_project_map_layout_node(
+        anchor_id,
+        egui::pos2(0.0, 0.0),
+        &mut node_ids_seen,
+        &mut node_ids,
+        &mut positions,
+    );
+    roles.insert(anchor_id.to_string(), ProjectMapNodeRole::Anchor);
+
+    if let Some(parent_id) = cache.structural_parent_by_node.get(anchor_id) {
+        insert_project_map_layout_node(
+            parent_id,
+            egui::pos2(-280.0, 0.0),
+            &mut node_ids_seen,
+            &mut node_ids,
+            &mut positions,
+        );
+        if let Some(edge) = project_map_structural_edge(cache, parent_id, anchor_id) {
+            edge_ids_seen.insert(edge.id.clone());
+            edges.push(edge.clone());
+        }
     }
 
-    let mut positions = BTreeMap::new();
-    let total_columns = grouped.len().max(1) as f32;
-    let column_spacing = 210.0;
-    let start_x = -((total_columns - 1.0) * column_spacing) / 2.0;
+    let child_offset = (visible_children.len().saturating_sub(1) as f32 * 68.0) / 2.0;
+    for (index, (child_id, edge_index)) in visible_children.iter().enumerate() {
+        insert_project_map_layout_node(
+            child_id,
+            egui::pos2(280.0, index as f32 * 68.0 - child_offset),
+            &mut node_ids_seen,
+            &mut node_ids,
+            &mut positions,
+        );
+        if let Some(edge) = cache.graph.edges.get(*edge_index) {
+            if edge_ids_seen.insert(edge.id.clone()) {
+                edges.push(edge.clone());
+            }
+        }
+    }
+    if children.len() > visible_children.len() {
+        hidden_neighbours.insert(
+            anchor_id.to_string(),
+            children.len() - visible_children.len(),
+        );
+    }
 
-    for (column_index, (_kind, mut column_nodes)) in grouped.into_iter().enumerate() {
-        column_nodes.sort_by(|left, right| left.label.cmp(&right.label));
-        let total_rows = column_nodes.len().max(1) as f32;
-        let row_spacing = if column_nodes.len() > 34 { 38.0 } else { 54.0 };
-        let start_y = -((total_rows - 1.0) * row_spacing) / 2.0;
-        for (row_index, node) in column_nodes.into_iter().enumerate() {
-            let stagger = if row_index % 2 == 0 { 0.0 } else { 18.0 };
-            positions.insert(
-                node.id.clone(),
-                egui::pos2(
-                    start_x + column_index as f32 * column_spacing + stagger,
-                    start_y + row_index as f32 * row_spacing,
-                ),
+    let preview_id = selected_node_id.filter(|selected_id| {
+        cache
+            .structural_parent_by_node
+            .get(*selected_id)
+            .is_some_and(|parent_id| parent_id == anchor_id)
+    });
+    if let Some(preview_id) = preview_id {
+        let preview_children =
+            project_map_visible_structural_children(cache, preview_id, hidden_node_ids, filter);
+        let selected_y = positions.get(preview_id).map_or(0.0, |position| position.y);
+        let visible_preview = preview_children
+            .iter()
+            .take(PROJECT_MAP_STRUCTURE_PREVIEW_SIZE)
+            .cloned()
+            .collect::<Vec<_>>();
+        let preview_offset = (visible_preview.len().saturating_sub(1) as f32 * 62.0) / 2.0;
+        for (index, (child_id, edge_index)) in visible_preview.iter().enumerate() {
+            insert_project_map_layout_node(
+                child_id,
+                egui::pos2(560.0, selected_y + index as f32 * 62.0 - preview_offset),
+                &mut node_ids_seen,
+                &mut node_ids,
+                &mut positions,
+            );
+            if let Some(edge) = cache.graph.edges.get(*edge_index) {
+                if edge_ids_seen.insert(edge.id.clone()) {
+                    edges.push(edge.clone());
+                }
+            }
+        }
+        if preview_children.len() > visible_preview.len() {
+            hidden_neighbours.insert(
+                preview_id.to_string(),
+                preview_children.len() - visible_preview.len(),
             );
         }
     }
 
-    positions
+    if let Some(selected) = selected_node_id.filter(|id| node_ids_seen.contains(*id)) {
+        roles.insert(selected.to_string(), ProjectMapNodeRole::Focus);
+    }
+    normalize_project_map_layout_positions(&mut positions);
+    let nodes = node_ids
+        .into_iter()
+        .filter_map(|id| {
+            cache
+                .node_indices
+                .get(&id)
+                .and_then(|index| cache.graph.nodes.get(*index))
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    ProjectMapLayout {
+        nodes,
+        edges,
+        positions,
+        roles,
+        hidden_neighbours,
+        reversed_edge_ids: BTreeSet::new(),
+    }
+}
+
+fn project_map_focused_layout(
+    cache: &ProjectMapGraphCache,
+    focus_id: &str,
+    depth: usize,
+    impact_only: bool,
+    hidden_node_ids: &BTreeSet<String>,
+    filter: ProjectMapFilter,
+) -> ProjectMapLayout {
+    if !cache.node_indices.contains_key(focus_id) {
+        return ProjectMapLayout {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            positions: BTreeMap::new(),
+            roles: BTreeMap::new(),
+            hidden_neighbours: BTreeMap::new(),
+            reversed_edge_ids: BTreeSet::new(),
+        };
+    }
+    let mut levels = BTreeMap::<i32, Vec<String>>::new();
+    levels.insert(0, vec![focus_id.to_string()]);
+    let mut edges = Vec::new();
+    let mut hidden_neighbours = BTreeMap::new();
+    let mut seen = BTreeSet::from([focus_id.to_string()]);
+    let mut reversed_edge_ids = BTreeSet::new();
+    if impact_only {
+        collect_project_map_impact(
+            cache,
+            focus_id,
+            depth,
+            hidden_node_ids,
+            filter,
+            &mut seen,
+            &mut levels,
+            &mut edges,
+            &mut reversed_edge_ids,
+            &mut hidden_neighbours,
+        );
+    } else {
+        collect_project_map_focus_side(
+            cache,
+            focus_id,
+            depth,
+            false,
+            hidden_node_ids,
+            filter,
+            &mut seen,
+            &mut levels,
+            &mut edges,
+            &mut hidden_neighbours,
+        );
+        collect_project_map_focus_side(
+            cache,
+            focus_id,
+            depth,
+            true,
+            hidden_node_ids,
+            filter,
+            &mut seen,
+            &mut levels,
+            &mut edges,
+            &mut hidden_neighbours,
+        );
+    }
+
+    let mut positions = BTreeMap::new();
+    let mut roles = BTreeMap::new();
+    roles.insert(focus_id.to_string(), ProjectMapNodeRole::Focus);
+    for (level, node_ids) in &levels {
+        let offset = (node_ids.len().saturating_sub(1) as f32 * 78.0) / 2.0;
+        for (index, node_id) in node_ids.iter().enumerate() {
+            positions.insert(
+                node_id.clone(),
+                egui::pos2(*level as f32 * 270.0, index as f32 * 78.0 - offset),
+            );
+            if *level < 0 {
+                roles.insert(node_id.clone(), ProjectMapNodeRole::Incoming);
+            } else if *level > 0 {
+                roles.insert(
+                    node_id.clone(),
+                    if impact_only {
+                        ProjectMapNodeRole::Impact
+                    } else {
+                        ProjectMapNodeRole::Outgoing
+                    },
+                );
+            }
+        }
+    }
+    let nodes = levels
+        .values()
+        .flatten()
+        .filter_map(|id| {
+            cache
+                .node_indices
+                .get(id)
+                .and_then(|index| cache.graph.nodes.get(*index))
+                .cloned()
+        })
+        .collect::<Vec<_>>();
+    ProjectMapLayout {
+        nodes,
+        edges,
+        positions,
+        roles,
+        hidden_neighbours,
+        reversed_edge_ids,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_project_map_focus_side(
+    cache: &ProjectMapGraphCache,
+    focus_id: &str,
+    depth: usize,
+    outgoing: bool,
+    hidden_node_ids: &BTreeSet<String>,
+    filter: ProjectMapFilter,
+    seen: &mut BTreeSet<String>,
+    levels: &mut BTreeMap<i32, Vec<String>>,
+    selected_edges: &mut Vec<ProjectGraphEdge>,
+    hidden_neighbours: &mut BTreeMap<String, usize>,
+) {
+    const MAX_NODES_PER_LEVEL: usize = 18;
+    const MAX_NEIGHBOURS_PER_NODE: usize = 10;
+    const MAX_VISIBLE_NODES: usize = 120;
+    let mut frontier = vec![focus_id.to_string()];
+    for distance in 1..=depth.clamp(1, 3) {
+        let mut next = Vec::new();
+        for parent_id in &frontier {
+            let indices = if outgoing {
+                cache.outgoing_edge_indices_by_node.get(parent_id)
+            } else {
+                cache.incoming_edge_indices_by_node.get(parent_id)
+            };
+            let mut candidates = indices
+                .into_iter()
+                .flatten()
+                .filter_map(|index| {
+                    let edge = cache.graph.edges.get(*index)?;
+                    let other_id = if outgoing { &edge.to } else { &edge.from };
+                    let node = cache
+                        .node_indices
+                        .get(other_id)
+                        .and_then(|node_index| cache.graph.nodes.get(*node_index))?;
+                    if hidden_node_ids.contains(other_id) || !filter.matches(node.kind) {
+                        return None;
+                    }
+                    Some((*index, other_id.clone(), node.kind, node.label.clone()))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                project_graph_kind_sort_key(left.2)
+                    .cmp(&project_graph_kind_sort_key(right.2))
+                    .then(left.3.cmp(&right.3))
+            });
+            let candidate_count = candidates.len();
+            let mut shown = 0;
+            for (edge_index, other_id, _, _) in candidates {
+                if shown >= MAX_NEIGHBOURS_PER_NODE
+                    || next.len() >= MAX_NODES_PER_LEVEL
+                    || seen.len() >= MAX_VISIBLE_NODES
+                {
+                    break;
+                }
+                if !seen.insert(other_id.clone()) {
+                    continue;
+                }
+                if let Some(edge) = cache.graph.edges.get(edge_index) {
+                    selected_edges.push(edge.clone());
+                }
+                next.push(other_id);
+                shown += 1;
+            }
+            if candidate_count > shown {
+                *hidden_neighbours.entry(parent_id.clone()).or_default() += candidate_count - shown;
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        let level = if outgoing {
+            distance as i32
+        } else {
+            -(distance as i32)
+        };
+        levels.insert(level, next.clone());
+        frontier = next;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_project_map_impact(
+    cache: &ProjectMapGraphCache,
+    focus_id: &str,
+    depth: usize,
+    hidden_node_ids: &BTreeSet<String>,
+    filter: ProjectMapFilter,
+    seen: &mut BTreeSet<String>,
+    levels: &mut BTreeMap<i32, Vec<String>>,
+    selected_edges: &mut Vec<ProjectGraphEdge>,
+    reversed_edge_ids: &mut BTreeSet<String>,
+    hidden_neighbours: &mut BTreeMap<String, usize>,
+) {
+    const MAX_NODES_PER_LEVEL: usize = 16;
+    const MAX_NEIGHBOURS_PER_NODE: usize = 8;
+    const MAX_VISIBLE_NODES: usize = 72;
+    let mut frontier = vec![focus_id.to_string()];
+    for distance in 1..=depth.clamp(1, 3) {
+        let mut next = Vec::new();
+        for parent_id in &frontier {
+            let mut edge_indices = cache
+                .incoming_edge_indices_by_node
+                .get(parent_id)
+                .into_iter()
+                .flatten()
+                .chain(
+                    cache
+                        .outgoing_edge_indices_by_node
+                        .get(parent_id)
+                        .into_iter()
+                        .flatten(),
+                )
+                .copied()
+                .collect::<Vec<_>>();
+            edge_indices.sort_unstable();
+            edge_indices.dedup();
+            let mut candidates = edge_indices
+                .into_iter()
+                .filter_map(|edge_index| {
+                    let edge = cache.graph.edges.get(edge_index)?;
+                    let (other_id, reversed) = project_map_impact_target(edge, parent_id)?;
+                    let node = cache
+                        .node_indices
+                        .get(other_id)
+                        .and_then(|node_index| cache.graph.nodes.get(*node_index))?;
+                    if hidden_node_ids.contains(other_id) || !filter.matches(node.kind) {
+                        return None;
+                    }
+                    Some((
+                        edge_index,
+                        other_id.to_string(),
+                        reversed,
+                        node.kind,
+                        node.label.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                project_graph_kind_sort_key(left.3)
+                    .cmp(&project_graph_kind_sort_key(right.3))
+                    .then_with(|| left.4.cmp(&right.4))
+            });
+            let candidate_count = candidates.len();
+            let mut shown = 0;
+            for (edge_index, other_id, reversed, _, _) in candidates {
+                if shown >= MAX_NEIGHBOURS_PER_NODE
+                    || next.len() >= MAX_NODES_PER_LEVEL
+                    || seen.len() >= MAX_VISIBLE_NODES
+                {
+                    break;
+                }
+                if !seen.insert(other_id.clone()) {
+                    continue;
+                }
+                if let Some(edge) = cache.graph.edges.get(edge_index) {
+                    selected_edges.push(edge.clone());
+                    if reversed {
+                        reversed_edge_ids.insert(edge.id.clone());
+                    }
+                }
+                next.push(other_id);
+                shown += 1;
+            }
+            if candidate_count > shown {
+                *hidden_neighbours.entry(parent_id.clone()).or_default() += candidate_count - shown;
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        levels.insert(distance as i32, next.clone());
+        frontier = next;
+    }
+}
+
+fn project_map_impact_target<'a>(
+    edge: &'a ProjectGraphEdge,
+    current_id: &str,
+) -> Option<(&'a str, bool)> {
+    let forward = matches!(
+        edge.kind,
+        ProjectGraphEdgeKind::Generates
+            | ProjectGraphEdgeKind::Configures
+            | ProjectGraphEdgeKind::Animates
+            | ProjectGraphEdgeKind::Produces
+    );
+    let reverse = matches!(
+        edge.kind,
+        ProjectGraphEdgeKind::Imports
+            | ProjectGraphEdgeKind::DependsOn
+            | ProjectGraphEdgeKind::Calls
+            | ProjectGraphEdgeKind::Tests
+            | ProjectGraphEdgeKind::References
+            | ProjectGraphEdgeKind::Loads
+            | ProjectGraphEdgeKind::UsesSkeleton
+            | ProjectGraphEdgeKind::ControlledBy
+            | ProjectGraphEdgeKind::HasComponent
+            | ProjectGraphEdgeKind::SpawnedBy
+            | ProjectGraphEdgeKind::OwnedBy
+            | ProjectGraphEdgeKind::BoundToInput
+            | ProjectGraphEdgeKind::Consumes
+    );
+    if forward && edge.from == current_id {
+        Some((edge.to.as_str(), false))
+    } else if reverse && edge.to == current_id {
+        Some((edge.from.as_str(), true))
+    } else {
+        None
+    }
+}
+
+fn normalize_project_map_layout_positions(positions: &mut BTreeMap<String, egui::Pos2>) {
+    if positions.is_empty() {
+        return;
+    }
+    let min_x = positions
+        .values()
+        .map(|point| point.x)
+        .fold(f32::INFINITY, f32::min);
+    let max_x = positions
+        .values()
+        .map(|point| point.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_y = positions
+        .values()
+        .map(|point| point.y)
+        .fold(f32::INFINITY, f32::min);
+    let max_y = positions
+        .values()
+        .map(|point| point.y)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let center = egui::pos2((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
+    for point in positions.values_mut() {
+        *point -= center.to_vec2();
+    }
+}
+
+fn is_project_map_structural_edge(kind: ProjectGraphEdgeKind) -> bool {
+    matches!(
+        kind,
+        ProjectGraphEdgeKind::Contains | ProjectGraphEdgeKind::Declares
+    )
+}
+
+fn project_map_has_structural_children(cache: &ProjectMapGraphCache, node_id: &str) -> bool {
+    cache
+        .structural_children_by_node
+        .get(node_id)
+        .is_some_and(|children| !children.is_empty())
+}
+
+fn project_map_node_rect(center: egui::Pos2, zoom: f32) -> egui::Rect {
+    let scale = zoom.clamp(0.72, 1.18);
+    egui::Rect::from_center_size(center, egui::vec2(184.0 * scale, 46.0 * scale))
+}
+
+fn project_map_edge_route(from: egui::Rect, to: egui::Rect) -> [egui::Pos2; 4] {
+    let (start, end) = if from.center().x <= to.center().x {
+        (from.right_center(), to.left_center())
+    } else {
+        (from.left_center(), to.right_center())
+    };
+    let middle_x = (start.x + end.x) / 2.0;
+    [
+        start,
+        egui::pos2(middle_x, start.y),
+        egui::pos2(middle_x, end.y),
+        end,
+    ]
+}
+
+fn distance_to_segment(point: egui::Pos2, start: egui::Pos2, end: egui::Pos2) -> f32 {
+    let segment = end - start;
+    let length_squared = segment.length_sq();
+    if length_squared <= f32::EPSILON {
+        return point.distance(start);
+    }
+    let projection = ((point - start).dot(segment) / length_squared).clamp(0.0, 1.0);
+    point.distance(start + segment * projection)
+}
+
+fn distance_to_polyline(point: egui::Pos2, points: &[egui::Pos2]) -> f32 {
+    points
+        .windows(2)
+        .map(|pair| distance_to_segment(point, pair[0], pair[1]))
+        .fold(f32::INFINITY, f32::min)
+}
+
+fn project_map_edge_color(
+    kind: ProjectGraphEdgeKind,
+    highlighted: bool,
+    dimmed: bool,
+) -> egui::Color32 {
+    if dimmed {
+        return egui::Color32::from_rgba_unmultiplied(44, 51, 59, 48);
+    }
+    let (red, green, blue) = match kind {
+        ProjectGraphEdgeKind::Contains | ProjectGraphEdgeKind::Declares => (93, 133, 166),
+        ProjectGraphEdgeKind::DependsOn
+        | ProjectGraphEdgeKind::Imports
+        | ProjectGraphEdgeKind::Calls
+        | ProjectGraphEdgeKind::References
+        | ProjectGraphEdgeKind::Loads => (65, 177, 206),
+        ProjectGraphEdgeKind::UsesSkeleton
+        | ProjectGraphEdgeKind::Animates
+        | ProjectGraphEdgeKind::ControlledBy
+        | ProjectGraphEdgeKind::HasComponent
+        | ProjectGraphEdgeKind::CompatibleWith
+        | ProjectGraphEdgeKind::SpawnedBy
+        | ProjectGraphEdgeKind::OwnedBy
+        | ProjectGraphEdgeKind::BoundToInput => (171, 124, 205),
+        ProjectGraphEdgeKind::Generates
+        | ProjectGraphEdgeKind::Produces
+        | ProjectGraphEdgeKind::Consumes => (91, 178, 126),
+        ProjectGraphEdgeKind::Tests
+        | ProjectGraphEdgeKind::Documents
+        | ProjectGraphEdgeKind::Configures => (211, 157, 76),
+        ProjectGraphEdgeKind::RelatedTo => (119, 132, 148),
+    };
+    egui::Color32::from_rgba_unmultiplied(red, green, blue, if highlighted { 238 } else { 118 })
+}
+
+fn draw_project_map_arrow(painter: &egui::Painter, route: &[egui::Pos2], stroke: egui::Stroke) {
+    for pair in route.windows(2) {
+        painter.line_segment([pair[0], pair[1]], stroke);
+    }
+    let Some(end) = route.last().copied() else {
+        return;
+    };
+    let Some(previous) = route
+        .iter()
+        .rev()
+        .copied()
+        .find(|point| point.distance(end) > 0.5)
+    else {
+        return;
+    };
+    let direction = (end - previous).normalized();
+    let perpendicular = egui::vec2(-direction.y, direction.x);
+    let base = end - direction * 9.0;
+    painter.line_segment([end, base + perpendicular * 4.5], stroke);
+    painter.line_segment([end, base - perpendicular * 4.5], stroke);
+}
+
+fn draw_project_map_edge_badge(
+    painter: &egui::Painter,
+    canvas: egui::Rect,
+    pointer: egui::Pos2,
+    label: &str,
+) {
+    let width = (label.chars().count() as f32 * 7.2 + 18.0).clamp(92.0, 230.0);
+    let center = egui::pos2(
+        (pointer.x + width / 2.0 + 12.0).min(canvas.right() - width / 2.0 - 6.0),
+        (pointer.y - 18.0).max(canvas.top() + 16.0),
+    );
+    let badge = egui::Rect::from_center_size(center, egui::vec2(width, 24.0));
+    painter.rect_filled(
+        badge,
+        egui::Rounding::same(4.0),
+        egui::Color32::from_rgb(28, 34, 41),
+    );
+    painter.rect_stroke(
+        badge,
+        egui::Rounding::same(4.0),
+        egui::Stroke::new(1.0, subtle_accent()),
+    );
+    painter.text(
+        badge.center(),
+        egui::Align2::CENTER_CENTER,
+        compact_inline(label, 30),
+        egui::FontId::proportional(12.0),
+        text_color(),
+    );
+}
+
+fn draw_project_map_lane_headers(
+    painter: &egui::Painter,
+    canvas: egui::Rect,
+    mode: ProjectMapViewMode,
+    depth: usize,
+) {
+    if mode == ProjectMapViewMode::Overview {
+        return;
+    }
+    let header =
+        egui::Rect::from_min_max(canvas.min, egui::pos2(canvas.right(), canvas.top() + 30.0));
+    painter.rect_filled(
+        header,
+        egui::Rounding::same(5.0),
+        egui::Color32::from_rgba_unmultiplied(12, 16, 21, 238),
+    );
+    let labels = match mode {
+        ProjectMapViewMode::Structure => vec![
+            (0.16, "РОДИТЕЛЬ".to_string()),
+            (0.45, "ТЕКУЩАЯ ВЕТВЬ".to_string()),
+            (0.78, "ДОЧЕРНИЕ УЗЛЫ · ДВОЙНОЙ КЛИК — ВОЙТИ".to_string()),
+        ],
+        ProjectMapViewMode::Dependencies => vec![
+            (0.18, "ВХОДЯЩИЕ СВЯЗИ".to_string()),
+            (0.50, "ТЕКУЩИЙ ФОКУС".to_string()),
+            (0.82, "ИСХОДЯЩИЕ СВЯЗИ".to_string()),
+        ],
+        ProjectMapViewMode::Impact => {
+            let depth = depth.clamp(1, 3);
+            let mut values = vec![(0.12, "ИЗМЕНЕНИЕ".to_string())];
+            for level in 1..=depth {
+                values.push((
+                    0.12 + level as f32 * (0.76 / depth as f32),
+                    if level == 1 {
+                        "ПРЯМОЕ ВЛИЯНИЕ".to_string()
+                    } else {
+                        format!("ВЛИЯНИЕ · УРОВЕНЬ {level}")
+                    },
+                ));
+            }
+            values
+        }
+        ProjectMapViewMode::Overview => Vec::new(),
+    };
+    for (x, label) in labels {
+        painter.text(
+            egui::pos2(canvas.left() + canvas.width() * x, header.center().y),
+            egui::Align2::CENTER_CENTER,
+            label,
+            egui::FontId::proportional(10.0),
+            muted_color(),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_project_map_node(
+    painter: &egui::Painter,
+    node: &ProjectGraphNode,
+    area: egui::Rect,
+    role: ProjectMapNodeRole,
+    selected: bool,
+    pinned: bool,
+    hovered: bool,
+    hidden_neighbours: Option<usize>,
+    zoom: f32,
+) {
+    let background = match role {
+        ProjectMapNodeRole::Anchor => egui::Color32::from_rgb(26, 38, 48),
+        ProjectMapNodeRole::Focus => egui::Color32::from_rgb(24, 47, 57),
+        ProjectMapNodeRole::Incoming => egui::Color32::from_rgb(23, 35, 49),
+        ProjectMapNodeRole::Outgoing => egui::Color32::from_rgb(23, 43, 37),
+        ProjectMapNodeRole::Impact => egui::Color32::from_rgb(49, 39, 23),
+        ProjectMapNodeRole::Normal => egui::Color32::from_rgb(22, 27, 33),
+    };
+    let border = if selected || hovered {
+        accent_color()
+    } else if pinned {
+        subtle_accent()
+    } else {
+        border_color()
+    };
+    painter.rect_filled(area, egui::Rounding::same(4.0), background);
+    painter.rect_stroke(
+        area,
+        egui::Rounding::same(4.0),
+        egui::Stroke::new(if selected { 2.0 } else { 1.0 }, border),
+    );
+    let marker = egui::pos2(area.left() + 13.0, area.center().y);
+    painter.circle_filled(
+        marker,
+        if selected { 5.5 } else { 4.5 },
+        project_map_node_color(node.kind, selected, pinned),
+    );
+    let text_x = marker.x + 11.0;
+    painter.text(
+        egui::pos2(
+            text_x,
+            area.center().y - if zoom >= 0.58 { 7.0 } else { 0.0 },
+        ),
+        egui::Align2::LEFT_CENTER,
+        compact_inline(&node.label, 25),
+        egui::FontId::proportional(if zoom >= 0.58 { 12.0 } else { 11.0 }),
+        text_color(),
+    );
+    if zoom >= 0.58 {
+        painter.text(
+            egui::pos2(text_x, area.center().y + 9.0),
+            egui::Align2::LEFT_CENTER,
+            project_graph_kind_label(node.kind),
+            egui::FontId::proportional(10.0),
+            muted_color(),
+        );
+    }
+    if let Some(count) = hidden_neighbours.filter(|count| *count > 0) {
+        painter.text(
+            egui::pos2(area.right() - 8.0, area.top() + 7.0),
+            egui::Align2::RIGHT_TOP,
+            format!("+{count}"),
+            egui::FontId::proportional(10.0),
+            subtle_accent(),
+        );
+    }
+}
+
+fn project_map_edge_tooltip(edge: &ProjectGraphEdge, from: &str, to: &str) -> String {
+    format!(
+        "{from} → {to}\nТип: {} ({})\nИсточник: {}\nДостоверность: {:.0}%",
+        project_graph_edge_label(edge.kind),
+        edge.kind.as_str(),
+        if edge.source.trim().is_empty() {
+            "не указан"
+        } else {
+            edge.source.as_str()
+        },
+        edge.confidence.clamp(0.0, 1.0) * 100.0
+    )
+}
+
+fn project_map_node_tooltip(cache: &ProjectMapGraphCache, node: &ProjectGraphNode) -> String {
+    let incoming = cache
+        .incoming_edge_indices_by_node
+        .get(&node.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let outgoing = cache
+        .outgoing_edge_indices_by_node
+        .get(&node.id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let incoming_types = project_map_edge_indices_summary(&cache.graph, incoming);
+    let outgoing_types = project_map_edge_indices_summary(&cache.graph, outgoing);
+    format!(
+        "{}\n{}\n{}\n\nВходящие: {}{}\nИсходящие: {}{}\n\nКлик — выбрать узел",
+        node.label,
+        project_graph_kind_label(node.kind),
+        node.path.as_deref().unwrap_or("без пути"),
+        incoming.len(),
+        if incoming_types.is_empty() {
+            String::new()
+        } else {
+            format!(" · {incoming_types}")
+        },
+        outgoing.len(),
+        if outgoing_types.is_empty() {
+            String::new()
+        } else {
+            format!(" · {outgoing_types}")
+        }
+    )
+}
+
+fn project_map_edge_indices_summary(graph: &ProjectGraphState, indices: &[usize]) -> String {
+    let mut counts = BTreeMap::<ProjectGraphEdgeKind, usize>::new();
+    for index in indices {
+        if let Some(edge) = graph.edges.get(*index) {
+            *counts.entry(edge.kind).or_default() += 1;
+        }
+    }
+    project_map_group_relation_summary(&counts)
+}
+
+fn project_map_node_opens_file(kind: ProjectGraphNodeKind) -> bool {
+    matches!(
+        kind,
+        ProjectGraphNodeKind::File
+            | ProjectGraphNodeKind::Asset
+            | ProjectGraphNodeKind::ThreeDAsset
+            | ProjectGraphNodeKind::UnrealProject
+            | ProjectGraphNodeKind::UnrealPlugin
+            | ProjectGraphNodeKind::UnrealModule
+            | ProjectGraphNodeKind::UnrealTarget
+            | ProjectGraphNodeKind::UnrealConfig
+            | ProjectGraphNodeKind::UnrealSource
+            | ProjectGraphNodeKind::GameplayPlan
+            | ProjectGraphNodeKind::GameplayRun
+            | ProjectGraphNodeKind::GameProductionPlan
+            | ProjectGraphNodeKind::ProductionItem
+            | ProjectGraphNodeKind::VerticalSliceRun
+            | ProjectGraphNodeKind::VerticalSlicePhase
+    )
 }
 
 fn project_map_to_screen(
@@ -20863,20 +26753,6 @@ fn project_map_to_screen(
     zoom: f32,
 ) -> egui::Pos2 {
     rect.center() + egui::vec2(pos.x * zoom, pos.y * zoom) + pan
-}
-
-fn project_map_node_radius(kind: ProjectGraphNodeKind) -> f32 {
-    match kind {
-        ProjectGraphNodeKind::Project => 18.0,
-        ProjectGraphNodeKind::Folder => 12.0,
-        ProjectGraphNodeKind::File => 10.0,
-        ProjectGraphNodeKind::Module => 13.0,
-        ProjectGraphNodeKind::Symbol => 8.0,
-        ProjectGraphNodeKind::Command => 11.0,
-        ProjectGraphNodeKind::Asset => 12.0,
-        ProjectGraphNodeKind::Memory => 11.0,
-        ProjectGraphNodeKind::RoadmapItem => 11.0,
-    }
 }
 
 fn project_map_node_color(
@@ -20892,28 +26768,88 @@ fn project_map_node_color(
     }
     match kind {
         ProjectGraphNodeKind::Project => egui::Color32::from_rgb(67, 143, 205),
+        ProjectGraphNodeKind::UnrealProject => egui::Color32::from_rgb(48, 155, 219),
+        ProjectGraphNodeKind::UnrealPlugin => egui::Color32::from_rgb(61, 188, 183),
         ProjectGraphNodeKind::Folder => egui::Color32::from_rgb(96, 128, 160),
         ProjectGraphNodeKind::File => egui::Color32::from_rgb(132, 151, 168),
         ProjectGraphNodeKind::Module => egui::Color32::from_rgb(99, 174, 152),
+        ProjectGraphNodeKind::UnrealModule => egui::Color32::from_rgb(46, 180, 140),
         ProjectGraphNodeKind::Symbol => egui::Color32::from_rgb(151, 132, 205),
         ProjectGraphNodeKind::Command => egui::Color32::from_rgb(219, 162, 87),
         ProjectGraphNodeKind::Asset => egui::Color32::from_rgb(197, 126, 168),
+        ProjectGraphNodeKind::ThreeDAsset => egui::Color32::from_rgb(62, 188, 178),
+        ProjectGraphNodeKind::UnrealTarget => egui::Color32::from_rgb(224, 153, 68),
+        ProjectGraphNodeKind::UnrealConfig => egui::Color32::from_rgb(117, 145, 191),
+        ProjectGraphNodeKind::UnrealSource => egui::Color32::from_rgb(91, 168, 184),
+        ProjectGraphNodeKind::UnrealMap => egui::Color32::from_rgb(90, 190, 121),
+        ProjectGraphNodeKind::UnrealBlueprint => egui::Color32::from_rgb(63, 139, 220),
+        ProjectGraphNodeKind::UnrealDataAsset => egui::Color32::from_rgb(143, 183, 87),
+        ProjectGraphNodeKind::UnrealMaterial => egui::Color32::from_rgb(202, 130, 106),
+        ProjectGraphNodeKind::UnrealNiagara => egui::Color32::from_rgb(142, 105, 211),
+        ProjectGraphNodeKind::UnrealAnimation => egui::Color32::from_rgb(215, 122, 177),
+        ProjectGraphNodeKind::UnrealSkeleton => egui::Color32::from_rgb(235, 168, 91),
+        ProjectGraphNodeKind::UnrealSkeletalMesh => egui::Color32::from_rgb(86, 187, 183),
+        ProjectGraphNodeKind::UnrealStaticMesh => egui::Color32::from_rgb(105, 159, 180),
+        ProjectGraphNodeKind::UnrealAnimationBlueprint => egui::Color32::from_rgb(82, 146, 224),
+        ProjectGraphNodeKind::UnrealAnimationMontage => egui::Color32::from_rgb(221, 117, 171),
+        ProjectGraphNodeKind::UnrealControlRig => egui::Color32::from_rgb(179, 113, 218),
+        ProjectGraphNodeKind::UnrealPhysicsAsset => egui::Color32::from_rgb(217, 142, 83),
+        ProjectGraphNodeKind::UnrealSound => egui::Color32::from_rgb(113, 183, 111),
+        ProjectGraphNodeKind::UnrealWidget => egui::Color32::from_rgb(95, 157, 219),
+        ProjectGraphNodeKind::UnrealInputAsset => egui::Color32::from_rgb(208, 177, 82),
+        ProjectGraphNodeKind::UnrealAsset => egui::Color32::from_rgb(160, 133, 183),
         ProjectGraphNodeKind::Memory => egui::Color32::from_rgb(116, 184, 112),
         ProjectGraphNodeKind::RoadmapItem => egui::Color32::from_rgb(190, 188, 106),
+        ProjectGraphNodeKind::GameplayPlan => egui::Color32::from_rgb(79, 173, 204),
+        ProjectGraphNodeKind::GameplayRun => egui::Color32::from_rgb(105, 191, 135),
+        ProjectGraphNodeKind::GameProductionPlan => egui::Color32::from_rgb(62, 172, 196),
+        ProjectGraphNodeKind::ProductionItem => egui::Color32::from_rgb(104, 185, 145),
+        ProjectGraphNodeKind::VerticalSliceRun => egui::Color32::from_rgb(67, 155, 215),
+        ProjectGraphNodeKind::VerticalSlicePhase => egui::Color32::from_rgb(82, 183, 160),
     }
 }
 
 fn project_graph_kind_label(kind: ProjectGraphNodeKind) -> &'static str {
     match kind {
         ProjectGraphNodeKind::Project => "проект",
+        ProjectGraphNodeKind::UnrealProject => "Unreal-проект",
+        ProjectGraphNodeKind::UnrealPlugin => "Unreal-плагин",
         ProjectGraphNodeKind::Folder => "папка",
         ProjectGraphNodeKind::File => "файл",
         ProjectGraphNodeKind::Module => "модуль",
+        ProjectGraphNodeKind::UnrealModule => "Unreal-модуль",
+        ProjectGraphNodeKind::UnrealTarget => "Unreal target",
+        ProjectGraphNodeKind::UnrealConfig => "Unreal config",
+        ProjectGraphNodeKind::UnrealSource => "Unreal source",
+        ProjectGraphNodeKind::UnrealMap => "карта Unreal",
+        ProjectGraphNodeKind::UnrealBlueprint => "Blueprint",
+        ProjectGraphNodeKind::UnrealDataAsset => "Data Asset",
+        ProjectGraphNodeKind::UnrealMaterial => "материал Unreal",
+        ProjectGraphNodeKind::UnrealNiagara => "Niagara",
+        ProjectGraphNodeKind::UnrealAnimation => "анимация Unreal",
+        ProjectGraphNodeKind::UnrealSkeleton => "Skeleton",
+        ProjectGraphNodeKind::UnrealSkeletalMesh => "Skeletal Mesh",
+        ProjectGraphNodeKind::UnrealStaticMesh => "Static Mesh",
+        ProjectGraphNodeKind::UnrealAnimationBlueprint => "Animation Blueprint",
+        ProjectGraphNodeKind::UnrealAnimationMontage => "Animation Montage",
+        ProjectGraphNodeKind::UnrealControlRig => "Control Rig",
+        ProjectGraphNodeKind::UnrealPhysicsAsset => "Physics Asset",
+        ProjectGraphNodeKind::UnrealSound => "Sound",
+        ProjectGraphNodeKind::UnrealWidget => "UI Widget",
+        ProjectGraphNodeKind::UnrealInputAsset => "Input Asset",
+        ProjectGraphNodeKind::UnrealAsset => "ассет Unreal",
         ProjectGraphNodeKind::Symbol => "символ",
         ProjectGraphNodeKind::Command => "команда",
         ProjectGraphNodeKind::Asset => "ассет",
+        ProjectGraphNodeKind::ThreeDAsset => "3D-ассет",
         ProjectGraphNodeKind::Memory => "память",
         ProjectGraphNodeKind::RoadmapItem => "roadmap",
+        ProjectGraphNodeKind::GameplayPlan => "gameplay-план",
+        ProjectGraphNodeKind::GameplayRun => "playtest",
+        ProjectGraphNodeKind::GameProductionPlan => "production-план",
+        ProjectGraphNodeKind::ProductionItem => "production-задача",
+        ProjectGraphNodeKind::VerticalSliceRun => "vertical slice run",
+        ProjectGraphNodeKind::VerticalSlicePhase => "vertical slice фаза",
     }
 }
 
@@ -20927,21 +26863,108 @@ fn project_graph_edge_label(kind: ProjectGraphEdgeKind) -> &'static str {
         ProjectGraphEdgeKind::Tests => "проверяет",
         ProjectGraphEdgeKind::Documents => "документирует",
         ProjectGraphEdgeKind::RelatedTo => "связано с",
+        ProjectGraphEdgeKind::Declares => "объявляет",
+        ProjectGraphEdgeKind::Configures => "настраивает",
+        ProjectGraphEdgeKind::References => "ссылается на",
+        ProjectGraphEdgeKind::Loads => "загружает",
+        ProjectGraphEdgeKind::UsesSkeleton => "использует Skeleton",
+        ProjectGraphEdgeKind::Animates => "анимирует",
+        ProjectGraphEdgeKind::ControlledBy => "управляется",
+        ProjectGraphEdgeKind::HasComponent => "содержит компонент",
+        ProjectGraphEdgeKind::CompatibleWith => "совместим с",
+        ProjectGraphEdgeKind::SpawnedBy => "создаётся",
+        ProjectGraphEdgeKind::OwnedBy => "принадлежит",
+        ProjectGraphEdgeKind::BoundToInput => "привязан к вводу",
+        ProjectGraphEdgeKind::Produces => "создаёт",
+        ProjectGraphEdgeKind::Consumes => "использует",
     }
 }
 
 fn project_graph_kind_sort_key(kind: ProjectGraphNodeKind) -> u8 {
     match kind {
         ProjectGraphNodeKind::Project => 0,
+        ProjectGraphNodeKind::UnrealProject => 1,
+        ProjectGraphNodeKind::UnrealPlugin => 2,
         ProjectGraphNodeKind::Folder => 1,
-        ProjectGraphNodeKind::Module => 2,
-        ProjectGraphNodeKind::File => 3,
-        ProjectGraphNodeKind::Symbol => 4,
-        ProjectGraphNodeKind::Command => 5,
-        ProjectGraphNodeKind::Asset => 6,
-        ProjectGraphNodeKind::Memory => 7,
-        ProjectGraphNodeKind::RoadmapItem => 8,
+        ProjectGraphNodeKind::Module | ProjectGraphNodeKind::UnrealModule => 3,
+        ProjectGraphNodeKind::UnrealTarget => 4,
+        ProjectGraphNodeKind::UnrealConfig => 5,
+        ProjectGraphNodeKind::UnrealSource => 6,
+        ProjectGraphNodeKind::File => 7,
+        ProjectGraphNodeKind::Symbol => 8,
+        ProjectGraphNodeKind::Command => 9,
+        ProjectGraphNodeKind::Asset
+        | ProjectGraphNodeKind::ThreeDAsset
+        | ProjectGraphNodeKind::UnrealMap
+        | ProjectGraphNodeKind::UnrealBlueprint
+        | ProjectGraphNodeKind::UnrealDataAsset
+        | ProjectGraphNodeKind::UnrealMaterial
+        | ProjectGraphNodeKind::UnrealNiagara
+        | ProjectGraphNodeKind::UnrealAnimation
+        | ProjectGraphNodeKind::UnrealSkeleton
+        | ProjectGraphNodeKind::UnrealSkeletalMesh
+        | ProjectGraphNodeKind::UnrealStaticMesh
+        | ProjectGraphNodeKind::UnrealAnimationBlueprint
+        | ProjectGraphNodeKind::UnrealAnimationMontage
+        | ProjectGraphNodeKind::UnrealControlRig
+        | ProjectGraphNodeKind::UnrealPhysicsAsset
+        | ProjectGraphNodeKind::UnrealSound
+        | ProjectGraphNodeKind::UnrealWidget
+        | ProjectGraphNodeKind::UnrealInputAsset
+        | ProjectGraphNodeKind::UnrealAsset => 10,
+        ProjectGraphNodeKind::Memory => 11,
+        ProjectGraphNodeKind::RoadmapItem => 12,
+        ProjectGraphNodeKind::GameplayPlan => 13,
+        ProjectGraphNodeKind::GameplayRun => 14,
+        ProjectGraphNodeKind::GameProductionPlan => 15,
+        ProjectGraphNodeKind::ProductionItem => 16,
+        ProjectGraphNodeKind::VerticalSliceRun => 17,
+        ProjectGraphNodeKind::VerticalSlicePhase => 18,
     }
+}
+
+fn project_graph_kind_has_file(kind: ProjectGraphNodeKind) -> bool {
+    matches!(
+        kind,
+        ProjectGraphNodeKind::File
+            | ProjectGraphNodeKind::Asset
+            | ProjectGraphNodeKind::ThreeDAsset
+            | ProjectGraphNodeKind::UnrealProject
+            | ProjectGraphNodeKind::UnrealPlugin
+            | ProjectGraphNodeKind::UnrealModule
+            | ProjectGraphNodeKind::UnrealTarget
+            | ProjectGraphNodeKind::UnrealConfig
+            | ProjectGraphNodeKind::UnrealSource
+            | ProjectGraphNodeKind::GameplayPlan
+            | ProjectGraphNodeKind::GameplayRun
+            | ProjectGraphNodeKind::GameProductionPlan
+            | ProjectGraphNodeKind::ProductionItem
+            | ProjectGraphNodeKind::VerticalSliceRun
+            | ProjectGraphNodeKind::VerticalSlicePhase
+    )
+}
+
+fn is_unreal_graph_kind(kind: ProjectGraphNodeKind) -> bool {
+    matches!(
+        kind,
+        ProjectGraphNodeKind::UnrealProject
+            | ProjectGraphNodeKind::UnrealPlugin
+            | ProjectGraphNodeKind::UnrealModule
+            | ProjectGraphNodeKind::UnrealTarget
+            | ProjectGraphNodeKind::UnrealConfig
+            | ProjectGraphNodeKind::UnrealSource
+            | ProjectGraphNodeKind::UnrealMap
+            | ProjectGraphNodeKind::UnrealBlueprint
+            | ProjectGraphNodeKind::UnrealDataAsset
+            | ProjectGraphNodeKind::UnrealMaterial
+            | ProjectGraphNodeKind::UnrealNiagara
+            | ProjectGraphNodeKind::UnrealAnimation
+            | ProjectGraphNodeKind::UnrealAsset
+            | ProjectGraphNodeKind::GameplayPlan
+            | ProjectGraphNodeKind::GameplayRun
+            | ProjectGraphNodeKind::VerticalSliceRun
+            | ProjectGraphNodeKind::VerticalSlicePhase
+    )
 }
 
 fn project_graph_node_search_blob(node: &ProjectGraphNode) -> String {
@@ -21420,6 +27443,104 @@ fn post_relay_pairing_decision(
 mod project_diagnostic_tests {
     use super::*;
 
+    fn project_map_test_node(
+        id: &str,
+        label: &str,
+        kind: ProjectGraphNodeKind,
+    ) -> ProjectGraphNode {
+        ProjectGraphNode {
+            id: id.to_string(),
+            label: label.to_string(),
+            kind,
+            path: Some(label.to_string()),
+            summary: String::new(),
+            source: "test".to_string(),
+            confidence: 1.0,
+            metadata: BTreeMap::new(),
+            updated_at: 1,
+        }
+    }
+
+    fn project_map_test_edge(
+        id: &str,
+        from: &str,
+        to: &str,
+        kind: ProjectGraphEdgeKind,
+    ) -> ProjectGraphEdge {
+        ProjectGraphEdge {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            kind,
+            label: kind.label().to_string(),
+            source: "test:fixture".to_string(),
+            confidence: 0.95,
+            updated_at: 1,
+        }
+    }
+
+    fn project_map_test_graph() -> ProjectGraphState {
+        ProjectGraphState {
+            nodes: vec![
+                project_map_test_node("project:root", "Game", ProjectGraphNodeKind::Project),
+                project_map_test_node("folder:Content", "Content", ProjectGraphNodeKind::Folder),
+                project_map_test_node(
+                    "asset:controller",
+                    "BP_PlayerController",
+                    ProjectGraphNodeKind::UnrealBlueprint,
+                ),
+                project_map_test_node(
+                    "asset:hero",
+                    "BP_Hero",
+                    ProjectGraphNodeKind::UnrealBlueprint,
+                ),
+                project_map_test_node(
+                    "asset:mesh",
+                    "SK_Hero",
+                    ProjectGraphNodeKind::UnrealSkeletalMesh,
+                ),
+                project_map_test_node(
+                    "asset:skeleton",
+                    "Hero_Skeleton",
+                    ProjectGraphNodeKind::UnrealSkeleton,
+                ),
+            ],
+            edges: vec![
+                project_map_test_edge(
+                    "contains-content",
+                    "project:root",
+                    "folder:Content",
+                    ProjectGraphEdgeKind::Contains,
+                ),
+                project_map_test_edge(
+                    "contains-hero",
+                    "folder:Content",
+                    "asset:hero",
+                    ProjectGraphEdgeKind::Contains,
+                ),
+                project_map_test_edge(
+                    "controller-hero",
+                    "asset:controller",
+                    "asset:hero",
+                    ProjectGraphEdgeKind::ControlledBy,
+                ),
+                project_map_test_edge(
+                    "hero-mesh",
+                    "asset:hero",
+                    "asset:mesh",
+                    ProjectGraphEdgeKind::HasComponent,
+                ),
+                project_map_test_edge(
+                    "mesh-skeleton",
+                    "asset:mesh",
+                    "asset:skeleton",
+                    ProjectGraphEdgeKind::UsesSkeleton,
+                ),
+            ],
+            ..ProjectGraphState::default()
+        }
+    }
+
     #[test]
     fn remote_debug_redacts_secrets() {
         let text =
@@ -21439,6 +27560,131 @@ mod project_diagnostic_tests {
         assert!(!redacted.contains("device-token-123"));
         assert!(redacted.contains("[redacted]"));
         assert!(redacted.contains("tiny"));
+    }
+
+    #[test]
+    fn project_map_exposes_four_distinct_views() {
+        assert_eq!(ProjectMapViewMode::ALL.len(), 4);
+        assert_eq!(ProjectMapViewMode::Overview.label(), "Обзор");
+        assert_eq!(ProjectMapViewMode::Structure.label(), "Структура");
+        assert_eq!(ProjectMapViewMode::Dependencies.label(), "Зависимости");
+        assert_eq!(ProjectMapViewMode::Impact.label(), "Влияние");
+    }
+
+    #[test]
+    fn project_map_structure_layout_follows_contains_edges() {
+        let graph = project_map_test_graph();
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), graph);
+        let layout = project_map_structure_layout(
+            &cache,
+            "folder:Content",
+            Some("asset:hero"),
+            &BTreeSet::new(),
+            ProjectMapFilter::All,
+            0,
+        );
+
+        let root = layout.positions["project:root"];
+        let content = layout.positions["folder:Content"];
+        let hero = layout.positions["asset:hero"];
+        assert!(root.x < content.x && content.x < hero.x);
+        assert_eq!(layout.edges.len(), 2);
+        assert_eq!(layout.roles["asset:hero"], ProjectMapNodeRole::Focus);
+    }
+
+    #[test]
+    fn project_map_dependency_and_impact_views_follow_edge_direction() {
+        let graph = project_map_test_graph();
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), graph);
+        let dependencies = project_map_focused_layout(
+            &cache,
+            "asset:hero",
+            2,
+            false,
+            &BTreeSet::new(),
+            ProjectMapFilter::All,
+        );
+
+        assert!(dependencies.positions["asset:controller"].x < 0.0);
+        assert!(dependencies.positions["asset:mesh"].x > 0.0);
+        assert!(
+            dependencies.positions["asset:skeleton"].x > dependencies.positions["asset:mesh"].x
+        );
+
+        let impact = project_map_focused_layout(
+            &cache,
+            "asset:skeleton",
+            2,
+            true,
+            &BTreeSet::new(),
+            ProjectMapFilter::All,
+        );
+        assert!(impact.positions["asset:mesh"].x > impact.positions["asset:skeleton"].x);
+        assert!(impact.positions["asset:hero"].x > impact.positions["asset:mesh"].x);
+        assert!(impact.reversed_edge_ids.contains("mesh-skeleton"));
+        assert!(impact.reversed_edge_ids.contains("hero-mesh"));
+        assert!(!impact.positions.contains_key("asset:controller"));
+    }
+
+    #[test]
+    fn project_map_breadcrumbs_keep_hierarchy_available_in_every_view() {
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), project_map_test_graph());
+
+        let breadcrumbs = project_map_breadcrumb_ids(&cache, "asset:hero");
+
+        assert_eq!(
+            breadcrumbs,
+            vec!["project:root", "folder:Content", "asset:hero"]
+        );
+    }
+
+    #[test]
+    fn project_map_structure_pages_large_folders_without_laying_out_every_child() {
+        let mut graph = project_map_test_graph();
+        for index in 0..14 {
+            let id = format!("folder:{index:02}");
+            graph.nodes.push(project_map_test_node(
+                &id,
+                &format!("Folder {index:02}"),
+                ProjectGraphNodeKind::Folder,
+            ));
+            graph.edges.push(project_map_test_edge(
+                &format!("contains-{index:02}"),
+                "project:root",
+                &id,
+                ProjectGraphEdgeKind::Contains,
+            ));
+        }
+        let cache = ProjectMapGraphCache::new(PathBuf::from("."), graph);
+
+        let layout = project_map_structure_layout(
+            &cache,
+            "project:root",
+            None,
+            &BTreeSet::new(),
+            ProjectMapFilter::All,
+            1,
+        );
+
+        assert!(layout.nodes.len() <= PROJECT_MAP_STRUCTURE_PAGE_SIZE + 1);
+        assert!(layout.positions.contains_key("folder:11"));
+        assert!(!layout.positions.contains_key("folder:00"));
+    }
+
+    #[test]
+    fn project_map_edge_tooltip_names_human_and_technical_relation() {
+        let edge = project_map_test_edge(
+            "hero-mesh",
+            "asset:hero",
+            "asset:mesh",
+            ProjectGraphEdgeKind::HasComponent,
+        );
+
+        let tooltip = project_map_edge_tooltip(&edge, "BP_Hero", "SK_Hero");
+
+        assert!(tooltip.contains("содержит компонент"));
+        assert!(tooltip.contains("has_component"));
+        assert!(tooltip.contains("BP_Hero → SK_Hero"));
     }
 
     #[test]
@@ -21543,6 +27789,17 @@ SyntaxError: invalid syntax
         assert!(item.matches_query("prompt"));
         assert!(item.matches_query("артефакты публикацией"));
         assert!(!item.matches_query("gemini"));
+    }
+
+    #[test]
+    fn project_analysis_panel_is_available_from_chat_and_project_modes() {
+        assert!(WorkspaceMode::Chat
+            .panels()
+            .contains(&RightPanelView::Project));
+        assert!(WorkspaceMode::Project
+            .panels()
+            .contains(&RightPanelView::Project));
+        assert_eq!(RightPanelView::Project.label(), "Проект");
     }
 
     #[test]

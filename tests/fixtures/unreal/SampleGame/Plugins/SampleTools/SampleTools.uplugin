@@ -1,0 +1,16 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0.0",
+  "FriendlyName": "Sample Tools",
+  "Description": "Unreal Bridge plugin fixture",
+  "Category": "Development",
+  "EnabledByDefault": true,
+  "Modules": [
+    {
+      "Name": "SampleTools",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ]
+}

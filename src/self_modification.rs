@@ -1,3 +1,8 @@
+use crate::self_improvement::{
+    begin_guarded_experiment, decide_self_improvement_experiment,
+    prepare_self_improvement_worktree, record_validation, DecideSelfImprovementExperimentArgs,
+    ExperimentDecision, ExperimentValidationStep, PrepareSelfImprovementWorktreeArgs,
+};
 use crate::workspace::Workspace;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -25,6 +30,7 @@ pub struct SelfModificationSnapshot {
 pub struct SelfModificationGuard {
     pub snapshot: SelfModificationSnapshot,
     pub baseline_changed_files: Vec<String>,
+    pub experiment_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -57,9 +63,35 @@ pub fn prepare_self_modification_guard(
     }
 
     let snapshot = create_restore_snapshot(workspace, user_request)?;
+    let experiment_id =
+        begin_guarded_experiment(workspace, user_request, &snapshot.id, &snapshot.rel_path)?;
+    let prepared = prepare_self_improvement_worktree(
+        workspace,
+        PrepareSelfImprovementWorktreeArgs {
+            experiment_id: experiment_id.clone(),
+        },
+    );
+    if !prepared.ok {
+        let _ = decide_self_improvement_experiment(
+            workspace,
+            DecideSelfImprovementExperimentArgs {
+                experiment_id: experiment_id.clone(),
+                decision: ExperimentDecision::Reject,
+                rationale: format!(
+                    "Не удалось создать обязательный изолированный candidate: {}",
+                    prepared.output
+                ),
+            },
+        );
+        anyhow::bail!(
+            "не удалось создать обязательный изолированный candidate: {}",
+            prepared.output
+        );
+    }
     Ok(Some(SelfModificationGuard {
         snapshot,
         baseline_changed_files,
+        experiment_id: Some(experiment_id),
     }))
 }
 
@@ -82,40 +114,68 @@ pub fn run_self_modification_validation(
     guard: SelfModificationGuard,
     current_changed_files: &[String],
 ) -> SelfModificationValidation {
-    let changed_files =
-        changed_files_since_snapshot(&guard.baseline_changed_files, current_changed_files);
-    if changed_files.is_empty() {
-        return SelfModificationValidation {
+    let experiment_id = guard.experiment_id.clone();
+    let changed_files = changed_files_since_snapshot(
+        workspace,
+        &guard.snapshot,
+        &guard.baseline_changed_files,
+        current_changed_files,
+    );
+    let validation = if changed_files.is_empty() {
+        SelfModificationValidation {
             snapshot: guard.snapshot,
             changed_files,
             ran: false,
             success: true,
             steps: Vec::new(),
-        };
-    }
-
-    let mut steps = Vec::new();
-    for (name, args) in [
-        ("cargo fmt", vec!["fmt"]),
-        ("cargo check", vec!["check"]),
-        ("cargo test", vec!["test"]),
-    ] {
-        let step = run_cargo_step(workspace.root(), name, &args);
-        let success = step.success;
-        steps.push(step);
-        if !success {
-            break;
         }
-    }
+    } else {
+        let mut steps = Vec::new();
+        for (name, args) in [
+            ("cargo fmt", vec!["fmt"]),
+            ("cargo check", vec!["check"]),
+            ("cargo test", vec!["test"]),
+        ] {
+            let step = run_cargo_step(workspace.root(), name, &args);
+            let success = step.success;
+            steps.push(step);
+            if !success {
+                break;
+            }
+        }
 
-    let success = steps.iter().all(|step| step.success);
-    SelfModificationValidation {
-        snapshot: guard.snapshot,
-        changed_files,
-        ran: true,
-        success,
-        steps,
+        let success = steps.iter().all(|step| step.success);
+        SelfModificationValidation {
+            snapshot: guard.snapshot,
+            changed_files,
+            ran: true,
+            success,
+            steps,
+        }
+    };
+
+    if let Some(experiment_id) = experiment_id {
+        let steps = validation
+            .steps
+            .iter()
+            .map(|step| ExperimentValidationStep {
+                name: step.name.clone(),
+                command: step.command.clone(),
+                success: step.success,
+                duration_ms: step.duration_ms,
+                exit_code: step.exit_code,
+            })
+            .collect();
+        let _ = record_validation(
+            workspace,
+            &experiment_id,
+            &validation.changed_files,
+            validation.ran,
+            validation.success,
+            steps,
+        );
     }
+    validation
 }
 
 #[allow(dead_code)]
@@ -332,6 +392,8 @@ fn cargo_exe(root: &Path) -> PathBuf {
 }
 
 fn changed_files_since_snapshot(
+    workspace: &Workspace,
+    snapshot: &SelfModificationSnapshot,
     baseline_changed_files: &[String],
     current_changed_files: &[String],
 ) -> Vec<String> {
@@ -342,8 +404,31 @@ fn changed_files_since_snapshot(
     current_changed_files
         .iter()
         .map(|path| normalize_path(path))
-        .filter(|path| !baseline.contains(path))
+        .filter(|path| {
+            if !baseline.contains(path) {
+                return true;
+            }
+            file_differs_from_snapshot(workspace, snapshot, path)
+        })
         .collect()
+}
+
+fn file_differs_from_snapshot(
+    workspace: &Workspace,
+    snapshot: &SelfModificationSnapshot,
+    rel_path: &str,
+) -> bool {
+    let current = workspace.root().join(rel_path);
+    let baseline = workspace
+        .root()
+        .join(&snapshot.rel_path)
+        .join("files")
+        .join(rel_path);
+    match (fs::read(current), fs::read(baseline)) {
+        (Ok(current), Ok(baseline)) => current != baseline,
+        (Err(_), Err(_)) => false,
+        _ => true,
+    }
 }
 
 fn looks_like_self_modification(user_request: &str) -> bool {
@@ -431,6 +516,32 @@ fn unix_timestamp() -> u64 {
 mod tests {
     use super::*;
 
+    fn initialize_git(root: &Path) {
+        fs::write(
+            root.join(".gitignore"),
+            "/target\n/assets/generated/leetcode/\n",
+        )
+        .expect("gitignore");
+        for args in [
+            vec!["init"],
+            vec!["config", "user.email", "selfmod-tests@local"],
+            vec!["config", "user.name", "Selfmod Tests"],
+            vec!["add", "-A"],
+            vec!["commit", "-m", "baseline"],
+        ] {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git command");
+            assert!(
+                output.status.success(),
+                "git failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
     #[test]
     fn detects_leetcode_workspace_and_creates_snapshot() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -452,6 +563,7 @@ mod tests {
             "skip",
         )
         .expect("generated file");
+        initialize_git(temp.path());
         let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
 
         assert!(should_guard_run(&workspace, "реализуй этап 21"));
@@ -472,6 +584,25 @@ mod tests {
             .join("assets")
             .join("generated")
             .exists());
+        let experiment_id = guard.experiment_id.expect("experiment");
+        assert_eq!(
+            crate::self_improvement::isolated_experiment_status(&workspace, &experiment_id),
+            Some(crate::self_improvement::ExperimentStatus::WorktreeReady)
+        );
+        let rejected = crate::self_improvement::decide_self_improvement_experiment(
+            &workspace,
+            crate::self_improvement::DecideSelfImprovementExperimentArgs {
+                experiment_id: experiment_id.clone(),
+                decision: crate::self_improvement::ExperimentDecision::Reject,
+                rationale: "test cleanup".to_string(),
+            },
+        );
+        assert!(rejected.ok);
+        let cleaned = crate::self_improvement::cleanup_self_improvement_experiment(
+            &workspace,
+            crate::self_improvement::CleanupSelfImprovementExperimentArgs { experiment_id },
+        );
+        assert!(cleaned.ok);
     }
 
     #[test]
@@ -485,18 +616,48 @@ mod tests {
         fs::create_dir_all(temp.path().join("src")).expect("src");
         fs::write(temp.path().join("src").join("main.rs"), "fn main() {}\n").expect("main");
         let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
-        let guard = prepare_self_modification_guard(
-            &workspace,
-            "добавь безопасное самоизменение",
-            vec!["src/main.rs".to_string()],
-        )
-        .expect("guard")
-        .expect("some");
+        let guard = SelfModificationGuard {
+            snapshot: create_restore_snapshot(&workspace, "добавь безопасное самоизменение")
+                .expect("snapshot"),
+            baseline_changed_files: vec!["src/main.rs".to_string()],
+            experiment_id: None,
+        };
 
         let validation =
             run_self_modification_validation(&workspace, guard, &["src/main.rs".to_string()]);
 
         assert!(!validation.ran);
         assert!(validation.success);
+    }
+
+    #[test]
+    fn validation_detects_additional_change_in_preexisting_dirty_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"leetcode\"\n",
+        )
+        .expect("cargo");
+        fs::create_dir_all(temp.path().join("src")).expect("src");
+        fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").expect("main");
+        let workspace = Workspace::new(temp.path().to_path_buf()).expect("workspace");
+        let guard = SelfModificationGuard {
+            snapshot: create_restore_snapshot(&workspace, "измени код агента").expect("snapshot"),
+            baseline_changed_files: vec!["src/main.rs".to_string()],
+            experiment_id: None,
+        };
+        fs::write(
+            temp.path().join("src/main.rs"),
+            "fn main() { println!(\"changed\"); }\n",
+        )
+        .expect("changed main");
+
+        let changed = changed_files_since_snapshot(
+            &workspace,
+            &guard.snapshot,
+            &guard.baseline_changed_files,
+            &["src/main.rs".to_string()],
+        );
+        assert_eq!(changed, vec!["src/main.rs".to_string()]);
     }
 }

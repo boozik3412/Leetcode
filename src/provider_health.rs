@@ -460,6 +460,49 @@ fn capability_name(capability: &ModelCapability) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "requires LEETCODE_LIVE_PROVIDER_CONTRACTS=1 and configured provider API keys"]
+    async fn validates_configured_chat_providers_when_opted_in() {
+        assert_eq!(
+            std::env::var("LEETCODE_LIVE_PROVIDER_CONTRACTS").as_deref(),
+            Ok("1"),
+            "set LEETCODE_LIVE_PROVIDER_CONTRACTS=1 to allow paid live provider calls"
+        );
+
+        let config = AppConfig::load();
+        let requested = std::env::var("LEETCODE_LIVE_PROVIDER_IDS")
+            .ok()
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let providers = provider_specs()
+            .iter()
+            .filter(|provider| provider.implemented)
+            .filter(|provider| requested.is_empty() || requested.iter().any(|id| id == provider.id))
+            .filter(|provider| !config.api_key_for_provider(provider.id).trim().is_empty())
+            .map(|provider| provider.id.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(
+            !providers.is_empty(),
+            "no configured providers matched LEETCODE_LIVE_PROVIDER_IDS"
+        );
+        for provider_id in providers {
+            let run = run_provider_live_validation(config.clone(), provider_id.clone()).await;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&run).expect("provider contract json")
+            );
+            assert!(run.ok, "provider contract failed for {provider_id}");
+        }
+    }
+
     #[test]
     fn persists_provider_validation_history_with_limit() {
         let temp = tempfile::tempdir().unwrap();

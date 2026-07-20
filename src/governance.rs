@@ -89,6 +89,108 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "Запустить обнаруженную проектную команду.",
         ),
         spec(
+            "unreal_snapshot",
+            "unreal",
+            "low",
+            "Обнаружить Unreal-проект, плагины, движок и toolchain.",
+        ),
+        spec(
+            "unreal_command",
+            "unreal",
+            "high",
+            "Запустить фиксированный безопасный профиль Unreal Engine.",
+        ),
+        spec(
+            "game_production_snapshot",
+            "game_production",
+            "low",
+            "Посмотреть активный game production plan, workstreams и gates.",
+        ),
+        spec(
+            "create_game_production_plan",
+            "game_production",
+            "medium",
+            "Создать persistent production plan разработки игры.",
+        ),
+        spec(
+            "update_production_item",
+            "game_production",
+            "medium",
+            "Обновить статус, артефакт и validation production item.",
+        ),
+        spec(
+            "evaluate_production_gate",
+            "game_production",
+            "low",
+            "Проверить готовность milestone по зависимостям и артефактам.",
+        ),
+        spec(
+            "vertical_slice_snapshot",
+            "game_production",
+            "low",
+            "Посмотреть orchestration runs, фазы и рекомендуемые инструменты.",
+        ),
+        spec(
+            "start_vertical_slice_run",
+            "game_production",
+            "medium",
+            "Запустить persistent orchestration вертикального среза.",
+        ),
+        spec(
+            "advance_vertical_slice_phase",
+            "game_production",
+            "medium",
+            "Обновить доказательный статус фазы вертикального среза.",
+        ),
+        spec(
+            "evaluate_vertical_slice_readiness",
+            "game_production",
+            "low",
+            "Проверить готовность вертикального среза по live-состоянию пайплайнов.",
+        ),
+        spec(
+            "gameplay_snapshot",
+            "unreal",
+            "low",
+            "Посмотреть gameplay-планы, применения и playtest-запуски Unreal.",
+        ),
+        spec(
+            "create_gameplay_plan",
+            "unreal",
+            "medium",
+            "Создать связанный с задачами и Project Map gameplay-план Unreal.",
+        ),
+        spec(
+            "apply_gameplay_plan",
+            "unreal",
+            "high",
+            "Применить декларативный manifest к уровню Unreal через Python API.",
+        ),
+        spec(
+            "run_gameplay_playtest",
+            "unreal",
+            "high",
+            "Запустить Automation или map smoke playtest и собрать артефакты.",
+        ),
+        spec(
+            "mcp_snapshot",
+            "mcp",
+            "low",
+            "Показать локальный реестр MCP-серверов и последнее состояние подключений.",
+        ),
+        spec(
+            "mcp_discover",
+            "mcp",
+            "medium",
+            "Подключиться к разрешённому MCP-серверу и прочитать список инструментов.",
+        ),
+        spec(
+            "mcp_call",
+            "mcp",
+            "high",
+            "Вызвать разрешённый инструмент внешнего MCP-сервера с подтверждением.",
+        ),
+        spec(
             "run_shell",
             "shell",
             "high",
@@ -213,6 +315,36 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "assets",
             "paid",
             "Сгенерировать видео.",
+        ),
+        spec(
+            "asset_3d_snapshot",
+            "assets3d",
+            "low",
+            "Inspect persistent 3D provider jobs and validation results.",
+        ),
+        spec(
+            "submit_3d_asset",
+            "assets3d",
+            "paid",
+            "Submit a text/image-to-3D provider job.",
+        ),
+        spec(
+            "refresh_3d_asset",
+            "assets3d",
+            "medium",
+            "Refresh a provider job and download a completed 3D model.",
+        ),
+        spec(
+            "validate_3d_asset",
+            "assets3d",
+            "low",
+            "Validate geometry, scale, UV/PBR, rig, animation and provenance.",
+        ),
+        spec(
+            "import_3d_asset_unreal",
+            "unreal",
+            "high",
+            "Import or reimport a validated 3D asset through Unreal Python/Interchange.",
         ),
         spec(
             "regenerate_image_asset",
@@ -385,6 +517,54 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "Посмотреть машинную карту проекта: узлы, связи, команды, память и roadmap.",
         ),
         spec(
+            "project_map_readiness",
+            "game_task_builder",
+            "low",
+            "Проверить готовность и полноту Project Map для игровой задачи.",
+        ),
+        spec(
+            "refresh_project_map_deep",
+            "game_task_builder",
+            "high",
+            "Запустить headless Unreal scan и обновить Project Map.",
+        ),
+        spec(
+            "game_task_catalog_snapshot",
+            "game_task_builder",
+            "low",
+            "Посмотреть проектно-зависимый каталог игровых задач.",
+        ),
+        spec(
+            "resolve_game_task_targets",
+            "game_task_builder",
+            "low",
+            "Найти совместимые цели операции только в актуальной Project Map.",
+        ),
+        spec(
+            "evaluate_game_task_prerequisites",
+            "game_task_builder",
+            "low",
+            "Диагностировать зависимости и предложить варианты подготовки.",
+        ),
+        spec(
+            "prepare_game_task_proposal",
+            "game_task_builder",
+            "medium",
+            "Подготовить структурированный план до подтверждения пользователем.",
+        ),
+        spec(
+            "propose_project_relation",
+            "game_task_builder",
+            "medium",
+            "Предложить новую семантическую связь Project Map для отдельного подтверждения.",
+        ),
+        spec(
+            "game_task_snapshot",
+            "game_task_builder",
+            "low",
+            "Посмотреть текущую сессию конструктора и подтверждённый TaskManifest.",
+        ),
+        spec(
             "roadmap_snapshot",
             "roadmap",
             "low",
@@ -425,6 +605,96 @@ pub fn tool_specs() -> &'static [ToolSpec] {
             "diagnostics",
             "low",
             "Посмотреть диагностику окружения, путей, proxy и toolchain.",
+        ),
+        spec(
+            "production_validation_snapshot",
+            "release",
+            "low",
+            "Собрать единый отчёт production readiness проекта.",
+        ),
+        spec(
+            "update_project_map_golden",
+            "project",
+            "medium",
+            "Зафиксировать текущую структуру Project Map как эталон.",
+        ),
+        spec(
+            "visual_regression_snapshot",
+            "visual",
+            "low",
+            "Посмотреть эталоны и результаты визуальной регрессии.",
+        ),
+        spec(
+            "record_visual_baseline",
+            "visual",
+            "medium",
+            "Сохранить проверенный снимок интерфейса как визуальный эталон.",
+        ),
+        spec(
+            "compare_visual_snapshot",
+            "visual",
+            "low",
+            "Сравнить снимок интерфейса с сохранённым эталоном.",
+        ),
+        spec(
+            "self_improvement_snapshot",
+            "self_improvement",
+            "low",
+            "Посмотреть гипотезы, проверки и решения экспериментов самоулучшения.",
+        ),
+        spec(
+            "start_self_improvement_experiment",
+            "self_improvement",
+            "medium",
+            "Записать гипотезу, baseline и критерии успеха эксперимента.",
+        ),
+        spec(
+            "decide_self_improvement_experiment",
+            "self_improvement",
+            "high",
+            "Принять или отклонить проверенный эксперимент самоулучшения.",
+        ),
+        spec(
+            "prepare_self_improvement_worktree",
+            "self_improvement",
+            "high",
+            "Создать изолированную Git-ветку и worktree кандидата.",
+        ),
+        spec(
+            "apply_self_improvement_patch",
+            "self_improvement",
+            "high",
+            "Применить patch только внутри worktree эксперимента.",
+        ),
+        spec(
+            "register_self_improvement_benchmark",
+            "self_improvement",
+            "high",
+            "Добавить исполняемый benchmark для baseline/candidate проверки.",
+        ),
+        spec(
+            "run_self_improvement_benchmarks",
+            "self_improvement",
+            "high",
+            "Выполнить benchmarks в основной и кандидатной рабочих копиях.",
+        ),
+        spec(
+            "promote_self_improvement_experiment",
+            "self_improvement",
+            "critical",
+            "Закоммитить и fast-forward продвинуть принятый кандидат.",
+        ),
+        spec(
+            "rollback_self_improvement_experiment",
+            "self_improvement",
+            "critical",
+            "Создать revert-коммит для продвинутого эксперимента.",
+        ),
+        spec(
+            "cleanup_self_improvement_experiment",
+            "self_improvement",
+            "high",
+            "Удалить управляемый worktree и экспериментальную ветку.",
         ),
     ];
     SPECS
@@ -569,6 +839,23 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::ApplyPatch => "apply_patch",
         ToolAction::Grep => "grep",
         ToolAction::ProjectCommand => "project_command",
+        ToolAction::UnrealSnapshot => "unreal_snapshot",
+        ToolAction::UnrealCommand => "unreal_command",
+        ToolAction::GameProductionSnapshot => "game_production_snapshot",
+        ToolAction::CreateGameProductionPlan => "create_game_production_plan",
+        ToolAction::UpdateProductionItem => "update_production_item",
+        ToolAction::EvaluateProductionGate => "evaluate_production_gate",
+        ToolAction::VerticalSliceSnapshot => "vertical_slice_snapshot",
+        ToolAction::StartVerticalSliceRun => "start_vertical_slice_run",
+        ToolAction::AdvanceVerticalSlicePhase => "advance_vertical_slice_phase",
+        ToolAction::EvaluateVerticalSliceReadiness => "evaluate_vertical_slice_readiness",
+        ToolAction::GameplaySnapshot => "gameplay_snapshot",
+        ToolAction::CreateGameplayPlan => "create_gameplay_plan",
+        ToolAction::ApplyGameplayPlan => "apply_gameplay_plan",
+        ToolAction::RunGameplayPlaytest => "run_gameplay_playtest",
+        ToolAction::McpSnapshot => "mcp_snapshot",
+        ToolAction::McpDiscover => "mcp_discover",
+        ToolAction::McpCall => "mcp_call",
         ToolAction::GameWorkflow => "game_workflow",
         ToolAction::OpenProjectPreview => "open_project_preview",
         ToolAction::RunSubagent => "run_subagent",
@@ -588,6 +875,11 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::GenerateSpritesheetAsset => "generate_spritesheet_asset",
         ToolAction::GenerateAudioAsset => "generate_audio_asset",
         ToolAction::GenerateVideoAsset => "generate_video_asset",
+        ToolAction::Asset3dSnapshot => "asset_3d_snapshot",
+        ToolAction::Submit3dAsset => "submit_3d_asset",
+        ToolAction::Refresh3dAsset => "refresh_3d_asset",
+        ToolAction::Validate3dAsset => "validate_3d_asset",
+        ToolAction::Import3dAssetUnreal => "import_3d_asset_unreal",
         ToolAction::RegenerateImageAsset => "regenerate_image_asset",
         ToolAction::VaryImageAsset => "vary_image_asset",
         ToolAction::UpscaleAsset => "upscale_asset",
@@ -614,6 +906,14 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::RecordMemorySource => "record_memory_source",
         ToolAction::RemoveMemorySource => "remove_memory_source",
         ToolAction::ProjectGraphSnapshot => "project_graph_snapshot",
+        ToolAction::ProjectMapReadiness => "project_map_readiness",
+        ToolAction::RefreshProjectMapDeep => "refresh_project_map_deep",
+        ToolAction::GameTaskCatalogSnapshot => "game_task_catalog_snapshot",
+        ToolAction::ResolveGameTaskTargets => "resolve_game_task_targets",
+        ToolAction::EvaluateGameTaskPrerequisites => "evaluate_game_task_prerequisites",
+        ToolAction::PrepareGameTaskProposal => "prepare_game_task_proposal",
+        ToolAction::ProposeProjectRelation => "propose_project_relation",
+        ToolAction::GameTaskSnapshot => "game_task_snapshot",
         ToolAction::RoadmapSnapshot => "roadmap_snapshot",
         ToolAction::RecordMilestone => "record_milestone",
         ToolAction::UpdateRoadmapItem => "update_roadmap_item",
@@ -625,8 +925,23 @@ pub fn action_id(action: &ToolAction) -> &'static str {
         ToolAction::ExportAssetPack => "export_asset_pack",
         ToolAction::RunReplayEval => "run_replay_eval",
         ToolAction::EvalSnapshot => "eval_snapshot",
+        ToolAction::SelfImprovementSnapshot => "self_improvement_snapshot",
+        ToolAction::StartSelfImprovementExperiment => "start_self_improvement_experiment",
+        ToolAction::DecideSelfImprovementExperiment => "decide_self_improvement_experiment",
+        ToolAction::PrepareSelfImprovementWorktree => "prepare_self_improvement_worktree",
+        ToolAction::ApplySelfImprovementPatch => "apply_self_improvement_patch",
+        ToolAction::RegisterSelfImprovementBenchmark => "register_self_improvement_benchmark",
+        ToolAction::RunSelfImprovementBenchmarks => "run_self_improvement_benchmarks",
+        ToolAction::PromoteSelfImprovementExperiment => "promote_self_improvement_experiment",
+        ToolAction::RollbackSelfImprovementExperiment => "rollback_self_improvement_experiment",
+        ToolAction::CleanupSelfImprovementExperiment => "cleanup_self_improvement_experiment",
         ToolAction::ProviderHealthSnapshot => "provider_health_snapshot",
         ToolAction::EnvironmentSnapshot => "environment_snapshot",
+        ToolAction::ProductionValidationSnapshot => "production_validation_snapshot",
+        ToolAction::UpdateProjectMapGolden => "update_project_map_golden",
+        ToolAction::VisualRegressionSnapshot => "visual_regression_snapshot",
+        ToolAction::RecordVisualBaseline => "record_visual_baseline",
+        ToolAction::CompareVisualSnapshot => "compare_visual_snapshot",
     }
 }
 
@@ -716,5 +1031,106 @@ mod tests {
         );
 
         assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn self_improvement_tools_have_explicit_risk_class() {
+        assert_eq!(
+            spec_for_tool("self_improvement_snapshot")
+                .expect("snapshot spec")
+                .risk,
+            "low"
+        );
+        assert_eq!(
+            spec_for_tool("decide_self_improvement_experiment")
+                .expect("decision spec")
+                .risk,
+            "high"
+        );
+    }
+
+    #[test]
+    fn mcp_tools_have_explicit_category_and_risk() {
+        let snapshot = spec_for_tool("mcp_snapshot").expect("MCP snapshot spec");
+        let call = spec_for_tool("mcp_call").expect("MCP call spec");
+        assert_eq!(snapshot.category, "mcp");
+        assert_eq!(snapshot.risk, "low");
+        assert_eq!(call.category, "mcp");
+        assert_eq!(call.risk, "high");
+    }
+
+    #[test]
+    fn gameplay_tools_have_explicit_unreal_risk_classes() {
+        for (tool, risk) in [
+            ("gameplay_snapshot", "low"),
+            ("create_gameplay_plan", "medium"),
+            ("apply_gameplay_plan", "high"),
+            ("run_gameplay_playtest", "high"),
+        ] {
+            let spec = spec_for_tool(tool).expect("gameplay tool spec");
+            assert_eq!(spec.category, "unreal");
+            assert_eq!(spec.risk, risk);
+        }
+    }
+
+    #[test]
+    fn game_production_tools_have_explicit_risk_classes() {
+        for (tool, risk) in [
+            ("game_production_snapshot", "low"),
+            ("create_game_production_plan", "medium"),
+            ("update_production_item", "medium"),
+            ("evaluate_production_gate", "low"),
+        ] {
+            let spec = spec_for_tool(tool).expect("game production tool spec");
+            assert_eq!(spec.category, "game_production");
+            assert_eq!(spec.risk, risk);
+        }
+    }
+
+    #[test]
+    fn vertical_slice_tools_have_explicit_risk_classes() {
+        for (tool, risk) in [
+            ("vertical_slice_snapshot", "low"),
+            ("start_vertical_slice_run", "medium"),
+            ("advance_vertical_slice_phase", "medium"),
+            ("evaluate_vertical_slice_readiness", "low"),
+        ] {
+            let spec = spec_for_tool(tool).expect("vertical slice tool spec");
+            assert_eq!(spec.category, "game_production");
+            assert_eq!(spec.risk, risk);
+        }
+    }
+
+    #[test]
+    fn production_validation_tools_have_explicit_risk_classes() {
+        for (tool, category, risk) in [
+            ("production_validation_snapshot", "release", "low"),
+            ("update_project_map_golden", "project", "medium"),
+            ("visual_regression_snapshot", "visual", "low"),
+            ("record_visual_baseline", "visual", "medium"),
+            ("compare_visual_snapshot", "visual", "low"),
+        ] {
+            let spec = spec_for_tool(tool).expect("production validation tool spec");
+            assert_eq!(spec.category, category);
+            assert_eq!(spec.risk, risk);
+        }
+    }
+
+    #[test]
+    fn game_task_builder_tools_have_explicit_governance() {
+        for (tool, risk) in [
+            ("project_map_readiness", "low"),
+            ("refresh_project_map_deep", "high"),
+            ("game_task_catalog_snapshot", "low"),
+            ("resolve_game_task_targets", "low"),
+            ("evaluate_game_task_prerequisites", "low"),
+            ("prepare_game_task_proposal", "medium"),
+            ("propose_project_relation", "medium"),
+            ("game_task_snapshot", "low"),
+        ] {
+            let spec = spec_for_tool(tool).expect("game task builder spec");
+            assert_eq!(spec.category, "game_task_builder");
+            assert_eq!(spec.risk, risk);
+        }
     }
 }

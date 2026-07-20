@@ -4,6 +4,7 @@ setlocal
 cd /d "%~dp0"
 
 set "APP_NAME=Leetcode"
+set "APP_BIN=leetcode"
 set "RUSTUP_HOME=%CD%\.rustup"
 set "CARGO_HOME=%CD%\.cargo"
 set "PATH=%CARGO_HOME%\bin;%PATH%"
@@ -22,7 +23,7 @@ if "%COMMAND%"=="" set "COMMAND=run"
 
 if /I "%COMMAND%"=="run" (
     echo Starting %APP_NAME% in development mode...
-    cargo run
+    cargo run --bin %APP_BIN%
     goto done
 )
 

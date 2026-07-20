@@ -3,6 +3,7 @@ use crate::agent::models::{
     OPENAI_PROVIDER_ID,
 };
 use crate::agent::routing::ROUTE_AUTO;
+use crate::asset_3d::{MESHY_3D_PROVIDER_ID, TRIPO_3D_PROVIDER_ID};
 use crate::assets::{
     GEMINI_IMAGE_PROVIDER_ID, OPENAI_AUDIO_PROVIDER_ID, OPENAI_IMAGE_PROVIDER_ID,
     OPENAI_VIDEO_PROVIDER_ID, REPLICATE_IMAGE_PROVIDER_ID, STABILITY_IMAGE_PROVIDER_ID,
@@ -389,6 +390,8 @@ impl AppConfig {
             REPLICATE_IMAGE_PROVIDER_ID,
             "REPLICATE_API_TOKEN",
         );
+        apply_env_api_key(&mut providers, MESHY_3D_PROVIDER_ID, "MESHY_API_KEY");
+        apply_env_api_key(&mut providers, TRIPO_3D_PROVIDER_ID, "TRIPO_API_KEY");
 
         providers.entry(provider.clone()).or_default();
         let active_settings = providers.get(&provider).cloned().unwrap_or_default();

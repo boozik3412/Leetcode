@@ -3,6 +3,7 @@
 mod agent;
 mod agent_history;
 mod app;
+mod asset_3d;
 mod asset_library;
 mod assets;
 mod config;
@@ -10,11 +11,15 @@ mod conversation;
 mod crash;
 mod diagnostics;
 mod evals;
+mod game_production;
+mod game_task_builder;
 mod game_workflows;
 mod governance;
 mod http;
+mod mcp;
 mod memory;
 mod orchestration;
+mod production_validation;
 mod project;
 mod project_graph;
 mod provider_health;
@@ -23,10 +28,16 @@ mod remote;
 mod remote_timeline;
 mod roadmap;
 mod run_timeline;
+mod self_improvement;
 mod self_modification;
 mod terminal;
 mod tools;
+mod unreal;
+mod unreal_gameplay;
+mod unreal_intelligence;
 mod updater;
+mod vertical_slice;
+mod visual_regression;
 mod workspace;
 
 use app::LeetcodeApp;
@@ -35,6 +46,19 @@ use std::sync::Arc;
 const APP_ICON_PNG: &[u8] = include_bytes!("../assets/app-icon.png");
 
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|argument| argument == "--production-smoke") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "app": "leetcode",
+                "version": env!("CARGO_PKG_VERSION"),
+                "icon_bytes": APP_ICON_PNG.len(),
+                "mode": "production_smoke"
+            })
+        );
+        return Ok(());
+    }
     crash::install_panic_hook();
 
     let viewport = egui::ViewportBuilder::default()

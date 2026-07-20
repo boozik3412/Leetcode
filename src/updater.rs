@@ -247,7 +247,7 @@ fn parse_version_parts(version: &str) -> Vec<u64> {
         .collect()
 }
 
-fn validate_manifest(manifest: &UpdateManifest) -> anyhow::Result<()> {
+pub(crate) fn validate_manifest(manifest: &UpdateManifest) -> anyhow::Result<()> {
     if manifest.app.trim() != "Leetcode" {
         bail!("manifest относится не к Leetcode: {}", manifest.app);
     }

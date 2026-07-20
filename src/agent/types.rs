@@ -98,6 +98,23 @@ pub enum ToolAction {
     ApplyPatch,
     Grep,
     ProjectCommand,
+    UnrealSnapshot,
+    UnrealCommand,
+    GameProductionSnapshot,
+    CreateGameProductionPlan,
+    UpdateProductionItem,
+    EvaluateProductionGate,
+    VerticalSliceSnapshot,
+    StartVerticalSliceRun,
+    AdvanceVerticalSlicePhase,
+    EvaluateVerticalSliceReadiness,
+    GameplaySnapshot,
+    CreateGameplayPlan,
+    ApplyGameplayPlan,
+    RunGameplayPlaytest,
+    McpSnapshot,
+    McpDiscover,
+    McpCall,
     GameWorkflow,
     OpenProjectPreview,
     RunSubagent,
@@ -117,6 +134,16 @@ pub enum ToolAction {
     GenerateSpritesheetAsset,
     GenerateAudioAsset,
     GenerateVideoAsset,
+    #[serde(rename = "asset_3d_snapshot")]
+    Asset3dSnapshot,
+    #[serde(rename = "submit_3d_asset")]
+    Submit3dAsset,
+    #[serde(rename = "refresh_3d_asset")]
+    Refresh3dAsset,
+    #[serde(rename = "validate_3d_asset")]
+    Validate3dAsset,
+    #[serde(rename = "import_3d_asset_unreal")]
+    Import3dAssetUnreal,
     RegenerateImageAsset,
     VaryImageAsset,
     UpscaleAsset,
@@ -143,6 +170,14 @@ pub enum ToolAction {
     RecordMemorySource,
     RemoveMemorySource,
     ProjectGraphSnapshot,
+    ProjectMapReadiness,
+    RefreshProjectMapDeep,
+    GameTaskCatalogSnapshot,
+    ResolveGameTaskTargets,
+    EvaluateGameTaskPrerequisites,
+    PrepareGameTaskProposal,
+    ProposeProjectRelation,
+    GameTaskSnapshot,
     RoadmapSnapshot,
     RecordMilestone,
     UpdateRoadmapItem,
@@ -154,6 +189,21 @@ pub enum ToolAction {
     ExportAssetPack,
     RunReplayEval,
     EvalSnapshot,
+    SelfImprovementSnapshot,
+    StartSelfImprovementExperiment,
+    DecideSelfImprovementExperiment,
+    PrepareSelfImprovementWorktree,
+    ApplySelfImprovementPatch,
+    RegisterSelfImprovementBenchmark,
+    RunSelfImprovementBenchmarks,
+    PromoteSelfImprovementExperiment,
+    RollbackSelfImprovementExperiment,
+    CleanupSelfImprovementExperiment,
+    ProductionValidationSnapshot,
+    UpdateProjectMapGolden,
+    VisualRegressionSnapshot,
+    RecordVisualBaseline,
+    CompareVisualSnapshot,
     ProviderHealthSnapshot,
     EnvironmentSnapshot,
 }
@@ -219,6 +269,30 @@ mod tests {
         .expect("valid act request");
 
         assert!(matches!(request.action, ToolAction::OpenAssetFolder));
+    }
+
+    #[test]
+    fn parses_mcp_call_action() {
+        let request = serde_json::from_str::<ActRequest>(
+            r#"{"action":"mcp_call","args":{"server":"unreal-mcp","tool":"list_toolsets","arguments":{}}}"#,
+        )
+        .expect("valid MCP act request");
+
+        assert!(matches!(request.action, ToolAction::McpCall));
+    }
+
+    #[test]
+    fn parses_unreal_gameplay_actions() {
+        let snapshot =
+            serde_json::from_str::<ActRequest>(r#"{"action":"gameplay_snapshot","args":{}}"#)
+                .expect("valid gameplay snapshot request");
+        let plan = serde_json::from_str::<ActRequest>(
+            r#"{"action":"create_gameplay_plan","args":{"recipe":"interaction","brief":"door interaction"}}"#,
+        )
+        .expect("valid gameplay plan request");
+
+        assert!(matches!(snapshot.action, ToolAction::GameplaySnapshot));
+        assert!(matches!(plan.action, ToolAction::CreateGameplayPlan));
     }
 
     #[test]
@@ -444,6 +518,10 @@ mod tests {
                 r#"{"action":"environment_snapshot","args":{}}"#,
                 "environment",
             ),
+            (
+                r#"{"action":"self_improvement_snapshot","args":{}}"#,
+                "self_improvement",
+            ),
         ] {
             let request = serde_json::from_str::<ActRequest>(json).expect(expected);
             match expected {
@@ -474,8 +552,126 @@ mod tests {
                 "environment" => {
                     assert!(matches!(request.action, ToolAction::EnvironmentSnapshot))
                 }
+                "self_improvement" => {
+                    assert!(matches!(
+                        request.action,
+                        ToolAction::SelfImprovementSnapshot
+                    ))
+                }
                 _ => unreachable!(),
             }
+        }
+    }
+
+    #[test]
+    fn parses_production_validation_actions() {
+        for (json, expected) in [
+            (
+                r#"{"action":"production_validation_snapshot","args":{}}"#,
+                "production",
+            ),
+            (
+                r#"{"action":"update_project_map_golden","args":{}}"#,
+                "golden",
+            ),
+            (
+                r#"{"action":"visual_regression_snapshot","args":{}}"#,
+                "visual_snapshot",
+            ),
+            (
+                r#"{"action":"record_visual_baseline","args":{"scenario":"desktop_main","path":"screens/main.png"}}"#,
+                "visual_record",
+            ),
+            (
+                r#"{"action":"compare_visual_snapshot","args":{"scenario":"remote_client","path":"screens/client.png"}}"#,
+                "visual_compare",
+            ),
+        ] {
+            let request = serde_json::from_str::<ActRequest>(json).expect(expected);
+            match expected {
+                "production" => assert!(matches!(
+                    request.action,
+                    ToolAction::ProductionValidationSnapshot
+                )),
+                "golden" => assert!(matches!(request.action, ToolAction::UpdateProjectMapGolden)),
+                "visual_snapshot" => assert!(matches!(
+                    request.action,
+                    ToolAction::VisualRegressionSnapshot
+                )),
+                "visual_record" => {
+                    assert!(matches!(request.action, ToolAction::RecordVisualBaseline))
+                }
+                "visual_compare" => {
+                    assert!(matches!(request.action, ToolAction::CompareVisualSnapshot))
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn parses_game_production_actions() {
+        for action in [
+            "game_production_snapshot",
+            "create_game_production_plan",
+            "update_production_item",
+            "evaluate_production_gate",
+        ] {
+            let request = serde_json::from_value::<ActRequest>(serde_json::json!({
+                "action": action,
+                "args": {}
+            }))
+            .expect(action);
+            assert!(matches!(
+                request.action,
+                ToolAction::GameProductionSnapshot
+                    | ToolAction::CreateGameProductionPlan
+                    | ToolAction::UpdateProductionItem
+                    | ToolAction::EvaluateProductionGate
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_vertical_slice_orchestrator_actions() {
+        for action in [
+            "vertical_slice_snapshot",
+            "start_vertical_slice_run",
+            "advance_vertical_slice_phase",
+            "evaluate_vertical_slice_readiness",
+        ] {
+            let request = serde_json::from_value::<ActRequest>(serde_json::json!({
+                "action": action,
+                "args": {}
+            }))
+            .expect(action);
+            assert!(matches!(
+                request.action,
+                ToolAction::VerticalSliceSnapshot
+                    | ToolAction::StartVerticalSliceRun
+                    | ToolAction::AdvanceVerticalSlicePhase
+                    | ToolAction::EvaluateVerticalSliceReadiness
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_game_task_builder_actions() {
+        for action in [
+            "project_map_readiness",
+            "refresh_project_map_deep",
+            "game_task_catalog_snapshot",
+            "resolve_game_task_targets",
+            "evaluate_game_task_prerequisites",
+            "prepare_game_task_proposal",
+            "propose_project_relation",
+            "game_task_snapshot",
+        ] {
+            serde_json::from_value::<ActRequest>(serde_json::json!({
+                "action": action,
+                "args": {}
+            }))
+            .expect(action);
         }
     }
 }

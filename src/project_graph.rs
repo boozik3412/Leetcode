@@ -1,15 +1,23 @@
 use crate::agent::types::ToolResult;
+use crate::asset_3d::{load_3d_jobs, ThreeDJobStatus};
+use crate::game_production::{load_game_production_state, GAME_PRODUCTION_STATE_PATH};
 use crate::memory::load_memory;
 use crate::project::detect_project_profiles;
 use crate::roadmap::load_roadmap;
+use crate::unreal_gameplay::load_gameplay_state;
+use crate::unreal_intelligence::{scan_unreal_project, UnrealAssetKind};
+use crate::vertical_slice::{load_vertical_slice_state, VERTICAL_SLICE_STATE_PATH};
 use crate::workspace::Workspace;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PROJECT_GRAPH_PATH: &str = "assets/generated/leetcode/project_graph.json";
-const MAX_GRAPH_FILE_BYTES: usize = 5_000_000;
+pub const PROJECT_GRAPH_SELECTION_PATH: &str =
+    "assets/generated/leetcode/project_graph_selection.json";
+const MAX_GRAPH_FILE_BYTES: usize = 256_000_000;
 const MAX_TEXT_SCAN_BYTES: usize = 220_000;
 const MAX_FILE_ROWS: usize = 1_200;
 
@@ -71,12 +79,42 @@ pub enum ProjectGraphNodeKind {
     Symbol,
     Command,
     Asset,
+    ThreeDAsset,
     Memory,
     RoadmapItem,
+    UnrealProject,
+    UnrealPlugin,
+    UnrealModule,
+    UnrealTarget,
+    UnrealConfig,
+    UnrealSource,
+    UnrealMap,
+    UnrealBlueprint,
+    UnrealDataAsset,
+    UnrealMaterial,
+    UnrealNiagara,
+    UnrealAnimation,
+    UnrealSkeleton,
+    UnrealSkeletalMesh,
+    UnrealStaticMesh,
+    UnrealAnimationBlueprint,
+    UnrealAnimationMontage,
+    UnrealControlRig,
+    UnrealPhysicsAsset,
+    UnrealSound,
+    UnrealWidget,
+    UnrealInputAsset,
+    UnrealAsset,
+    GameplayPlan,
+    GameplayRun,
+    GameProductionPlan,
+    ProductionItem,
+    VerticalSliceRun,
+    VerticalSlicePhase,
 }
 
 impl ProjectGraphNodeKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Project => "project",
             Self::Folder => "folder",
@@ -85,8 +123,38 @@ impl ProjectGraphNodeKind {
             Self::Symbol => "symbol",
             Self::Command => "command",
             Self::Asset => "asset",
+            Self::ThreeDAsset => "three_d_asset",
             Self::Memory => "memory",
             Self::RoadmapItem => "roadmap_item",
+            Self::UnrealProject => "unreal_project",
+            Self::UnrealPlugin => "unreal_plugin",
+            Self::UnrealModule => "unreal_module",
+            Self::UnrealTarget => "unreal_target",
+            Self::UnrealConfig => "unreal_config",
+            Self::UnrealSource => "unreal_source",
+            Self::UnrealMap => "unreal_map",
+            Self::UnrealBlueprint => "unreal_blueprint",
+            Self::UnrealDataAsset => "unreal_data_asset",
+            Self::UnrealMaterial => "unreal_material",
+            Self::UnrealNiagara => "unreal_niagara",
+            Self::UnrealAnimation => "unreal_animation",
+            Self::UnrealSkeleton => "unreal_skeleton",
+            Self::UnrealSkeletalMesh => "unreal_skeletal_mesh",
+            Self::UnrealStaticMesh => "unreal_static_mesh",
+            Self::UnrealAnimationBlueprint => "unreal_animation_blueprint",
+            Self::UnrealAnimationMontage => "unreal_animation_montage",
+            Self::UnrealControlRig => "unreal_control_rig",
+            Self::UnrealPhysicsAsset => "unreal_physics_asset",
+            Self::UnrealSound => "unreal_sound",
+            Self::UnrealWidget => "unreal_widget",
+            Self::UnrealInputAsset => "unreal_input_asset",
+            Self::UnrealAsset => "unreal_asset",
+            Self::GameplayPlan => "gameplay_plan",
+            Self::GameplayRun => "gameplay_run",
+            Self::GameProductionPlan => "game_production_plan",
+            Self::ProductionItem => "production_item",
+            Self::VerticalSliceRun => "vertical_slice_run",
+            Self::VerticalSlicePhase => "vertical_slice_phase",
         }
     }
 }
@@ -117,10 +185,24 @@ pub enum ProjectGraphEdgeKind {
     Tests,
     Documents,
     RelatedTo,
+    Declares,
+    Configures,
+    References,
+    Loads,
+    UsesSkeleton,
+    Animates,
+    ControlledBy,
+    HasComponent,
+    CompatibleWith,
+    SpawnedBy,
+    OwnedBy,
+    BoundToInput,
+    Produces,
+    Consumes,
 }
 
 impl ProjectGraphEdgeKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Contains => "contains",
             Self::Imports => "imports",
@@ -130,10 +212,24 @@ impl ProjectGraphEdgeKind {
             Self::Tests => "tests",
             Self::Documents => "documents",
             Self::RelatedTo => "related_to",
+            Self::Declares => "declares",
+            Self::Configures => "configures",
+            Self::References => "references",
+            Self::Loads => "loads",
+            Self::UsesSkeleton => "uses_skeleton",
+            Self::Animates => "animates",
+            Self::ControlledBy => "controlled_by",
+            Self::HasComponent => "has_component",
+            Self::CompatibleWith => "compatible_with",
+            Self::SpawnedBy => "spawned_by",
+            Self::OwnedBy => "owned_by",
+            Self::BoundToInput => "bound_to_input",
+            Self::Produces => "produces",
+            Self::Consumes => "consumes",
         }
     }
 
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Contains => "содержит",
             Self::Imports => "импортирует",
@@ -143,8 +239,30 @@ impl ProjectGraphEdgeKind {
             Self::Tests => "проверяет",
             Self::Documents => "документирует",
             Self::RelatedTo => "связано с",
+            Self::Declares => "объявляет",
+            Self::Configures => "настраивает",
+            Self::References => "ссылается на",
+            Self::Loads => "загружает",
+            Self::UsesSkeleton => "использует Skeleton",
+            Self::Animates => "анимирует",
+            Self::ControlledBy => "управляется",
+            Self::HasComponent => "содержит компонент",
+            Self::CompatibleWith => "совместимо с",
+            Self::SpawnedBy => "создаётся через",
+            Self::OwnedBy => "принадлежит",
+            Self::BoundToInput => "привязано к вводу",
+            Self::Produces => "производит",
+            Self::Consumes => "использует ресурс",
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProjectGraphSelection {
+    #[serde(default)]
+    pub node_id: Option<String>,
+    #[serde(default)]
+    pub selected_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -167,8 +285,114 @@ pub fn load_project_graph(workspace: &Workspace) -> ProjectGraphState {
         .unwrap_or_else(|| scan_project_graph(workspace))
 }
 
+pub fn project_graph_fingerprint(graph: &ProjectGraphState) -> String {
+    let mut rows = graph
+        .nodes
+        .iter()
+        .map(|node| {
+            format!(
+                "node\t{}\t{}\t{}\t{}\t{:?}",
+                node.id,
+                node.kind.as_str(),
+                node.path.as_deref().unwrap_or_default(),
+                node.source,
+                node.metadata
+            )
+        })
+        .chain(graph.edges.iter().map(|edge| {
+            format!(
+                "edge\t{}\t{}\t{}\t{}\t{}",
+                edge.from,
+                edge.to,
+                edge.kind.as_str(),
+                edge.source,
+                edge.confidence
+            )
+        }))
+        .collect::<Vec<_>>();
+    rows.sort();
+    let mut hasher = Sha256::new();
+    for row in rows {
+        hasher.update(row.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn save_project_graph(workspace: &Workspace, graph: &ProjectGraphState) -> anyhow::Result<()> {
-    workspace.write_text(PROJECT_GRAPH_PATH, &serde_json::to_string_pretty(graph)?)
+    workspace.write_text(PROJECT_GRAPH_PATH, &serde_json::to_string(graph)?)
+}
+
+pub fn load_project_graph_selection(workspace: &Workspace) -> Option<String> {
+    workspace
+        .read_text(PROJECT_GRAPH_SELECTION_PATH, 32_000)
+        .ok()
+        .and_then(|text| serde_json::from_str::<ProjectGraphSelection>(&text).ok())
+        .and_then(|selection| selection.node_id)
+        .filter(|node_id| {
+            load_project_graph(workspace)
+                .nodes
+                .iter()
+                .any(|node| &node.id == node_id)
+        })
+}
+
+pub fn save_project_graph_selection(
+    workspace: &Workspace,
+    node_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let selection = ProjectGraphSelection {
+        node_id: node_id.map(ToString::to_string),
+        selected_at: unix_timestamp(),
+    };
+    workspace.write_text(
+        PROJECT_GRAPH_SELECTION_PATH,
+        &serde_json::to_string_pretty(&selection)?,
+    )
+}
+
+pub fn selected_project_node_context_value(
+    workspace: &Workspace,
+    requested_node_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    let node_id = requested_node_id
+        .map(ToString::to_string)
+        .or_else(|| load_project_graph_selection(workspace))?;
+    let graph = load_project_graph(workspace);
+    let node = graph.nodes.iter().find(|node| node.id == node_id)?.clone();
+    let edges = graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from == node.id || edge.to == node.id)
+        .take(40)
+        .cloned()
+        .collect::<Vec<_>>();
+    let neighbours = edges
+        .iter()
+        .filter_map(|edge| {
+            let other = if edge.from == node.id {
+                &edge.to
+            } else {
+                &edge.from
+            };
+            graph.nodes.iter().find(|candidate| &candidate.id == other)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Some(json!({
+        "selection_path": PROJECT_GRAPH_SELECTION_PATH,
+        "node": node,
+        "edges": edges,
+        "neighbours": neighbours,
+    }))
+}
+
+pub fn selected_project_node_context_for_prompt(workspace: &Workspace) -> Option<String> {
+    let value = selected_project_node_context_value(workspace, None)?;
+    Some(format!(
+        "Выбранный узел Project Map является точным контекстом текущей задачи. Используй его id, path/object_path и связи без угадывания. При MCP-вызове этот же блок передаётся в protocol `_meta`:\n{}",
+        serde_json::to_string_pretty(&value).ok()?
+    ))
 }
 
 pub fn project_graph_summary_for_prompt(workspace: Option<&Workspace>) -> String {
@@ -200,21 +424,24 @@ pub fn project_graph_summary_for_prompt(workspace: Option<&Workspace>) -> String
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Карта проекта: {} узлов, {} связей{}.\nИспользуй project_graph_snapshot, когда нужно понять архитектуру, зависимости, проектные команды, связь файлов с roadmap или памятью.",
+        "Карта проекта: {} узлов, {} связей{}.\nИспользуй project_graph_snapshot, когда нужно понять архитектуру, зависимости, проектные команды, Unreal-модули/ассеты, связь файлов с roadmap или памятью.{}",
         graph.nodes.len(),
         graph.edges.len(),
         if commands.is_empty() {
             format!("; типы: {}", empty_label(&counts))
         } else {
             format!("; команды: {commands}; типы: {}", empty_label(&counts))
-        }
+        },
+        selected_project_node_context_for_prompt(workspace)
+            .map(|context| format!("\n{context}"))
+            .unwrap_or_default()
     )
 }
 
 pub fn project_graph_snapshot(workspace: &Workspace, args: ProjectGraphSnapshotArgs) -> ToolResult {
     let graph_exists = workspace.read_text(PROJECT_GRAPH_PATH, 1).is_ok();
     let graph = if args.refresh {
-        let graph = scan_project_graph(workspace);
+        let graph = refresh_project_graph(workspace);
         if let Err(err) = save_project_graph(workspace, &graph) {
             return ToolResult::error(err.to_string());
         }
@@ -245,8 +472,487 @@ pub fn scan_project_graph(workspace: &Workspace) -> ProjectGraphState {
     add_rust_module_nodes(&mut builder, workspace, &rows);
     add_memory_nodes(&mut builder, workspace);
     add_roadmap_nodes(&mut builder, workspace);
+    add_unreal_nodes(&mut builder, workspace);
+    add_three_d_asset_nodes(&mut builder, workspace);
+    add_gameplay_nodes(&mut builder, workspace);
+    add_game_production_nodes(&mut builder, workspace);
+    add_vertical_slice_nodes(&mut builder, workspace);
 
     builder.finish()
+}
+
+fn add_vertical_slice_nodes(builder: &mut GraphBuilder, workspace: &Workspace) {
+    let state = load_vertical_slice_state(workspace);
+    for run in &state.runs {
+        let run_node_id = stable_id("game:vertical-slice", &run.id);
+        let production_node_id = stable_id("game:production", &run.production_plan_id);
+        let completed = run
+            .phases
+            .iter()
+            .filter(|phase| {
+                phase.status == crate::vertical_slice::VerticalSlicePhaseStatus::Completed
+            })
+            .count();
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "production_plan_id".to_string(),
+            run.production_plan_id.clone(),
+        );
+        metadata.insert(
+            "status".to_string(),
+            format!("{:?}", run.status).to_lowercase(),
+        );
+        metadata.insert(
+            "progress".to_string(),
+            format!("{completed}/{}", run.phases.len()),
+        );
+        builder.add_node(ProjectGraphNode {
+            id: run_node_id.clone(),
+            label: run.title.clone(),
+            kind: ProjectGraphNodeKind::VerticalSliceRun,
+            path: Some(VERTICAL_SLICE_STATE_PATH.to_string()),
+            summary: format!(
+                "Vertical Slice orchestration: {} из {} фаз завершено",
+                completed,
+                run.phases.len()
+            ),
+            source: "scanner:vertical_slice_orchestrator".to_string(),
+            confidence: 1.0,
+            metadata,
+            updated_at: run.updated_at,
+        });
+        builder.add_edge(
+            if builder.has_node(&production_node_id) {
+                &production_node_id
+            } else {
+                "project:root"
+            },
+            &run_node_id,
+            ProjectGraphEdgeKind::Contains,
+            1.0,
+            "scanner:vertical_slice_orchestrator",
+        );
+
+        for phase in &run.phases {
+            let phase_node_id = stable_id(
+                "game:vertical-slice:phase",
+                &format!("{}:{}", run.id, phase.kind.id()),
+            );
+            let mut metadata = BTreeMap::new();
+            metadata.insert("run_id".to_string(), run.id.clone());
+            metadata.insert("phase".to_string(), phase.kind.id().to_string());
+            metadata.insert("status".to_string(), phase.status.label().to_string());
+            metadata.insert(
+                "recommended_tools".to_string(),
+                phase.kind.recommended_tools().join(", "),
+            );
+            metadata.insert("evidence".to_string(), phase.evidence.join(" | "));
+            metadata.insert("artifacts".to_string(), phase.artifacts.join(", "));
+            builder.add_node(ProjectGraphNode {
+                id: phase_node_id.clone(),
+                label: phase.title.clone(),
+                kind: ProjectGraphNodeKind::VerticalSlicePhase,
+                path: phase.artifacts.first().cloned(),
+                summary: compact_inline(&phase.description, 240),
+                source: "scanner:vertical_slice_phase".to_string(),
+                confidence: 1.0,
+                metadata,
+                updated_at: phase.updated_at,
+            });
+            builder.add_edge(
+                &run_node_id,
+                &phase_node_id,
+                ProjectGraphEdgeKind::Contains,
+                1.0,
+                "scanner:vertical_slice_phase",
+            );
+            for dependency in &phase.depends_on {
+                let dependency_node_id = stable_id(
+                    "game:vertical-slice:phase",
+                    &format!("{}:{}", run.id, dependency.id()),
+                );
+                builder.add_edge(
+                    &phase_node_id,
+                    &dependency_node_id,
+                    ProjectGraphEdgeKind::DependsOn,
+                    1.0,
+                    "scanner:vertical_slice_dependency",
+                );
+            }
+            for artifact in &phase.artifacts {
+                let artifact_node_id = path_node_id(ProjectGraphNodeKind::Asset, artifact);
+                if builder.has_node(&artifact_node_id) {
+                    builder.add_edge(
+                        &phase_node_id,
+                        &artifact_node_id,
+                        ProjectGraphEdgeKind::Generates,
+                        1.0,
+                        "scanner:vertical_slice_artifact",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn add_game_production_nodes(builder: &mut GraphBuilder, workspace: &Workspace) {
+    let state = load_game_production_state(workspace);
+    for plan in &state.plans {
+        let plan_node_id = stable_id("game:production", &plan.id);
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "scope".to_string(),
+            format!("{:?}", plan.scope).to_lowercase(),
+        );
+        metadata.insert("engine".to_string(), plan.engine.clone());
+        metadata.insert("genre".to_string(), plan.genre.clone());
+        metadata.insert("platform".to_string(), plan.target_platform.clone());
+        metadata.insert(
+            "milestone".to_string(),
+            plan.current_milestone.id().to_string(),
+        );
+        metadata.insert(
+            "status".to_string(),
+            format!("{:?}", plan.status).to_lowercase(),
+        );
+        metadata.insert("items".to_string(), plan.items.len().to_string());
+        builder.add_node(ProjectGraphNode {
+            id: plan_node_id.clone(),
+            label: plan.title.clone(),
+            kind: ProjectGraphNodeKind::GameProductionPlan,
+            path: Some(GAME_PRODUCTION_STATE_PATH.to_string()),
+            summary: compact_inline(&plan.brief, 240),
+            source: "scanner:game_production".to_string(),
+            confidence: 1.0,
+            metadata,
+            updated_at: plan.updated_at,
+        });
+        builder.add_edge(
+            "project:root",
+            &plan_node_id,
+            ProjectGraphEdgeKind::Contains,
+            1.0,
+            "scanner:game_production",
+        );
+        if let Some(project_node_id) = plan
+            .project_node_id
+            .as_deref()
+            .filter(|node_id| builder.has_node(node_id))
+        {
+            builder.add_edge(
+                &plan_node_id,
+                project_node_id,
+                ProjectGraphEdgeKind::RelatedTo,
+                1.0,
+                "scanner:game_production_context",
+            );
+        }
+        for task_id in &plan.source_task_ids {
+            let task_node_id = stable_id("memory:task", task_id);
+            if builder.has_node(&task_node_id) {
+                builder.add_edge(
+                    &plan_node_id,
+                    &task_node_id,
+                    ProjectGraphEdgeKind::RelatedTo,
+                    0.95,
+                    "scanner:game_production_task",
+                );
+            }
+        }
+        for roadmap_id in &plan.roadmap_ids {
+            let roadmap_node_id = stable_id("roadmap", roadmap_id);
+            if builder.has_node(&roadmap_node_id) {
+                builder.add_edge(
+                    &plan_node_id,
+                    &roadmap_node_id,
+                    ProjectGraphEdgeKind::RelatedTo,
+                    0.95,
+                    "scanner:game_production_roadmap",
+                );
+            }
+        }
+        for item in &plan.items {
+            let item_node_id = stable_id("game:production:item", &item.id);
+            let mut metadata = BTreeMap::new();
+            metadata.insert("plan_id".to_string(), plan.id.clone());
+            metadata.insert("milestone".to_string(), item.milestone.id().to_string());
+            metadata.insert(
+                "workstream".to_string(),
+                item.workstream.label().to_string(),
+            );
+            metadata.insert("status".to_string(), item.status.label().to_string());
+            metadata.insert("priority".to_string(), item.priority.to_string());
+            metadata.insert("validation".to_string(), item.validation.clone());
+            metadata.insert("artifacts".to_string(), item.artifacts.join(", "));
+            builder.add_node(ProjectGraphNode {
+                id: item_node_id.clone(),
+                label: item.title.clone(),
+                kind: ProjectGraphNodeKind::ProductionItem,
+                path: item.artifacts.first().cloned(),
+                summary: compact_inline(&item.description, 240),
+                source: "scanner:game_production_item".to_string(),
+                confidence: 1.0,
+                metadata,
+                updated_at: item.updated_at,
+            });
+            builder.add_edge(
+                &plan_node_id,
+                &item_node_id,
+                ProjectGraphEdgeKind::Contains,
+                1.0,
+                "scanner:game_production_item",
+            );
+            for dependency in &item.depends_on {
+                let dependency_node_id = stable_id("game:production:item", dependency);
+                builder.add_edge(
+                    &item_node_id,
+                    &dependency_node_id,
+                    ProjectGraphEdgeKind::DependsOn,
+                    1.0,
+                    "scanner:game_production_dependency",
+                );
+            }
+            for artifact in &item.artifacts {
+                let artifact_node_id = path_node_id(ProjectGraphNodeKind::Asset, artifact);
+                if builder.has_node(&artifact_node_id) {
+                    builder.add_edge(
+                        &item_node_id,
+                        &artifact_node_id,
+                        ProjectGraphEdgeKind::Generates,
+                        1.0,
+                        "scanner:game_production_artifact",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn add_gameplay_nodes(builder: &mut GraphBuilder, workspace: &Workspace) {
+    let state = load_gameplay_state(workspace);
+    for plan in &state.plans {
+        let id = stable_id("gameplay:plan", &plan.id);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("recipe".to_string(), plan.recipe.id().to_string());
+        metadata.insert(
+            "status".to_string(),
+            format!("{:?}", plan.status).to_lowercase(),
+        );
+        metadata.insert("map_path".to_string(), plan.map_path.clone());
+        metadata.insert("task_ids".to_string(), plan.task_ids.join(", "));
+        metadata.insert("roadmap_ids".to_string(), plan.roadmap_ids.join(", "));
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: plan.title.clone(),
+            kind: ProjectGraphNodeKind::GameplayPlan,
+            path: Some(plan.file_path.clone()),
+            summary: compact_inline(&plan.brief, 240),
+            source: "scanner:unreal_gameplay".to_string(),
+            confidence: 1.0,
+            metadata,
+            updated_at: plan.updated_at,
+        });
+        builder.add_edge(
+            "project:root",
+            &id,
+            ProjectGraphEdgeKind::Contains,
+            1.0,
+            "scanner:unreal_gameplay",
+        );
+        if let Some(project_node_id) = plan
+            .project_node_id
+            .as_deref()
+            .filter(|node_id| builder.has_node(node_id))
+        {
+            builder.add_edge(
+                &id,
+                project_node_id,
+                ProjectGraphEdgeKind::RelatedTo,
+                1.0,
+                "scanner:unreal_gameplay_context",
+            );
+        }
+        for task_id in &plan.task_ids {
+            let task_node_id = stable_id("memory:task", task_id);
+            if builder.has_node(&task_node_id) {
+                builder.add_edge(
+                    &id,
+                    &task_node_id,
+                    ProjectGraphEdgeKind::RelatedTo,
+                    0.95,
+                    "scanner:unreal_gameplay_task",
+                );
+            }
+        }
+        for roadmap_id in &plan.roadmap_ids {
+            let roadmap_node_id = stable_id("roadmap", roadmap_id);
+            if builder.has_node(&roadmap_node_id) {
+                builder.add_edge(
+                    &id,
+                    &roadmap_node_id,
+                    ProjectGraphEdgeKind::RelatedTo,
+                    0.95,
+                    "scanner:unreal_gameplay_roadmap",
+                );
+            }
+        }
+    }
+
+    for run in state.runs.iter().rev().take(100) {
+        let id = stable_id("gameplay:run", &run.id);
+        let path = run.artifacts.first().cloned();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("mode".to_string(), run.mode.id().to_string());
+        metadata.insert("success".to_string(), run.success.to_string());
+        metadata.insert("duration_ms".to_string(), run.duration_ms.to_string());
+        metadata.insert("map_path".to_string(), run.map_path.clone());
+        metadata.insert("test_filter".to_string(), run.test_filter.clone());
+        metadata.insert(
+            "artifact_count".to_string(),
+            run.artifacts.len().to_string(),
+        );
+        metadata.insert("issue_count".to_string(), run.issues.len().to_string());
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: if run.success {
+                format!("Playtest {}: успешно", run.id)
+            } else {
+                format!("Playtest {}: ошибка", run.id)
+            },
+            kind: ProjectGraphNodeKind::GameplayRun,
+            path,
+            summary: compact_inline(&run.output_summary, 240),
+            source: "scanner:unreal_gameplay_run".to_string(),
+            confidence: 1.0,
+            metadata,
+            updated_at: run.created_at,
+        });
+        let parent = run
+            .plan_id
+            .as_deref()
+            .map(|plan_id| stable_id("gameplay:plan", plan_id))
+            .filter(|plan_id| builder.has_node(plan_id))
+            .unwrap_or_else(|| "project:root".to_string());
+        builder.add_edge(
+            &parent,
+            &id,
+            ProjectGraphEdgeKind::Tests,
+            1.0,
+            "scanner:unreal_gameplay_run",
+        );
+    }
+}
+
+fn add_three_d_asset_nodes(builder: &mut GraphBuilder, workspace: &Workspace) {
+    for job in load_3d_jobs(workspace) {
+        let id = stable_id("asset3d", &job.id);
+        let output_path = job.output_files.first().cloned();
+        let mut metadata = BTreeMap::new();
+        metadata.insert("provider".to_string(), job.provider.clone());
+        metadata.insert("model".to_string(), job.model.clone());
+        metadata.insert(
+            "status".to_string(),
+            format!("{:?}", job.status).to_lowercase(),
+        );
+        metadata.insert(
+            "stage".to_string(),
+            format!("{:?}", job.stage).to_lowercase(),
+        );
+        metadata.insert("progress".to_string(), job.progress.to_string());
+        metadata.insert("target_format".to_string(), job.target_format.clone());
+        metadata.insert(
+            "target_polycount".to_string(),
+            job.target_polycount.to_string(),
+        );
+        metadata.insert("pbr".to_string(), job.enable_pbr.to_string());
+        metadata.insert(
+            "license_confirmed".to_string(),
+            job.license_confirmed.to_string(),
+        );
+        if let Some(validation) = &job.validation {
+            metadata.insert(
+                "import_ready".to_string(),
+                validation.import_ready.to_string(),
+            );
+            metadata.insert(
+                "triangles".to_string(),
+                validation.triangle_count.to_string(),
+            );
+            metadata.insert(
+                "materials".to_string(),
+                validation.material_count.to_string(),
+            );
+            metadata.insert(
+                "animations".to_string(),
+                validation.animation_count.to_string(),
+            );
+        }
+
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: if job.prompt.trim().is_empty() {
+                job.id.clone()
+            } else {
+                compact_inline(&job.prompt, 56)
+            },
+            kind: ProjectGraphNodeKind::ThreeDAsset,
+            path: output_path.clone(),
+            summary: format!(
+                "3D asset job: {} / {} / {}%",
+                job.provider,
+                format!("{:?}", job.stage).to_lowercase(),
+                job.progress
+            ),
+            source: "scanner:asset_3d_pipeline".to_string(),
+            confidence: if job.status == ThreeDJobStatus::Ready {
+                1.0
+            } else {
+                0.85
+            },
+            metadata,
+            updated_at: job.updated_at,
+        });
+        builder.add_edge(
+            "project:root",
+            &id,
+            ProjectGraphEdgeKind::Generates,
+            0.95,
+            "scanner:asset_3d_pipeline",
+        );
+
+        if let Some(source_image) = &job.source_image {
+            let source_id = path_node_id(ProjectGraphNodeKind::Asset, source_image);
+            if builder.has_node(&source_id) {
+                builder.add_edge(
+                    &source_id,
+                    &id,
+                    ProjectGraphEdgeKind::Generates,
+                    0.95,
+                    "scanner:asset_3d_pipeline",
+                );
+            }
+        }
+        if let Some(path) = output_path {
+            let output_id = path_node_id(ProjectGraphNodeKind::Asset, &path);
+            if builder.has_node(&output_id) {
+                builder.add_edge(
+                    &id,
+                    &output_id,
+                    ProjectGraphEdgeKind::Generates,
+                    1.0,
+                    "scanner:asset_3d_pipeline",
+                );
+            }
+        }
+    }
+}
+
+pub fn refresh_project_graph(workspace: &Workspace) -> ProjectGraphState {
+    let previous = workspace
+        .read_text(PROJECT_GRAPH_PATH, MAX_GRAPH_FILE_BYTES)
+        .ok()
+        .and_then(|text| serde_json::from_str::<ProjectGraphState>(&text).ok());
+    merge_incremental_graph(previous, scan_project_graph(workspace))
 }
 
 fn add_file_tree_nodes(builder: &mut GraphBuilder, workspace: &Workspace, rows: &[String]) {
@@ -683,6 +1389,638 @@ fn add_roadmap_nodes(builder: &mut GraphBuilder, workspace: &Workspace) {
     }
 }
 
+fn add_unreal_nodes(builder: &mut GraphBuilder, workspace: &Workspace) {
+    let intelligence = scan_unreal_project(workspace);
+    if intelligence.descriptors.is_empty() {
+        return;
+    }
+
+    let mut descriptor_ids = BTreeMap::new();
+    for descriptor in &intelligence.descriptors {
+        let kind = if descriptor.kind == "plugin" {
+            ProjectGraphNodeKind::UnrealPlugin
+        } else {
+            ProjectGraphNodeKind::UnrealProject
+        };
+        let id = stable_id(&format!("unreal:{}", descriptor.kind), &descriptor.name);
+        descriptor_ids.insert(descriptor.name.clone(), id.clone());
+        let mut metadata = BTreeMap::new();
+        metadata.insert("descriptor_kind".to_string(), descriptor.kind.clone());
+        metadata.insert("modules".to_string(), descriptor.modules.join(", "));
+        metadata.insert(
+            "scan_fingerprint".to_string(),
+            intelligence.fingerprint.clone(),
+        );
+        if descriptor.kind == "project" {
+            metadata.insert("scan_manifest_version".to_string(), "2".to_string());
+            if let Ok(manifest) = serde_json::to_string(&intelligence.project_inputs) {
+                metadata.insert("scan_manifest".to_string(), manifest);
+            }
+        }
+        metadata.insert(
+            "asset_count".to_string(),
+            intelligence.assets.len().to_string(),
+        );
+        if let Some(registry_path) = &intelligence.registry_export_path {
+            metadata.insert("asset_registry".to_string(), registry_path.clone());
+        }
+        if let Some(engine) = &descriptor.engine_association {
+            metadata.insert("engine_association".to_string(), engine.clone());
+        }
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: descriptor.name.clone(),
+            kind,
+            path: Some(descriptor.path.clone()),
+            summary: if descriptor.kind == "plugin" {
+                "Unreal Engine plugin descriptor".to_string()
+            } else {
+                "Unreal Engine project descriptor".to_string()
+            },
+            source: "scanner:unreal_descriptor".to_string(),
+            confidence: 1.0,
+            metadata,
+            updated_at: builder.now,
+        });
+        builder.add_edge(
+            "project:root",
+            &id,
+            ProjectGraphEdgeKind::Contains,
+            1.0,
+            "scanner:unreal_descriptor",
+        );
+        builder.add_edge(
+            &path_node_id(ProjectGraphNodeKind::File, &descriptor.path),
+            &id,
+            ProjectGraphEdgeKind::Declares,
+            1.0,
+            "scanner:unreal_descriptor",
+        );
+    }
+
+    let mut module_ids = BTreeMap::new();
+    for module in &intelligence.modules {
+        let id = stable_id("unreal:module", &module.name);
+        module_ids.insert(module.name.clone(), id.clone());
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "module_type".to_string(),
+            module
+                .module_type
+                .clone()
+                .unwrap_or_else(|| "не указан".to_string()),
+        );
+        metadata.insert(
+            "public_dependencies".to_string(),
+            module.public_dependencies.join(", "),
+        );
+        metadata.insert(
+            "private_dependencies".to_string(),
+            module.private_dependencies.join(", "),
+        );
+        metadata.insert(
+            "dynamic_dependencies".to_string(),
+            module.dynamic_dependencies.join(", "),
+        );
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: module.name.clone(),
+            kind: ProjectGraphNodeKind::UnrealModule,
+            path: Some(module.path.clone()),
+            summary: "Unreal Build.cs module".to_string(),
+            source: "scanner:unreal_build_cs".to_string(),
+            confidence: 0.98,
+            metadata,
+            updated_at: builder.now,
+        });
+        builder.add_edge(
+            &path_node_id(ProjectGraphNodeKind::File, &module.path),
+            &id,
+            ProjectGraphEdgeKind::Declares,
+            0.98,
+            "scanner:unreal_build_cs",
+        );
+    }
+
+    for descriptor in &intelligence.descriptors {
+        let Some(descriptor_id) = descriptor_ids.get(&descriptor.name) else {
+            continue;
+        };
+        for module_name in &descriptor.modules {
+            let module_id = module_ids
+                .get(module_name)
+                .cloned()
+                .unwrap_or_else(|| stable_id("unreal:module", module_name));
+            if !builder.has_node(&module_id) {
+                builder.add_node(ProjectGraphNode {
+                    id: module_id.clone(),
+                    label: module_name.clone(),
+                    kind: ProjectGraphNodeKind::UnrealModule,
+                    path: None,
+                    summary: "Unreal module declared by descriptor".to_string(),
+                    source: "scanner:unreal_descriptor_module".to_string(),
+                    confidence: 0.8,
+                    metadata: BTreeMap::new(),
+                    updated_at: builder.now,
+                });
+            }
+            builder.add_edge(
+                descriptor_id,
+                &module_id,
+                ProjectGraphEdgeKind::Declares,
+                0.95,
+                "scanner:unreal_descriptor",
+            );
+        }
+    }
+
+    for module in &intelligence.modules {
+        let Some(module_id) = module_ids.get(&module.name) else {
+            continue;
+        };
+        for (dependency, visibility) in module
+            .public_dependencies
+            .iter()
+            .map(|value| (value, "public"))
+            .chain(
+                module
+                    .private_dependencies
+                    .iter()
+                    .map(|value| (value, "private")),
+            )
+            .chain(
+                module
+                    .dynamic_dependencies
+                    .iter()
+                    .map(|value| (value, "dynamic")),
+            )
+        {
+            let dependency_id = module_ids
+                .get(dependency)
+                .cloned()
+                .unwrap_or_else(|| stable_id("unreal:module", dependency));
+            if !builder.has_node(&dependency_id) {
+                let mut metadata = BTreeMap::new();
+                metadata.insert("external".to_string(), "true".to_string());
+                builder.add_node(ProjectGraphNode {
+                    id: dependency_id.clone(),
+                    label: dependency.clone(),
+                    kind: ProjectGraphNodeKind::UnrealModule,
+                    path: None,
+                    summary: "Engine/plugin module dependency".to_string(),
+                    source: "scanner:unreal_dependency".to_string(),
+                    confidence: 0.7,
+                    metadata,
+                    updated_at: builder.now,
+                });
+            }
+            let mut source = "scanner:unreal_build_cs".to_string();
+            source.push(':');
+            source.push_str(visibility);
+            builder.add_edge(
+                module_id,
+                &dependency_id,
+                ProjectGraphEdgeKind::DependsOn,
+                0.95,
+                &source,
+            );
+        }
+    }
+
+    for target in &intelligence.targets {
+        let id = stable_id("unreal:target", &target.name);
+        let mut metadata = BTreeMap::new();
+        metadata.insert(
+            "target_type".to_string(),
+            target
+                .target_type
+                .clone()
+                .unwrap_or_else(|| "не указан".to_string()),
+        );
+        metadata.insert("modules".to_string(), target.modules.join(", "));
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: target.name.clone(),
+            kind: ProjectGraphNodeKind::UnrealTarget,
+            path: Some(target.path.clone()),
+            summary: "Unreal Target.cs build target".to_string(),
+            source: "scanner:unreal_target_cs".to_string(),
+            confidence: 0.98,
+            metadata,
+            updated_at: builder.now,
+        });
+        builder.add_edge(
+            &path_node_id(ProjectGraphNodeKind::File, &target.path),
+            &id,
+            ProjectGraphEdgeKind::Declares,
+            0.98,
+            "scanner:unreal_target_cs",
+        );
+        for module in &target.modules {
+            let module_id = module_ids
+                .get(module)
+                .cloned()
+                .unwrap_or_else(|| stable_id("unreal:module", module));
+            builder.add_edge(
+                &id,
+                &module_id,
+                ProjectGraphEdgeKind::Loads,
+                0.95,
+                "scanner:unreal_target_cs",
+            );
+        }
+    }
+
+    for config in &intelligence.configs {
+        let id = stable_id("unreal:config", &config.path);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("sections".to_string(), config.sections.join(", "));
+        metadata.insert("keys".to_string(), config.keys.join(", "));
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: file_label(&config.path),
+            kind: ProjectGraphNodeKind::UnrealConfig,
+            path: Some(config.path.clone()),
+            summary: "Unreal Config INI".to_string(),
+            source: "scanner:unreal_config".to_string(),
+            confidence: 0.95,
+            metadata,
+            updated_at: builder.now,
+        });
+        builder.add_edge(
+            &id,
+            "project:root",
+            ProjectGraphEdgeKind::Configures,
+            0.9,
+            "scanner:unreal_config",
+        );
+    }
+
+    for source in &intelligence.source_files {
+        let id = stable_id("unreal:source", &source.path);
+        let mut metadata = BTreeMap::new();
+        metadata.insert("language".to_string(), source.language.clone());
+        if let Some(module) = &source.module {
+            metadata.insert("module".to_string(), module.clone());
+        }
+        builder.add_node(ProjectGraphNode {
+            id: id.clone(),
+            label: file_label(&source.path),
+            kind: ProjectGraphNodeKind::UnrealSource,
+            path: Some(source.path.clone()),
+            summary: "Unreal C++/build source".to_string(),
+            source: "scanner:unreal_source".to_string(),
+            confidence: 0.9,
+            metadata,
+            updated_at: builder.now,
+        });
+        builder.add_edge(
+            &path_node_id(ProjectGraphNodeKind::File, &source.path),
+            &id,
+            ProjectGraphEdgeKind::Documents,
+            0.85,
+            "scanner:unreal_source",
+        );
+        if let Some(module) = &source.module {
+            let module_id = module_ids
+                .get(module)
+                .cloned()
+                .unwrap_or_else(|| stable_id("unreal:module", module));
+            builder.add_edge(
+                &module_id,
+                &id,
+                ProjectGraphEdgeKind::Contains,
+                0.9,
+                "scanner:unreal_source",
+            );
+        }
+    }
+
+    let mut asset_lookup = BTreeMap::new();
+    for asset in &intelligence.assets {
+        asset_lookup.insert(asset.object_path.clone(), asset.id.clone());
+        asset_lookup.insert(asset.package_name.clone(), asset.id.clone());
+        let mut metadata = asset.tags.clone();
+        metadata.insert("object_path".to_string(), asset.object_path.clone());
+        metadata.insert("package_name".to_string(), asset.package_name.clone());
+        metadata.insert("asset_class".to_string(), asset.class_name.clone());
+        metadata.insert("asset_kind".to_string(), asset.kind.as_str().to_string());
+        metadata.insert("asset_source".to_string(), asset.source.clone());
+        builder.add_node(ProjectGraphNode {
+            id: asset.id.clone(),
+            label: asset.name.clone(),
+            kind: graph_kind_for_unreal_asset(asset.kind, &asset.class_name),
+            path: asset.file_path.clone(),
+            summary: format!("Unreal {}: {}", asset.kind.as_str(), asset.object_path),
+            source: format!("scanner:unreal_{}", asset.source),
+            confidence: if asset.source == "asset_registry" {
+                0.98
+            } else {
+                0.65
+            },
+            metadata,
+            updated_at: builder.now,
+        });
+        builder.add_edge(
+            "project:root",
+            &asset.id,
+            ProjectGraphEdgeKind::Contains,
+            0.8,
+            "scanner:unreal_content",
+        );
+    }
+
+    for dependency in &intelligence.asset_dependencies {
+        let Some(from) = resolve_unreal_asset_id(&asset_lookup, &dependency.from) else {
+            continue;
+        };
+        let to = resolve_unreal_asset_id(&asset_lookup, &dependency.to).unwrap_or_else(|| {
+            let id = stable_id("unreal:asset:external", &dependency.to);
+            if !builder.has_node(&id) {
+                let mut metadata = BTreeMap::new();
+                metadata.insert("object_path".to_string(), dependency.to.clone());
+                metadata.insert("external".to_string(), "true".to_string());
+                metadata.insert(
+                    "external_scope".to_string(),
+                    if dependency.to.starts_with("/Game/") {
+                        "project"
+                    } else {
+                        "engine_or_plugin"
+                    }
+                    .to_string(),
+                );
+                builder.add_node(ProjectGraphNode {
+                    id: id.clone(),
+                    label: dependency
+                        .to
+                        .rsplit(['/', '.'])
+                        .next()
+                        .unwrap_or(&dependency.to)
+                        .to_string(),
+                    kind: ProjectGraphNodeKind::UnrealAsset,
+                    path: None,
+                    summary: "Unreal asset referenced by registry export".to_string(),
+                    source: "scanner:unreal_asset_dependency".to_string(),
+                    confidence: 0.65,
+                    metadata,
+                    updated_at: builder.now,
+                });
+            }
+            id
+        });
+        builder.add_edge(
+            &from,
+            &to,
+            ProjectGraphEdgeKind::References,
+            0.95,
+            &format!(
+                "scanner:unreal_asset_dependency:{}",
+                dependency.dependency_type
+            ),
+        );
+    }
+
+    add_unreal_semantic_edges(builder, &intelligence.assets, &asset_lookup);
+
+    let unreal_root = descriptor_ids
+        .values()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "project:root".to_string());
+    if let Some(export) = intelligence.registry_export_path {
+        builder.add_edge(
+            &path_node_id(ProjectGraphNodeKind::File, &export),
+            &unreal_root,
+            ProjectGraphEdgeKind::Documents,
+            0.95,
+            "scanner:unreal_asset_registry",
+        );
+    }
+}
+
+fn graph_kind_for_unreal_asset(kind: UnrealAssetKind, class_name: &str) -> ProjectGraphNodeKind {
+    let class_name = class_name.to_ascii_lowercase();
+    if class_name.contains("animblueprint") || class_name.contains("animationblueprint") {
+        return ProjectGraphNodeKind::UnrealAnimationBlueprint;
+    }
+    if class_name.contains("animmontage") || class_name.contains("animationmontage") {
+        return ProjectGraphNodeKind::UnrealAnimationMontage;
+    }
+    if class_name.contains("skeleton") && !class_name.contains("skeletalmesh") {
+        return ProjectGraphNodeKind::UnrealSkeleton;
+    }
+    if class_name.contains("skeletalmesh") {
+        return ProjectGraphNodeKind::UnrealSkeletalMesh;
+    }
+    if class_name.contains("staticmesh") {
+        return ProjectGraphNodeKind::UnrealStaticMesh;
+    }
+    if class_name.contains("controlrig") {
+        return ProjectGraphNodeKind::UnrealControlRig;
+    }
+    if class_name.contains("physicsasset") {
+        return ProjectGraphNodeKind::UnrealPhysicsAsset;
+    }
+    if class_name.contains("sound") || class_name.contains("metasound") {
+        return ProjectGraphNodeKind::UnrealSound;
+    }
+    if class_name.contains("widgetblueprint") || class_name.contains("commonactivatablewidget") {
+        return ProjectGraphNodeKind::UnrealWidget;
+    }
+    if class_name.contains("inputaction") || class_name.contains("inputmappingcontext") {
+        return ProjectGraphNodeKind::UnrealInputAsset;
+    }
+    match kind {
+        UnrealAssetKind::Map => ProjectGraphNodeKind::UnrealMap,
+        UnrealAssetKind::Blueprint => ProjectGraphNodeKind::UnrealBlueprint,
+        UnrealAssetKind::DataAsset => ProjectGraphNodeKind::UnrealDataAsset,
+        UnrealAssetKind::Material => ProjectGraphNodeKind::UnrealMaterial,
+        UnrealAssetKind::Niagara => ProjectGraphNodeKind::UnrealNiagara,
+        UnrealAssetKind::Animation => ProjectGraphNodeKind::UnrealAnimation,
+        UnrealAssetKind::Asset => ProjectGraphNodeKind::UnrealAsset,
+    }
+}
+
+fn add_unreal_semantic_edges(
+    builder: &mut GraphBuilder,
+    assets: &[crate::unreal_intelligence::UnrealAssetInfo],
+    lookup: &BTreeMap<String, String>,
+) {
+    for asset in assets {
+        let source_kind = graph_kind_for_unreal_asset(asset.kind, &asset.class_name);
+        for (tag, value) in &asset.tags {
+            let tag = tag.to_ascii_lowercase();
+            let Some(target) = resolve_unreal_asset_id_flexible(lookup, value) else {
+                continue;
+            };
+            let edge_kind = if tag.contains("skeleton") {
+                ProjectGraphEdgeKind::UsesSkeleton
+            } else if tag.contains("skeletalmesh") || tag == "previewmesh" {
+                if matches!(
+                    source_kind,
+                    ProjectGraphNodeKind::UnrealAnimation
+                        | ProjectGraphNodeKind::UnrealAnimationBlueprint
+                        | ProjectGraphNodeKind::UnrealAnimationMontage
+                        | ProjectGraphNodeKind::UnrealControlRig
+                ) {
+                    ProjectGraphEdgeKind::Animates
+                } else {
+                    ProjectGraphEdgeKind::References
+                }
+            } else if tag.contains("generatedclass") || tag.contains("parentclass") {
+                ProjectGraphEdgeKind::ControlledBy
+            } else if tag.contains("input") {
+                ProjectGraphEdgeKind::BoundToInput
+            } else if tag.contains("physicsasset") {
+                ProjectGraphEdgeKind::ControlledBy
+            } else {
+                continue;
+            };
+            builder.add_edge(
+                &asset.id,
+                &target,
+                edge_kind,
+                0.98,
+                &format!("scanner:unreal_asset_registry:tag:{tag}"),
+            );
+            if edge_kind == ProjectGraphEdgeKind::UsesSkeleton
+                && matches!(
+                    source_kind,
+                    ProjectGraphNodeKind::UnrealAnimation
+                        | ProjectGraphNodeKind::UnrealAnimationBlueprint
+                        | ProjectGraphNodeKind::UnrealAnimationMontage
+                        | ProjectGraphNodeKind::UnrealSkeletalMesh
+                        | ProjectGraphNodeKind::UnrealControlRig
+                )
+            {
+                builder.add_edge(
+                    &asset.id,
+                    &target,
+                    ProjectGraphEdgeKind::CompatibleWith,
+                    0.98,
+                    "scanner:unreal_asset_registry:skeleton_compatibility",
+                );
+            }
+        }
+    }
+}
+
+fn resolve_unreal_asset_id_flexible(
+    lookup: &BTreeMap<String, String>,
+    value: &str,
+) -> Option<String> {
+    let trimmed = value
+        .trim()
+        .trim_matches(['\'', '"'])
+        .split_once('\'')
+        .map(|(_, path)| path.trim_end_matches('\''))
+        .unwrap_or(value.trim());
+    let candidates = [
+        trimmed.to_string(),
+        trimmed.trim_end_matches("_C").to_string(),
+        trimmed.split(':').next().unwrap_or(trimmed).to_string(),
+    ];
+    candidates
+        .iter()
+        .find_map(|candidate| resolve_unreal_asset_id(lookup, candidate))
+}
+
+fn resolve_unreal_asset_id(lookup: &BTreeMap<String, String>, value: &str) -> Option<String> {
+    lookup.get(value).cloned().or_else(|| {
+        let package = value.split('.').next().unwrap_or(value);
+        lookup.get(package).cloned()
+    })
+}
+
+fn merge_incremental_graph(
+    previous: Option<ProjectGraphState>,
+    mut fresh: ProjectGraphState,
+) -> ProjectGraphState {
+    let Some(previous) = previous else {
+        return fresh;
+    };
+    let previous_nodes = previous
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node))
+        .collect::<BTreeMap<_, _>>();
+    for node in &mut fresh.nodes {
+        if let Some(old) = previous_nodes.get(&node.id) {
+            if graph_node_content_eq(old, node) {
+                node.updated_at = old.updated_at;
+            }
+        }
+    }
+    let fresh_ids = fresh
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    fresh.nodes.extend(
+        previous
+            .nodes
+            .iter()
+            .filter(|node| node.source.starts_with("ui:") && !fresh_ids.contains(&node.id))
+            .cloned(),
+    );
+
+    let previous_edges = previous
+        .edges
+        .iter()
+        .map(|edge| (edge.id.clone(), edge))
+        .collect::<BTreeMap<_, _>>();
+    for edge in &mut fresh.edges {
+        if let Some(old) = previous_edges.get(&edge.id) {
+            if graph_edge_content_eq(old, edge) {
+                edge.updated_at = old.updated_at;
+            }
+        }
+    }
+    let mut edge_ids = fresh
+        .edges
+        .iter()
+        .map(|edge| edge.id.clone())
+        .collect::<BTreeSet<_>>();
+    let node_ids = fresh
+        .nodes
+        .iter()
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    for edge in previous.edges {
+        if edge.source.starts_with("ui:")
+            && node_ids.contains(&edge.from)
+            && node_ids.contains(&edge.to)
+            && edge_ids.insert(edge.id.clone())
+        {
+            fresh.edges.push(edge);
+        }
+    }
+    fresh.nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    fresh.edges.sort_by(|left, right| left.id.cmp(&right.id));
+    fresh
+}
+
+fn graph_node_content_eq(left: &ProjectGraphNode, right: &ProjectGraphNode) -> bool {
+    left.id == right.id
+        && left.label == right.label
+        && left.kind == right.kind
+        && left.path == right.path
+        && left.summary == right.summary
+        && left.source == right.source
+        && (left.confidence - right.confidence).abs() < f32::EPSILON
+        && left.metadata == right.metadata
+}
+
+fn graph_edge_content_eq(left: &ProjectGraphEdge, right: &ProjectGraphEdge) -> bool {
+    left.id == right.id
+        && left.from == right.from
+        && left.to == right.to
+        && left.kind == right.kind
+        && left.label == right.label
+        && left.source == right.source
+        && (left.confidence - right.confidence).abs() < f32::EPSILON
+}
+
 struct GraphBuilder {
     title: String,
     now: u64,
@@ -796,7 +2134,7 @@ fn default_include_edges() -> bool {
 }
 
 fn schema_version() -> u32 {
-    1
+    6
 }
 
 fn unix_timestamp() -> u64 {
@@ -1062,5 +2400,309 @@ mod tests {
         assert!(result.ok);
         assert!(workspace.read_text(PROJECT_GRAPH_PATH, 1_000_000).is_ok());
         assert!(result.output.contains("\"edge_count\": 0"));
+    }
+
+    #[test]
+    fn scans_persisted_3d_asset_jobs_as_distinct_nodes() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        workspace
+            .write_text(
+                crate::asset_3d::THREE_D_JOBS_PATH,
+                &serde_json::to_string_pretty(&serde_json::json!([{
+                    "id": "3d-test",
+                    "provider": "meshy-3d",
+                    "model": "latest",
+                    "input_kind": "text",
+                    "prompt": "low-poly sci-fi crate",
+                    "source_image": null,
+                    "target_format": "glb",
+                    "target_polycount": 12000,
+                    "enable_pbr": true,
+                    "pose_mode": "",
+                    "license_confirmed": true,
+                    "provider_task_id": "task-1",
+                    "provider_task_kind": "text-preview",
+                    "status": "ready",
+                    "stage": "ready",
+                    "progress": 100,
+                    "output_files": ["assets/generated/3d/crate.glb"],
+                    "validation": null,
+                    "provider_payload": {},
+                    "error": null,
+                    "created_at": 1,
+                    "updated_at": 2
+                }]))
+                .unwrap(),
+            )
+            .unwrap();
+
+        let graph = scan_project_graph(&workspace);
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == ProjectGraphNodeKind::ThreeDAsset)
+            .expect("3D asset node");
+        assert_eq!(node.metadata.get("provider").unwrap(), "meshy-3d");
+        assert_eq!(node.metadata.get("progress").unwrap(), "100");
+        assert!(graph
+            .edges
+            .iter()
+            .any(|edge| { edge.to == node.id && edge.kind == ProjectGraphEdgeKind::Generates }));
+    }
+
+    #[test]
+    fn links_gameplay_plans_and_playtest_runs() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("README.md"), "# Gameplay fixture\n").unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        let plan = crate::unreal_gameplay::create_gameplay_plan(
+            &workspace,
+            crate::unreal_gameplay::CreateGameplayPlanArgs {
+                recipe: crate::unreal_gameplay::GameplayRecipeKind::Interaction,
+                title: Some("Door interaction".to_string()),
+                brief: "Open a selected gameplay door".to_string(),
+                map_path: Some("/Game/Maps/L_Test".to_string()),
+                task_ids: None,
+                roadmap_ids: None,
+            },
+        )
+        .unwrap();
+        crate::unreal_gameplay::record_playtest_result(
+            &workspace,
+            &crate::unreal_gameplay::GameplayPlaytestCommand {
+                id: "playtest-1".to_string(),
+                plan_id: Some(plan.id.clone()),
+                mode: crate::unreal_gameplay::UnrealPlaytestMode::MapSmoke,
+                map_path: plan.map_path.clone(),
+                test_filter: String::new(),
+                report_dir: "assets/generated/leetcode/unreal/gameplay/runs/playtest-1".to_string(),
+                shell_command: "fixture".to_string(),
+                timeout_secs: 30,
+                started_at: 1,
+            },
+            true,
+            "map smoke passed",
+            250,
+        )
+        .unwrap();
+
+        let graph = scan_project_graph(&workspace);
+        let plan_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == ProjectGraphNodeKind::GameplayPlan)
+            .expect("gameplay plan node");
+        let run_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == ProjectGraphNodeKind::GameplayRun)
+            .expect("gameplay run node");
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from == plan_node.id
+                && edge.to == run_node.id
+                && edge.kind == ProjectGraphEdgeKind::Tests
+        }));
+    }
+
+    #[test]
+    fn links_game_production_plan_items_and_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("README.md"), "# Production fixture\n").unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        crate::game_production::create_game_production_plan(
+            &workspace,
+            crate::game_production::CreateGameProductionPlanArgs {
+                title: "Vertical Slice".to_string(),
+                brief: "Build a representative Unreal vertical slice".to_string(),
+                genre: "Action".to_string(),
+                target_platform: "Windows".to_string(),
+                scope: crate::game_production::GameScope::VerticalSlice,
+                source_task_ids: Vec::new(),
+                roadmap_ids: Vec::new(),
+                project_node_id: None,
+            },
+        )
+        .unwrap();
+
+        let graph = scan_project_graph(&workspace);
+        let plan_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == ProjectGraphNodeKind::GameProductionPlan)
+            .expect("game production plan node");
+        let production_items = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == ProjectGraphNodeKind::ProductionItem)
+            .collect::<Vec<_>>();
+
+        assert!(production_items.len() >= 12);
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from == plan_node.id
+                && edge.kind == ProjectGraphEdgeKind::Contains
+                && production_items.iter().any(|node| node.id == edge.to)
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == ProjectGraphEdgeKind::DependsOn
+                && production_items.iter().any(|node| node.id == edge.from)
+                && production_items.iter().any(|node| node.id == edge.to)
+        }));
+    }
+
+    #[test]
+    fn links_vertical_slice_run_phases_and_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("README.md"), "# Vertical slice fixture\n").unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        let plan = crate::game_production::create_game_production_plan(
+            &workspace,
+            crate::game_production::CreateGameProductionPlanArgs {
+                title: "Slice".to_string(),
+                brief: "Representative slice".to_string(),
+                genre: "Action".to_string(),
+                target_platform: "Windows".to_string(),
+                scope: crate::game_production::GameScope::VerticalSlice,
+                source_task_ids: Vec::new(),
+                roadmap_ids: Vec::new(),
+                project_node_id: None,
+            },
+        )
+        .unwrap();
+        crate::vertical_slice::start_vertical_slice_run(
+            &workspace,
+            crate::vertical_slice::StartVerticalSliceRunArgs {
+                production_plan_id: Some(plan.id),
+                title: None,
+            },
+        )
+        .unwrap();
+
+        let graph = scan_project_graph(&workspace);
+        let run_node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == ProjectGraphNodeKind::VerticalSliceRun)
+            .expect("vertical slice run node");
+        let phases = graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == ProjectGraphNodeKind::VerticalSlicePhase)
+            .collect::<Vec<_>>();
+
+        assert_eq!(phases.len(), 7);
+        assert!(graph.edges.iter().any(|edge| {
+            edge.from == run_node.id
+                && edge.kind == ProjectGraphEdgeKind::Contains
+                && phases.iter().any(|node| node.id == edge.to)
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == ProjectGraphEdgeKind::DependsOn
+                && phases.iter().any(|node| node.id == edge.from)
+                && phases.iter().any(|node| node.id == edge.to)
+        }));
+    }
+
+    #[test]
+    fn scans_unreal_project_types_and_asset_dependencies() {
+        let workspace = Workspace::new(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/unreal/SampleGame"),
+        )
+        .unwrap();
+
+        let graph = scan_project_graph(&workspace);
+
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == ProjectGraphNodeKind::UnrealProject));
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == ProjectGraphNodeKind::UnrealModule && node.label == "SampleGame"
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == ProjectGraphNodeKind::UnrealBlueprint && node.label == "BP_Player"
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == ProjectGraphNodeKind::UnrealMap && node.label == "L_Test"
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == ProjectGraphNodeKind::UnrealSkeleton && node.label == "SKEL_Hero"
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == ProjectGraphNodeKind::UnrealSkeletalMesh && node.label == "SK_Hero"
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == ProjectGraphNodeKind::UnrealAnimationBlueprint && node.label == "ABP_Hero"
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.kind == ProjectGraphNodeKind::UnrealStaticMesh && node.label == "SM_Bucket"
+        }));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|edge| edge.kind == ProjectGraphEdgeKind::UsesSkeleton));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|edge| edge.kind == ProjectGraphEdgeKind::Animates));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|edge| edge.kind == ProjectGraphEdgeKind::References));
+        assert!(graph
+            .edges
+            .iter()
+            .any(|edge| edge.kind == ProjectGraphEdgeKind::DependsOn));
+    }
+
+    #[test]
+    fn incremental_refresh_preserves_selection_manual_edges_and_stable_timestamps() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("README.md"), "# Demo\n").unwrap();
+        fs::write(temp.path().join("notes.md"), "notes\n").unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+        let mut graph = scan_project_graph(&workspace);
+        let readme = graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "file:README.md")
+            .unwrap();
+        readme.updated_at = 7;
+        graph.edges.push(ProjectGraphEdge {
+            id: "edge:related_to:file:README.md:file:notes.md".to_string(),
+            from: "file:README.md".to_string(),
+            to: "file:notes.md".to_string(),
+            kind: ProjectGraphEdgeKind::RelatedTo,
+            label: "связано с".to_string(),
+            source: "ui:project_map".to_string(),
+            confidence: 0.8,
+            updated_at: 7,
+        });
+        save_project_graph(&workspace, &graph).unwrap();
+        save_project_graph_selection(&workspace, Some("file:README.md")).unwrap();
+
+        let refreshed = refresh_project_graph(&workspace);
+
+        assert_eq!(
+            refreshed
+                .nodes
+                .iter()
+                .find(|node| node.id == "file:README.md")
+                .unwrap()
+                .updated_at,
+            7
+        );
+        assert!(refreshed
+            .edges
+            .iter()
+            .any(|edge| edge.source == "ui:project_map"));
+        assert_eq!(
+            load_project_graph_selection(&workspace).as_deref(),
+            Some("file:README.md")
+        );
+        assert!(selected_project_node_context_for_prompt(&workspace)
+            .unwrap()
+            .contains("file:README.md"));
     }
 }

@@ -120,33 +120,90 @@ pub fn detect_project_profiles(workspace: &Workspace) -> Vec<ProjectProfile> {
             previews: Vec::new(),
         });
     }
-    if let Some(uproject) = first_file_with_extension(root, "uproject") {
-        let uproject_name = uproject
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("project.uproject")
-            .to_string();
+    let unreal_project_descriptor = first_file_with_extension(root, "uproject");
+    let unreal_plugin_descriptor = first_file_with_extension(root, "uplugin");
+    if unreal_project_descriptor.is_some() || unreal_plugin_descriptor.is_some() {
+        let is_game_project = unreal_project_descriptor.is_some();
+        let snapshot = crate::unreal::unreal_snapshot(workspace);
+        let name = snapshot
+            .project
+            .as_ref()
+            .map(|project| project.name.clone())
+            .or_else(|| {
+                snapshot
+                    .local_plugins
+                    .first()
+                    .map(|plugin| plugin.name.clone())
+            })
+            .unwrap_or_else(|| workspace.display_name());
+        let mut markers = Vec::new();
+        if let Some(project) = &snapshot.project {
+            markers.push(relative_marker(root, &project.path));
+        }
+        markers.extend(
+            snapshot
+                .local_plugins
+                .iter()
+                .map(|plugin| relative_marker(root, &plugin.path)),
+        );
+        if !is_game_project {
+            if let Some(path) = &unreal_plugin_descriptor {
+                let marker = relative_marker(root, &path.to_string_lossy());
+                if !markers.contains(&marker) {
+                    markers.push(marker);
+                }
+            }
+        }
+        let commands = crate::unreal::profile_commands_from_snapshot(workspace, &snapshot)
+            .into_iter()
+            .map(|command| ProjectCommand {
+                id: command.id,
+                label: command.label,
+                command: command.command,
+                cwd: ".".to_string(),
+                description: command.description,
+                timeout_secs: command.timeout_secs,
+            })
+            .collect::<Vec<_>>();
+        let editor_command = commands
+            .iter()
+            .find(|command| command.id == "open_editor")
+            .map(|command| command.id.clone());
         profiles.push(ProjectProfile {
-            kind: "Unreal".to_string(),
-            name: uproject_name.clone(),
-            markers: vec![uproject_name.clone()],
-            commands: vec![ProjectCommand::new(
-                "editor",
-                "Редактор",
-                format!("UnrealEditor \"{uproject_name}\""),
-                "Открыть Unreal-проект в редакторе",
-            )],
-            previews: vec![ProjectPreviewHook::new(
-                "unreal-editor",
-                "Редактор Unreal",
-                None,
-                Some("editor".to_string()),
-                "Открыть редактор Unreal для локального предпросмотра/плейтеста",
-            )],
+            kind: if is_game_project {
+                "Unreal".to_string()
+            } else {
+                "Unreal Plugin".to_string()
+            },
+            name,
+            markers,
+            commands,
+            previews: editor_command
+                .map(|command_id| {
+                    vec![ProjectPreviewHook::new(
+                        "unreal-editor",
+                        "Редактор Unreal",
+                        None,
+                        Some(command_id),
+                        "Открыть обнаруженный Unreal Editor для локального плейтеста",
+                    )]
+                })
+                .unwrap_or_default(),
         });
     }
 
     profiles
+}
+
+fn relative_marker(root: &Path, path: &str) -> String {
+    let root = root.to_string_lossy().replace('\\', "/");
+    let root = root.strip_prefix("//?/").unwrap_or(&root);
+    let path = path.replace('\\', "/");
+    let path = path.strip_prefix("//?/").unwrap_or(&path);
+    path.strip_prefix(root)
+        .map(|relative| relative.trim_start_matches('/'))
+        .unwrap_or(path)
+        .to_string()
 }
 
 pub fn find_project_command(
@@ -254,6 +311,18 @@ fn detect_rust_profile(root: &Path) -> ProjectProfile {
             "Упаковка",
             "powershell -ExecutionPolicy Bypass -File scripts/package-windows.ps1",
             "Собрать portable-пакет, архив и SHA256-манифест",
+        ));
+    }
+    if root
+        .join("scripts")
+        .join("production-preflight.ps1")
+        .is_file()
+    {
+        commands.push(ProjectCommand::new(
+            "production_preflight",
+            "Production preflight",
+            "powershell -ExecutionPolicy Bypass -File scripts/production-preflight.ps1 -Mode Release",
+            "Проверить тесты, бинарники, relay smoke, manifests и release-артефакты",
         ));
     }
     if root.join("Trunk.toml").is_file() || root.join("index.html").is_file() {
@@ -657,6 +726,30 @@ mod tests {
     }
 
     #[test]
+    fn detects_production_preflight_script() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"demo-game\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("scripts")).unwrap();
+        fs::write(
+            temp.path().join("scripts/production-preflight.ps1"),
+            "param([string]$Mode = 'Release')",
+        )
+        .unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+
+        let profiles = detect_project_profiles(&workspace);
+
+        let command =
+            find_project_command(&profiles, "production_preflight", Some("rust")).unwrap();
+        assert!(command.command.contains("production-preflight.ps1"));
+        assert!(command.command.contains("-Mode Release"));
+    }
+
+    #[test]
     fn detects_node_scripts_in_preferred_order() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(
@@ -716,5 +809,47 @@ mod tests {
 
         assert!(find_project_command(&profiles, "serve", Some("rust")).is_some());
         assert!(find_project_preview(&profiles, "trunk-local", Some("rust")).is_some());
+    }
+
+    #[test]
+    fn detects_unreal_fixture_profile() {
+        let workspace = Workspace::new(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/unreal/SampleGame"),
+        )
+        .unwrap();
+
+        let profiles = detect_project_profiles(&workspace);
+        let unreal = profiles
+            .iter()
+            .find(|profile| profile.kind == "Unreal")
+            .expect("Unreal profile");
+
+        assert_eq!(unreal.name, "SampleGame");
+        assert!(unreal
+            .markers
+            .iter()
+            .any(|marker| marker == "SampleGame.uproject"));
+        assert!(unreal
+            .markers
+            .iter()
+            .any(|marker| marker.ends_with("SampleTools.uplugin")));
+    }
+
+    #[test]
+    fn standalone_unreal_plugin_does_not_look_like_game_project() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("EditorToolkit.uplugin"),
+            r#"{"FileVersion":3,"FriendlyName":"Editor Toolkit"}"#,
+        )
+        .unwrap();
+        let workspace = Workspace::new(temp.path().to_path_buf()).unwrap();
+
+        let profiles = detect_project_profiles(&workspace);
+
+        assert!(profiles
+            .iter()
+            .any(|profile| profile.kind == "Unreal Plugin"));
+        assert!(!profiles.iter().any(|profile| profile.kind == "Unreal"));
     }
 }

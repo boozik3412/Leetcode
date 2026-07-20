@@ -204,7 +204,7 @@ pub struct StreamedOpenAiResponse {
 }
 
 pub fn act_tool_schema() -> Value {
-    json!({
+    let mut schema = json!({
         "type": "function",
         "name": "act",
         "description": "Execute one local workspace, project, terminal, or desktop action. Paths must be relative to the selected workspace. Prefer project_command for check/test/run/build when a project profile is detected. run_shell uses PowerShell by default on Windows; pass shell=\"cmd\" only when needed.",
@@ -336,6 +336,396 @@ pub fn act_tool_schema() -> Value {
                                 }
                             },
                             "required": ["command"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["unreal_snapshot"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["unreal_command"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "enum": [
+                                        "generate_project_files",
+                                        "build_editor",
+                                        "open_editor",
+                                        "automation_tests",
+                                        "cook",
+                                        "package",
+                                        "validate",
+                                        "build_plugin"
+                                    ]
+                                },
+                                "target": { "type": "string" },
+                                "platform": { "type": "string" },
+                                "configuration": { "type": "string" },
+                                "test_filter": { "type": "string" },
+                                "output_dir": { "type": "string" }
+                            },
+                            "required": ["command"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["game_production_snapshot"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["create_game_production_plan"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string" },
+                                "brief": { "type": "string" },
+                                "genre": { "type": "string" },
+                                "target_platform": { "type": "string" },
+                                "scope": {
+                                    "type": "string",
+                                    "enum": ["prototype", "vertical_slice", "full_game"]
+                                },
+                                "source_task_ids": { "type": "array", "items": { "type": "string" } },
+                                "roadmap_ids": { "type": "array", "items": { "type": "string" } },
+                                "project_node_id": { "type": "string" }
+                            },
+                            "required": ["title", "brief", "scope"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["update_production_item"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "plan_id": { "type": "string" },
+                                "item_id": { "type": "string" },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["planned", "ready", "in_progress", "blocked", "done"]
+                                },
+                                "artifact": { "type": "string", "description": "Optional existing workspace-relative artifact path." },
+                                "validation": { "type": "string" }
+                            },
+                            "required": ["plan_id", "item_id", "status"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["evaluate_production_gate"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "plan_id": { "type": "string" },
+                                "milestone": {
+                                    "type": "string",
+                                    "enum": ["prototype", "vertical_slice", "alpha", "beta", "release"]
+                                }
+                            },
+                            "required": ["plan_id"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["vertical_slice_snapshot"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["start_vertical_slice_run"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "production_plan_id": { "type": "string" },
+                                "title": { "type": "string" }
+                            },
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["advance_vertical_slice_phase"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "run_id": { "type": "string" },
+                                "phase": {
+                                    "type": "string",
+                                    "enum": [
+                                        "preflight",
+                                        "gameplay_foundation",
+                                        "visual_assets",
+                                        "level_integration",
+                                        "experience",
+                                        "playtest",
+                                        "production_gate"
+                                    ]
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["in_progress", "blocked", "completed"]
+                                },
+                                "evidence": { "type": "string" },
+                                "artifact": {
+                                    "type": "string",
+                                    "description": "Optional existing workspace-relative artifact path."
+                                },
+                                "notes": { "type": "string" }
+                            },
+                            "required": ["run_id", "phase", "status"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["evaluate_vertical_slice_readiness"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "run_id": { "type": "string" }
+                            },
+                            "required": ["run_id"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["gameplay_snapshot"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["create_gameplay_plan"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "recipe": {
+                                    "type": "string",
+                                    "enum": [
+                                        "level_bootstrap",
+                                        "third_person_loop",
+                                        "interaction",
+                                        "pickup_and_inventory",
+                                        "checkpoint",
+                                        "enemy_encounter",
+                                        "pcg_environment",
+                                        "niagara_feedback",
+                                        "enhanced_input",
+                                        "game_hud"
+                                    ]
+                                },
+                                "title": { "type": "string" },
+                                "brief": { "type": "string" },
+                                "map_path": { "type": "string" },
+                                "task_ids": { "type": "array", "items": { "type": "string" } },
+                                "roadmap_ids": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["recipe", "brief"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["apply_gameplay_plan"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "plan_id": { "type": "string" },
+                                "map_path": { "type": "string" },
+                                "create_map": { "type": "boolean" },
+                                "save_level": { "type": "boolean" },
+                                "operations": {
+                                    "type": "array",
+                                    "maxItems": 128,
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "operation": {
+                                                "type": "string",
+                                                "enum": [
+                                                    "load_level",
+                                                    "create_level",
+                                                    "spawn_actor",
+                                                    "add_actor_component",
+                                                    "delete_actor",
+                                                    "set_actor_transform",
+                                                    "set_actor_property",
+                                                    "create_data_asset",
+                                                    "save_level"
+                                                ]
+                                            },
+                                            "actor_label": { "type": "string" },
+                                            "component_name": { "type": "string" },
+                                            "class_path": { "type": "string" },
+                                            "asset_path": { "type": "string" },
+                                            "package_path": { "type": "string" },
+                                            "property": { "type": "string" },
+                                            "value": {},
+                                            "location": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                                            "rotation": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                                            "scale": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                                        },
+                                        "required": ["operation"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["map_path", "operations"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["run_gameplay_playtest"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "plan_id": { "type": "string" },
+                                "mode": { "type": "string", "enum": ["automation", "map_smoke", "movie_render"] },
+                                "map_path": { "type": "string" },
+                                "test_filter": { "type": "string" },
+                                "level_sequence": { "type": "string" },
+                                "movie_pipeline_config": { "type": "string" },
+                                "capture_screenshot": { "type": "boolean" },
+                                "timeout_secs": { "type": "integer", "minimum": 30, "maximum": 1800 }
+                            },
+                            "required": ["mode"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["mcp_snapshot"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["mcp_discover"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "server": { "type": "string" }
+                            },
+                            "required": ["server"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["mcp_call"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "server": { "type": "string" },
+                                "tool": { "type": "string" },
+                                "arguments": {
+                                    "type": "object",
+                                    "description": "JSON arguments accepted by the selected MCP tool."
+                                },
+                                "context_node_id": {
+                                    "type": ["string", "null"],
+                                    "description": "Optional Project Map node id. If omitted, Leetcode attaches the persisted selected node through MCP request _meta."
+                                }
+                            },
+                            "required": ["server", "tool", "arguments"],
                             "additionalProperties": false
                         }
                     },
@@ -934,6 +1324,155 @@ pub fn act_tool_schema() -> Value {
                 {
                     "type": "object",
                     "properties": {
+                        "action": { "type": "string", "enum": ["asset_3d_snapshot"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["submit_3d_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "prompt": { "type": "string" },
+                                "image_path": {
+                                    "type": "string",
+                                    "description": "Optional workspace-relative PNG/JPEG/WebP reference. When present, image-to-3D is used."
+                                },
+                                "provider": { "type": "string", "enum": ["meshy-3d", "tripo-3d"] },
+                                "model": { "type": "string" },
+                                "target_format": { "type": "string", "enum": ["glb", "gltf", "fbx", "usd"] },
+                                "target_polycount": { "type": "integer", "minimum": 48, "maximum": 500000 },
+                                "enable_pbr": { "type": "boolean" },
+                                "pose_mode": { "type": "string", "enum": ["", "a-pose", "t-pose"] },
+                                "license_confirmed": {
+                                    "type": "boolean",
+                                    "description": "True only when the user has confirmed the provider terms/license for project use."
+                                }
+                            },
+                            "required": ["prompt"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["refresh_3d_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": { "job_id": { "type": "string" } },
+                            "required": ["job_id"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["validate_3d_asset"] },
+                        "args": {
+                            "type": "object",
+                            "properties": { "source_path": { "type": "string" } },
+                            "required": ["source_path"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["import_3d_asset_unreal"] },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "source_path": { "type": "string" },
+                                "destination_path": { "type": "string", "description": "Unreal content path under /Game/." },
+                                "asset_type": { "type": "string", "enum": ["static_mesh", "skeletal_mesh", "animation"] },
+                                "skeleton_path": { "type": "string" },
+                                "replace_existing": { "type": "boolean" },
+                                "import_lods": { "type": "boolean" },
+                                "enable_nanite": { "type": "boolean" },
+                                "collision": { "type": "string", "enum": ["auto", "simple", "complex", "none"] },
+                                "license_confirmed": { "type": "boolean" },
+                                "allow_validation_warnings": { "type": "boolean" }
+                            },
+                            "required": ["source_path"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": [
+                                "production_validation_snapshot",
+                                "update_project_map_golden",
+                                "visual_regression_snapshot"
+                            ]
+                        },
+                        "args": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["record_visual_baseline", "compare_visual_snapshot"]
+                        },
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "scenario": {
+                                    "type": "string",
+                                    "enum": [
+                                        "desktop_main",
+                                        "desktop_context",
+                                        "desktop_roadmap",
+                                        "desktop_release",
+                                        "remote_client",
+                                        "remote_pwa"
+                                    ]
+                                },
+                                "path": {
+                                    "type": "string",
+                                    "description": "Путь к PNG-снимку относительно выбранной рабочей папки."
+                                }
+                            },
+                            "required": ["scenario", "path"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "required": ["action", "args"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
                         "action": {
                             "type": "string",
                             "enum": [
@@ -960,6 +1499,16 @@ pub fn act_tool_schema() -> Value {
                                 "export_asset_pack",
                                 "run_replay_eval",
                                 "eval_snapshot",
+                                "self_improvement_snapshot",
+                                "start_self_improvement_experiment",
+                                "decide_self_improvement_experiment",
+                                "prepare_self_improvement_worktree",
+                                "apply_self_improvement_patch",
+                                "register_self_improvement_benchmark",
+                                "run_self_improvement_benchmarks",
+                                "promote_self_improvement_experiment",
+                                "rollback_self_improvement_experiment",
+                                "cleanup_self_improvement_experiment",
                                 "provider_health_snapshot",
                                 "environment_snapshot"
                             ]
@@ -1161,6 +1710,107 @@ pub fn act_tool_schema() -> Value {
             ]
         },
         "strict": false
+    });
+    if let Some(one_of) = schema["parameters"]["oneOf"].as_array_mut() {
+        one_of.extend(game_task_builder_schema_variants());
+    }
+    schema
+}
+
+fn game_task_builder_schema_variants() -> Vec<Value> {
+    vec![
+        strict_act_variant(
+            "project_map_readiness",
+            vec![("refresh_if_stale", json!({ "type": "boolean" }))],
+            &[],
+        ),
+        strict_act_variant(
+            "refresh_project_map_deep",
+            vec![("run_unreal_scan", json!({ "type": "boolean" }))],
+            &[],
+        ),
+        strict_act_variant(
+            "game_task_catalog_snapshot",
+            vec![
+                ("domain_id", json!({ "type": "string" })),
+                ("direction_id", json!({ "type": "string" })),
+            ],
+            &[],
+        ),
+        strict_act_variant(
+            "resolve_game_task_targets",
+            vec![
+                ("operation_id", json!({ "type": "string" })),
+                ("query", json!({ "type": "string" })),
+                (
+                    "limit",
+                    json!({ "type": "integer", "minimum": 1, "maximum": 100 }),
+                ),
+            ],
+            &["operation_id"],
+        ),
+        strict_act_variant(
+            "evaluate_game_task_prerequisites",
+            vec![
+                ("operation_id", json!({ "type": "string" })),
+                (
+                    "target_node_ids",
+                    json!({ "type": "array", "items": { "type": "string" } }),
+                ),
+            ],
+            &["operation_id", "target_node_ids"],
+        ),
+        strict_act_variant(
+            "prepare_game_task_proposal",
+            vec![
+                ("operation_id", json!({ "type": "string" })),
+                (
+                    "target_node_ids",
+                    json!({ "type": "array", "items": { "type": "string" } }),
+                ),
+                (
+                    "remediation_ids",
+                    json!({ "type": "array", "items": { "type": "string" } }),
+                ),
+                ("custom_request", json!({ "type": "string" })),
+            ],
+            &["operation_id", "target_node_ids", "remediation_ids"],
+        ),
+        strict_act_variant(
+            "propose_project_relation",
+            vec![
+                ("from_node_id", json!({ "type": "string" })),
+                ("to_node_id", json!({ "type": "string" })),
+                (
+                    "kind",
+                    json!({ "type": "string", "enum": ["uses_skeleton", "animates", "controlled_by", "has_component", "compatible_with", "spawned_by", "owned_by", "bound_to_input", "produces", "consumes"] }),
+                ),
+                ("reason", json!({ "type": "string" })),
+            ],
+            &["from_node_id", "to_node_id", "kind", "reason"],
+        ),
+        strict_act_variant("game_task_snapshot", Vec::new(), &[]),
+    ]
+}
+
+fn strict_act_variant(action: &str, properties: Vec<(&str, Value)>, required: &[&str]) -> Value {
+    let properties = properties
+        .into_iter()
+        .map(|(name, schema)| (name.to_string(), schema))
+        .collect::<serde_json::Map<String, Value>>();
+    json!({
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "enum": [action] },
+            "args": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false
+            }
+        },
+        "required": ["action", "args"],
+        "additionalProperties": false
     })
 }
 
@@ -1204,6 +1854,23 @@ pub fn gemini_act_function_declaration() -> Value {
                         "apply_patch",
                         "grep",
                         "project_command",
+                        "unreal_snapshot",
+                        "unreal_command",
+                        "game_production_snapshot",
+                        "create_game_production_plan",
+                        "update_production_item",
+                        "evaluate_production_gate",
+                        "vertical_slice_snapshot",
+                        "start_vertical_slice_run",
+                        "advance_vertical_slice_phase",
+                        "evaluate_vertical_slice_readiness",
+                        "gameplay_snapshot",
+                        "create_gameplay_plan",
+                        "apply_gameplay_plan",
+                        "run_gameplay_playtest",
+                        "mcp_snapshot",
+                        "mcp_discover",
+                        "mcp_call",
                         "game_workflow",
                         "open_project_preview",
                         "run_subagent",
@@ -1223,6 +1890,11 @@ pub fn gemini_act_function_declaration() -> Value {
                         "generate_spritesheet_asset",
                         "generate_audio_asset",
                         "generate_video_asset",
+                        "asset_3d_snapshot",
+                        "submit_3d_asset",
+                        "refresh_3d_asset",
+                        "validate_3d_asset",
+                        "import_3d_asset_unreal",
                         "regenerate_image_asset",
                         "vary_image_asset",
                         "upscale_asset",
@@ -1242,6 +1914,14 @@ pub fn gemini_act_function_declaration() -> Value {
                         "record_memory_source",
                         "remove_memory_source",
                         "project_graph_snapshot",
+                        "project_map_readiness",
+                        "refresh_project_map_deep",
+                        "game_task_catalog_snapshot",
+                        "resolve_game_task_targets",
+                        "evaluate_game_task_prerequisites",
+                        "prepare_game_task_proposal",
+                        "propose_project_relation",
+                        "game_task_snapshot",
                         "roadmap_snapshot",
                         "record_milestone",
                         "update_roadmap_item",
@@ -1253,8 +1933,23 @@ pub fn gemini_act_function_declaration() -> Value {
                         "export_asset_pack",
                         "run_replay_eval",
                         "eval_snapshot",
+                        "self_improvement_snapshot",
+                        "start_self_improvement_experiment",
+                        "decide_self_improvement_experiment",
+                        "prepare_self_improvement_worktree",
+                        "apply_self_improvement_patch",
+                        "register_self_improvement_benchmark",
+                        "run_self_improvement_benchmarks",
+                        "promote_self_improvement_experiment",
+                        "rollback_self_improvement_experiment",
+                        "cleanup_self_improvement_experiment",
                         "provider_health_snapshot",
                         "environment_snapshot",
+                        "production_validation_snapshot",
+                        "update_project_map_golden",
+                        "visual_regression_snapshot",
+                        "record_visual_baseline",
+                        "compare_visual_snapshot",
                         "screenshot",
                         "active_window",
                         "focus_window",
@@ -1288,6 +1983,23 @@ fn act_compatible_parameters_schema() -> Value {
                     "apply_patch",
                     "grep",
                     "project_command",
+                    "unreal_snapshot",
+                    "unreal_command",
+                    "game_production_snapshot",
+                    "create_game_production_plan",
+                    "update_production_item",
+                    "evaluate_production_gate",
+                    "vertical_slice_snapshot",
+                    "start_vertical_slice_run",
+                    "advance_vertical_slice_phase",
+                    "evaluate_vertical_slice_readiness",
+                    "gameplay_snapshot",
+                    "create_gameplay_plan",
+                    "apply_gameplay_plan",
+                    "run_gameplay_playtest",
+                    "mcp_snapshot",
+                    "mcp_discover",
+                    "mcp_call",
                     "game_workflow",
                     "open_project_preview",
                     "run_subagent",
@@ -1307,6 +2019,11 @@ fn act_compatible_parameters_schema() -> Value {
                     "generate_spritesheet_asset",
                     "generate_audio_asset",
                     "generate_video_asset",
+                    "asset_3d_snapshot",
+                    "submit_3d_asset",
+                    "refresh_3d_asset",
+                    "validate_3d_asset",
+                    "import_3d_asset_unreal",
                     "regenerate_image_asset",
                     "vary_image_asset",
                     "upscale_asset",
@@ -1326,6 +2043,14 @@ fn act_compatible_parameters_schema() -> Value {
                     "record_memory_source",
                     "remove_memory_source",
                     "project_graph_snapshot",
+                    "project_map_readiness",
+                    "refresh_project_map_deep",
+                    "game_task_catalog_snapshot",
+                    "resolve_game_task_targets",
+                    "evaluate_game_task_prerequisites",
+                    "prepare_game_task_proposal",
+                    "propose_project_relation",
+                    "game_task_snapshot",
                     "roadmap_snapshot",
                     "record_milestone",
                     "update_roadmap_item",
@@ -1337,8 +2062,23 @@ fn act_compatible_parameters_schema() -> Value {
                     "export_asset_pack",
                     "run_replay_eval",
                     "eval_snapshot",
+                    "self_improvement_snapshot",
+                    "start_self_improvement_experiment",
+                    "decide_self_improvement_experiment",
+                    "prepare_self_improvement_worktree",
+                    "apply_self_improvement_patch",
+                    "register_self_improvement_benchmark",
+                    "run_self_improvement_benchmarks",
+                    "promote_self_improvement_experiment",
+                    "rollback_self_improvement_experiment",
+                    "cleanup_self_improvement_experiment",
                     "provider_health_snapshot",
                     "environment_snapshot",
+                    "production_validation_snapshot",
+                    "update_project_map_golden",
+                    "visual_regression_snapshot",
+                    "record_visual_baseline",
+                    "compare_visual_snapshot",
                     "screenshot",
                     "active_window",
                     "focus_window",
@@ -1583,10 +2323,32 @@ mod tests {
             assert!(schema.contains("export_asset"));
             assert!(schema.contains("attach_asset"));
             assert!(schema.contains("project_command"));
+            assert!(schema.contains("unreal_snapshot"));
+            assert!(schema.contains("unreal_command"));
+            assert!(schema.contains("game_production_snapshot"));
+            assert!(schema.contains("create_game_production_plan"));
+            assert!(schema.contains("update_production_item"));
+            assert!(schema.contains("evaluate_production_gate"));
+            assert!(schema.contains("vertical_slice_snapshot"));
+            assert!(schema.contains("start_vertical_slice_run"));
+            assert!(schema.contains("advance_vertical_slice_phase"));
+            assert!(schema.contains("evaluate_vertical_slice_readiness"));
+            assert!(schema.contains("gameplay_snapshot"));
+            assert!(schema.contains("create_gameplay_plan"));
+            assert!(schema.contains("apply_gameplay_plan"));
+            assert!(schema.contains("run_gameplay_playtest"));
+            assert!(schema.contains("mcp_snapshot"));
+            assert!(schema.contains("mcp_discover"));
+            assert!(schema.contains("mcp_call"));
             assert!(schema.contains("regenerate_image_asset"));
             assert!(schema.contains("vary_image_asset"));
             assert!(schema.contains("use_asset_as_app_icon"));
             assert!(schema.contains("open_asset_folder"));
+            assert!(schema.contains("asset_3d_snapshot"));
+            assert!(schema.contains("submit_3d_asset"));
+            assert!(schema.contains("refresh_3d_asset"));
+            assert!(schema.contains("validate_3d_asset"));
+            assert!(schema.contains("import_3d_asset_unreal"));
             assert!(schema.contains("governance_snapshot"));
             assert!(schema.contains("set_tool_enabled"));
             assert!(schema.contains("set_category_enabled"));
@@ -1599,6 +2361,14 @@ mod tests {
             assert!(schema.contains("record_memory_source"));
             assert!(schema.contains("remove_memory_source"));
             assert!(schema.contains("project_graph_snapshot"));
+            assert!(schema.contains("project_map_readiness"));
+            assert!(schema.contains("refresh_project_map_deep"));
+            assert!(schema.contains("game_task_catalog_snapshot"));
+            assert!(schema.contains("resolve_game_task_targets"));
+            assert!(schema.contains("evaluate_game_task_prerequisites"));
+            assert!(schema.contains("prepare_game_task_proposal"));
+            assert!(schema.contains("propose_project_relation"));
+            assert!(schema.contains("game_task_snapshot"));
             assert!(schema.contains("roadmap_snapshot"));
             assert!(schema.contains("record_milestone"));
             assert!(schema.contains("update_roadmap_item"));
@@ -1610,8 +2380,23 @@ mod tests {
             assert!(schema.contains("export_asset_pack"));
             assert!(schema.contains("run_replay_eval"));
             assert!(schema.contains("eval_snapshot"));
+            assert!(schema.contains("self_improvement_snapshot"));
+            assert!(schema.contains("start_self_improvement_experiment"));
+            assert!(schema.contains("decide_self_improvement_experiment"));
+            assert!(schema.contains("prepare_self_improvement_worktree"));
+            assert!(schema.contains("apply_self_improvement_patch"));
+            assert!(schema.contains("register_self_improvement_benchmark"));
+            assert!(schema.contains("run_self_improvement_benchmarks"));
+            assert!(schema.contains("promote_self_improvement_experiment"));
+            assert!(schema.contains("rollback_self_improvement_experiment"));
+            assert!(schema.contains("cleanup_self_improvement_experiment"));
             assert!(schema.contains("provider_health_snapshot"));
             assert!(schema.contains("environment_snapshot"));
+            assert!(schema.contains("production_validation_snapshot"));
+            assert!(schema.contains("update_project_map_golden"));
+            assert!(schema.contains("visual_regression_snapshot"));
+            assert!(schema.contains("record_visual_baseline"));
+            assert!(schema.contains("compare_visual_snapshot"));
             assert!(schema.contains("screenshot"));
             assert!(schema.contains("active_window"));
             assert!(schema.contains("focus_window"));

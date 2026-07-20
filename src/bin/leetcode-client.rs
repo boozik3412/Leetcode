@@ -19,6 +19,20 @@ use relay::{
 const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/app-icon.png");
 
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|argument| argument == "--production-smoke") {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "app": "leetcode-client",
+                "version": env!("CARGO_PKG_VERSION"),
+                "icon_bytes": APP_ICON_PNG.len(),
+                "default_transport": "relay",
+                "mode": "production_smoke"
+            })
+        );
+        return Ok(());
+    }
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1040.0, 760.0])
         .with_min_inner_size([720.0, 520.0]);

@@ -1,0 +1,20 @@
+{
+  "FileVersion": 3,
+  "EngineAssociation": "5.8",
+  "Category": "Games",
+  "Description": "Leetcode Unreal Bridge fixture",
+  "Modules": [
+    {
+      "Name": "SampleGame",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "SampleTools",
+      "Enabled": true,
+      "TargetAllowList": ["Editor"]
+    }
+  ]
+}

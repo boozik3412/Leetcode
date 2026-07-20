@@ -228,7 +228,21 @@ impl RelayRuntimeConfig {
 }
 
 fn main() -> anyhow::Result<()> {
-    let config = Arc::new(RelayRuntimeConfig::from_args(env::args().skip(1)));
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.iter().any(|argument| argument == "--production-smoke") {
+        println!(
+            "{}",
+            json!({
+                "ok": true,
+                "app": "leetcode-relay",
+                "version": env!("CARGO_PKG_VERSION"),
+                "default_url": DEFAULT_RELAY_URL,
+                "mode": "production_smoke"
+            })
+        );
+        return Ok(());
+    }
+    let config = Arc::new(RelayRuntimeConfig::from_args(args));
     let bind = config.bind.clone();
     let listener = TcpListener::bind(&bind)?;
     let state = Arc::new(Mutex::new(RelayState::default()));

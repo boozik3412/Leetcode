@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "object_path": "/Game/Maps/L_Test.L_Test",
+      "package_name": "/Game/Maps/L_Test",
+      "asset_name": "L_Test",
+      "asset_class": "World"
+    },
+    {
+      "object_path": "/Game/Blueprints/BP_Player.BP_Player",
+      "package_name": "/Game/Blueprints/BP_Player",
+      "asset_name": "BP_Player",
+      "asset_class": "Blueprint",
+      "tags": {"ParentClass": "/Script/Engine.Character"},
+      "dependencies": [
+        {"target": "/Game/Data/DA_PlayerTuning", "type": "hard"},
+        {"target": "/Game/Materials/M_Player", "type": "soft"}
+      ]
+    },
+    {
+      "object_path": "/Game/Data/DA_PlayerTuning.DA_PlayerTuning",
+      "package_name": "/Game/Data/DA_PlayerTuning",
+      "asset_name": "DA_PlayerTuning",
+      "asset_class": "PrimaryDataAsset"
+    },
+    {
+      "object_path": "/Game/Materials/M_Player.M_Player",
+      "package_name": "/Game/Materials/M_Player",
+      "asset_name": "M_Player",
+      "asset_class": "Material"
+    },
+    {
+      "object_path": "/Game/VFX/NS_Dash.NS_Dash",
+      "package_name": "/Game/VFX/NS_Dash",
+      "asset_name": "NS_Dash",
+      "asset_class": "NiagaraSystem"
+    },
+    {
+      "object_path": "/Game/Animations/A_Run.A_Run",
+      "package_name": "/Game/Animations/A_Run",
+      "asset_name": "A_Run",
+      "asset_class": "AnimSequence"
+    },
+    {
+      "object_path": "/Game/Characters/BP_Hero.BP_Hero",
+      "package_name": "/Game/Characters/BP_Hero",
+      "asset_name": "BP_Hero",
+      "asset_class": "Blueprint",
+      "tags": {"ParentClass": "/Script/Engine.Character"},
+      "dependencies": [
+        {"target": "/Game/Characters/SK_Hero", "type": "hard"},
+        {"target": "/Game/Characters/ABP_Hero", "type": "hard"}
+      ]
+    },
+    {
+      "object_path": "/Game/Characters/SKEL_Hero.SKEL_Hero",
+      "package_name": "/Game/Characters/SKEL_Hero",
+      "asset_name": "SKEL_Hero",
+      "asset_class": "Skeleton"
+    },
+    {
+      "object_path": "/Game/Characters/SK_Hero.SK_Hero",
+      "package_name": "/Game/Characters/SK_Hero",
+      "asset_name": "SK_Hero",
+      "asset_class": "SkeletalMesh",
+      "tags": {"Skeleton": "/Game/Characters/SKEL_Hero.SKEL_Hero"}
+    },
+    {
+      "object_path": "/Game/Characters/ABP_Hero.ABP_Hero",
+      "package_name": "/Game/Characters/ABP_Hero",
+      "asset_name": "ABP_Hero",
+      "asset_class": "AnimBlueprint",
+      "tags": {
+        "TargetSkeleton": "/Game/Characters/SKEL_Hero.SKEL_Hero",
+        "PreviewSkeletalMesh": "/Game/Characters/SK_Hero.SK_Hero"
+      }
+    },
+    {
+      "object_path": "/Game/Props/SM_Bucket.SM_Bucket",
+      "package_name": "/Game/Props/SM_Bucket",
+      "asset_name": "SM_Bucket",
+      "asset_class": "StaticMesh"
+    }
+  ],
+  "dependencies": [
+    {"from": "/Game/Maps/L_Test", "to": "/Game/Blueprints/BP_Player", "type": "hard"}
+  ]
+}

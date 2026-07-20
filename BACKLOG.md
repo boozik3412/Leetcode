@@ -419,6 +419,162 @@ Leetcode развивается из минимального локальног
 - Done: Добавить действия `Открыть`, `Спросить агента`, `Добавить связь`, `Скрыть`, `Закрепить`.
 - Done: Передавать выбранный узел в контекст агента, чтобы пользователь мог сказать “улучши это” после клика по узлу.
 
+## Этап 36 - Self-Improvement Kernel
+
+Цель: превратить безопасное самоизменение в измеримый экспериментальный цикл: гипотеза, baseline, изменение, проверка, решение и возможность отката.
+
+- Done: Добавить workspace-local журнал экспериментов `assets/generated/leetcode/self_improvement/experiments.json`.
+- Done: Автоматически создавать эксперимент для self-modification запуска и связывать его с restore snapshot и текущим Git HEAD.
+- Done: Записывать критерии успеха, изменённые файлы, результаты `cargo fmt`, `cargo check`, `cargo test` и baseline replay-evals.
+- Done: Добавить agent-callable действия `self_improvement_snapshot`, `start_self_improvement_experiment`, `decide_self_improvement_experiment` с governance и approval.
+- Done: Не разрешать принимать эксперимент до успешного quality gate; сохранять явное решение и его обоснование.
+- Done: Показать эксперименты и ожидающие решения рядом с локальными проверками в UI.
+- Done: Добавить управляемый Git worktree/ветку в `%LOCALAPPDATA%/Leetcode/self-improvement/worktrees` и запретить её создание при грязной основной копии или изменившемся HEAD.
+- Done: Добавить отдельный patch-инструмент, который может менять файлы только внутри записанного worktree кандидата.
+- Done: Добавить benchmark registry с исполняемыми сценариями и сравнением baseline/candidate, включая обязательные `format`, `check`, `test`.
+- Done: Реализовать явный workflow `candidate -> benchmarks -> accept/reject -> fast-forward promotion`.
+- Done: Реализовать rollback продвинутого эксперимента через отдельный `git revert` и управляемую очистку worktree/ветки.
+- Done: Добавить интеграционный тест полного Git-цикла на временном репозитории.
+- Done: Сделать изолированный workflow обязательным по умолчанию для всех self-modification запусков и блокировать прямые mutating tools основной копии, пока существует активный candidate.
+
+## Этап 37 - Unreal Engine 5.8 Bridge
+
+Цель: дать агенту надёжный локальный мост к Unreal Engine 5.8 и стандартным инструментам сборки проекта.
+
+- Done: Обнаруживать установки Unreal Engine, Engine Association проекта, плагины и доступные toolchain-компоненты.
+- Done: Добавить безопасные профили UnrealEditor, UnrealEditor-Cmd, UBT и UAT.
+- Done: Реализовать команды generate project files, build, editor, automation tests, cook, package и project validation.
+- Done: Парсить AutomationTool, compiler и Unreal logs в структурированные ошибки с файлами и предлагаемыми действиями.
+- Done: Добавить тестовый Unreal fixture project и ручной validation checklist для UE 5.8.
+
+## Этап 38 - MCP Runtime и Unreal MCP
+
+Цель: подключать локальные и удалённые MCP-серверы как управляемые возможности агента, начиная с официального Unreal MCP.
+
+- Done: Добавить MCP client runtime для stdio и Streamable HTTP с lifecycle, reconnect и capability discovery.
+- Done: Добавить реестр серверов, per-server permissions, allowed tools, approvals, timeout и audit trail.
+- Done: Подключить Unreal Engine 5.8 MCP Server и показать его состояние в интерфейсе проекта.
+- Done: Защитить MCP-ответы и tool metadata как недоверенный внешний контент и ограничить prompt injection.
+
+## Этап 39 - Unreal Project Intelligence
+
+Цель: расширить карту проекта до понимания модулей, ассетов и игровых связей Unreal.
+
+- Done: Сканировать `.uproject`, `.uplugin`, `Build.cs`, `Target.cs`, Config и Source.
+- Done: Импортировать Asset Registry/dependency export для карт, Blueprints, Data Assets, материалов, Niagara и анимаций.
+- Done: Добавить Unreal-типы узлов и связей в Project Map с инкрементальным обновлением.
+- Done: Передавать выбранный Unreal-узел агенту и MCP-инструментам как точный контекст задачи.
+
+## Этап 40 - 3D Asset Pipeline
+
+Цель: дать агенту воспроизводимый путь от идеи или изображения до готового игрового 3D-ассета в Unreal.
+
+- Done: Добавить provider layer Meshy/Tripo для text/image-to-3D API и асинхронных jobs.
+- Done: Поддержать GLB/glTF, FBX и USD, PBR texture sets, материалы, LOD, Nanite и collision metadata.
+- Done: Добавить валидацию геометрии, масштаба, UV, текстур, лицензии и provenance до импорта.
+- Done: Автоматизировать импорт и переимпорт через Unreal Interchange/Python с MCP-контекстом выбранного узла.
+- Done: Добавить rig, skeleton и animation pipeline как отдельные проверяемые стадии.
+- Done: Встроить 3D jobs в Asset Studio, инструменты агента и Project Map.
+
+## Этап 41 - Gameplay и Level Pipeline
+
+Цель: покрыть агентом основной цикл создания игрового вертикального среза в Unreal Engine.
+
+- Done: Управлять картами, Actors, Components и Data Assets через безопасный Unreal Python manifest; Blueprint/C++ и сложные графы направлять в Unreal MCP/toolchain.
+- Done: Добавить recipes для Gameplay Framework, PCG, Niagara, Enhanced Input, HUD и типовых игровых механик.
+- Done: Автоматизировать Automation/map smoke/Movie Render Queue, сбор отчётов, скриншотов, визуальных/видео-артефактов и логов.
+- Done: Связать gameplay-планы, задачи, roadmap, выбранный Project Map node и конкретные playtest-запуски.
+
+## Этап 42 - Production Validation
+
+Цель: сделать игровой и self-improvement пайплайн воспроизводимым перед релизом.
+
+- Done: Добавить live contract tests провайдеров и MCP-серверов с явным opt-in.
+- Done: Добавить headless Unreal automation, cook/package smoke и golden snapshots карты проекта.
+- Done: Добавить screenshot regression для основных desktop/remote UI-сценариев.
+- Done: Проверять installer, updater, relay и thin client в едином release preflight.
+
+## Этап 43 - Game Production Director
+
+Цель: связать полный цикл разработки игры на Unreal Engine 5.8 в один живой производственный план, где агент понимает масштаб проекта, текущий milestone, потоки работ, зависимости, артефакты и критерии перехода дальше.
+
+- Done: Добавить persistent production state для scope `prototype`, `vertical_slice` и `full_game`.
+- Done: Разбить производство на milestone Prototype, Vertical Slice, Alpha, Beta и Release.
+- Done: Добавить workstreams для геймдизайна, инженерии, gameplay, level design, 2D/3D, анимации, аудио, UI/UX, интеграции, QA и релиза.
+- Done: Реализовать dependency-driven задачи со статусами planned, ready, in progress, blocked и done.
+- Done: Запретить завершение production-задачи без validation или существующего артефакта.
+- Done: Добавить milestone gates: завершённые задачи, успешный gameplay playtest и production validation перед Release.
+- Done: Добавить agent tools, строгие provider schemas, governance и production-контекст в системный prompt.
+- Done: Добавить Game Production в Project Command Center с прогрессом, текущим потоком и быстрыми действиями.
+- Done: Добавить production-планы, задачи, зависимости и артефакты в Project Map.
+- Done: Добавить тесты, документацию и включить Stage 43 в общий production preflight.
+
+## Этап 44 - Vertical Slice Orchestrator
+
+Цель: провести один репрезентативный игровой срез через код, ассеты, Unreal-интеграцию, playtest и production gate как единый возобновляемый run.
+
+- Done: Добавить persistent run state с фазами, зависимостями, evidence, артефактами и журналом переходов.
+- Done: Построить dependency graph Preflight -> Gameplay/Visual Assets -> Level Integration -> Experience -> Playtest -> Production Gate.
+- Done: Разрешить Gameplay Foundation и Visual Assets выполняться параллельно ограниченными субагентами при сохранении главного агента владельцем orchestration state.
+- Done: Добавить live gates для Unreal project/engine/MCP, gameplay plan, import-ready assets, workspace artifacts, playtest и production milestone.
+- Done: Добавить agent tools, строгие provider schemas, governance и Vertical Slice контекст в системный prompt.
+- Done: Добавить Vertical Slice Orchestrator в Project Command Center с прогрессом, ready-фазами, recommended tools и быстрыми действиями.
+- Done: Добавить run, фазы, зависимости и артефакты Vertical Slice в Project Map.
+- Done: Добавить тесты фазового графа, документацию и включить Stage 44 в общий production preflight.
+
+## Этап 45 - Project-Aware Game Task Constructor
+
+Цель: превратить пользовательское намерение в подтверждённую игровую задачу, привязанную к точным узлам Project Map, а не к предположениям модели.
+
+- Done: Добавить persistent-модуль `game_task_builder` с общей сессией для prompt и режима `Проект`.
+- Done: Добавить каталог из 8 сфер, 10 направлений в каждой и 10 операций в каждом направлении: 800 встроенных конечных сценариев и отдельный `Свой вариант`.
+- Done: Сделать первый глубокий Project Map scan обязательным для изменяющих Unreal-задач, а последующие обновления инкрементальными.
+- Done: Добавить readiness-состояния, health-report, Asset Registry/MCP/Engine диагностику и guided remediation.
+- Done: Расширить Project Map типами Skeleton, Skeletal/Static Mesh, Animation Blueprint/Montage, Control Rig, Physics Asset, Sound, UI и Input.
+- Done: Расширить Project Map семантическими связями `uses_skeleton`, `animates`, `controlled_by`, `has_component`, `compatible_with`, `spawned_by`, `owned_by`, `bound_to_input`, `produces`, `consumes` с provenance, confidence и временем обнаружения.
+- Done: Сохранять ручные связи после refresh, а связи агента проводить через proposal с отдельным принятием или отклонением.
+- Done: Реализовать Target Resolver по актуальной карте и детерминированным контрактам; Static Mesh запрещён как цель персонажной анимации.
+- Done: Реализовать диагностику `ready / needs_setup / ambiguous / stale_context / external_tool_required` и варианты подготовки с риском, временем, инструментами и approvals.
+- Done: Добавить структурированную карточку понимания задачи, opt-in улучшения, ускорение/субагентов и действия подтверждения или изменения плана.
+- Done: Создавать immutable `TaskManifest` с graph fingerprint, node IDs и object paths; проверять изменяющие tools и MCP `_meta` по подтверждённому scope.
+- Done: Добавить agent tools, строгие provider schemas, governance, audit events и game-task контекст в системный prompt.
+- Done: Добавить unit-тесты, Unreal fixture `BP_Hero / SK_Hero / ABP_Hero / SM_Bucket`, документацию и live checklist Unreal Engine 5.8.
+- Done: Добавить встроенный Unreal Setup Wizard без терминала: выбор проекта, автообнаружение UE 5.8/toolchain/MCP, диагностика плагинов и запуск анализа одной кнопкой.
+- Done: Добавить безопасное включение `PythonScriptPlugin`, `EditorScriptingUtilities` и опционального `ModelContextProtocol` через подтверждение, allowlist и резервную копию `.uproject`.
+- Done: Оставить env-переменные и PowerShell-команды только для CI/developer live validation, а не для пользовательского сценария конструктора.
+- Done: Добавить очевидный Unreal-onboarding на домашний экран: `Проект открыт -> Project Map -> Задача агенту`, одну главную кнопку старта, состояние анализа и переход к карте проекта.
+- Done: Автоматически открывать мастер подготовки при первом выборе ещё не проанализированного Unreal-проекта; после готовности менять главное действие на `Создать задачу для игры`.
+- Done: Ограничить игровой Unreal-pipeline проектами с реально обнаруженным `.uproject`; для Rust, Node/React, Python, Unity, Godot, standalone-плагинов и обычных папок сохранять их собственный общий сценарий.
+- Done: Перенести конструктор из модального окна в постоянную центральную вкладку рядом с `Agent`, сохранив одну сессию и быстрые точки входа.
+- Done: Убрать повторный readiness scan и пересборку каталога из каждого UI-кадра; кэшировать Project Map readiness и каталог из 800 сценариев.
+- Done: Показывать каталог при частично построенной карте, объяснять ограничение изменяющих операций и выводить статус, длительность и результат последнего глубокого анализа.
+- Done: Заменить технические метрики Project Map на читаемый developer-report: вывод анализа, четыре слоя готовности, состав найденных узлов, расшифровку unresolved/ambiguous и доступные действия.
+- Done: Добавить прямые действия `Открыть Project Map`, `Повторить глубокий анализ`, ручной импорт Asset Registry и запуск Unreal Editor из результата анализа.
+- Done: Исправить Windows-путь headless Python exporter и считать Unreal scan успешным только при фактическом создании нового Asset Registry snapshot.
+- Done: Сделать путь к полной карте однокнопочным: `Завершить анализ автоматически`, а ручной JSON/Editor оставить запасной диагностикой.
+- Done: Поддержать большие Asset Registry до 96 МБ, восстанавливать пустой `object_path` UE 5.8 и экспортировать проектный `/Game` с семантическими tags.
+- Done: Не считать зависимости Engine/плагинов неразрешёнными целями проекта; readiness учитывает только отсутствующие ссылки внутри `/Game`.
+- Done: Устранить чтение и повторное сканирование многомегабайтной Project Map в каждом кадре через workspace-scoped cache.
+- Done: Добавить производительный обзор Project Map по смысловым группам, детальный режим, wheel zoom от курсора, pan, LOD связей и viewport culling.
+- Done: Добавить постоянную вкладку `Проект` в правую рабочую панель: сохранённый итог анализа, готовность данных, состав карты, проблемные места, последний запуск и следующие действия; автоматически открывать её при старте и завершении анализа.
+- Done: Заменить непрозрачный статус `устарела` на контроль реальных изменений: исключить служебные файлы Leetcode из fingerprint, показывать добавленные, изменённые и удалённые входы Unreal-проекта и предлагать синхронизацию карты.
+
+## Этап 46 - Иерархическая Project Map
+
+Цель: заменить нечитаемую матрицу узлов рабочим исследователем структуры, зависимостей и последствий изменений.
+
+- Done: Разделить карту на четыре режима `Обзор`, `Структура`, `Зависимости` и `Влияние` с единым выбранным узлом.
+- Done: Построить ленивое иерархическое дерево по связям `contains` и `declares`, ограничить число одновременно отображаемых ветвей и показывать количество скрытых потомков.
+- Done: Добавить фокусную раскладку: входящие связи слева, выбранный узел в центре, исходящие связи справа; глубина обхода настраивается от одного до трёх уровней.
+- Done: Добавить направленные стрелки, подсветку окружения узла и hover-подсказки для рёбер с понятным названием, техническим типом, источником и confidence.
+- Done: Добавить режим цепочки влияния, поиск узла с переводом фокуса и сохранение выбранного узла как контекста агента/MCP.
+- Done: Не отображать весь граф из тысяч элементов одновременно: применять lazy expansion, лимиты ветвей, кэшированные adjacency-индексы и раскладку только видимого подграфа.
+- Done: Добавить unit-тесты режимов, структурной и направленной раскладки и подписей связей.
+- Done: Заменить бесконечную структурную раскладку локальным браузером ветви: родитель, текущий контейнер, 12 дочерних узлов на страницу и предпросмотр следующего уровня.
+- Done: Кэшировать `contains/declares`-индексы один раз при загрузке карты, чтобы навигация и pan/zoom не пересобирали десятки тысяч связей на каждом кадре.
+- Done: Добавить общую историю фокуса, кнопки назад/вперёд/к родителю/к корню и кликабельные хлебные крошки во всех детальных режимах.
+- Done: Отделить причинное влияние от обычных зависимостей: учитывать семантическое направление `depends_on`, `uses_skeleton`, `controlled_by`, `generates` и других связей, показывать прямые и косвенные последствия отдельными уровнями.
+
 ## Постоянная планка качества
 
 - Every tool that mutates files, runs shell commands, calls paid APIs, or controls the desktop must have policy checks and visible audit logs.
